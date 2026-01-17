@@ -1,5 +1,10 @@
 # Copex - Copilot Extended
 
+[![PyPI version](https://badge.fury.io/py/copex.svg)](https://badge.fury.io/py/copex)
+[![Python 3.10+](https://img.shields.io/badge/python-3.10+-blue.svg)](https://www.python.org/downloads/)
+[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+[![Tests](https://github.com/Arthur742Ramos/copex/actions/workflows/test.yml/badge.svg)](https://github.com/Arthur742Ramos/copex/actions/workflows/test.yml)
+
 A resilient Python wrapper for the GitHub Copilot SDK with automatic retry, Ralph Wiggum loops, session persistence, metrics, parallel tools, and MCP integration.
 
 ## Features
@@ -25,7 +30,7 @@ pip install copex
 Or install from source:
 
 ```bash
-git clone https://github.com/yourname/copex
+git clone https://github.com/Arthur742Ramos/copex
 cd copex
 pip install -e .
 ```
@@ -284,6 +289,10 @@ config = CopexConfig(
 
 - **Ralph Wiggum technique**: [Geoffrey Huntley](https://ghuntley.com/ralph/)
 - **GitHub Copilot SDK**: [github/copilot-sdk](https://github.com/github/copilot-sdk)
+
+## Contributing
+
+Contributions welcome! Please open an issue or PR at [github.com/Arthur742Ramos/copex](https://github.com/Arthur742Ramos/copex).
 
 ## License
 
