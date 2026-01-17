@@ -11,11 +11,6 @@ requires-python = ">=3.10"
 license = "MIT"
 authors = [{ name = "Arthur Ramos", email = "arthur742ramos@users.noreply.github.com" }]
 keywords = ["copilot", "github", "ai", "sdk", "retry", "copex", "ralph-wiggum"]
-
-[project.urls]
-Homepage = "https://github.com/Arthur742Ramos/copex"
-Repository = "https://github.com/Arthur742Ramos/copex"
-Issues = "https://github.com/Arthur742Ramos/copex/issues"
 classifiers = [
     "Development Status :: 3 - Alpha",
     "Intended Audience :: Developers",
@@ -32,6 +27,11 @@ dependencies = [
     "typer>=0.9.0",
     "tomli-w>=1.0.0",
 ]
+
+[project.urls]
+Homepage = "https://github.com/Arthur742Ramos/copex"
+Repository = "https://github.com/Arthur742Ramos/copex"
+Issues = "https://github.com/Arthur742Ramos/copex/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "ruff"]
