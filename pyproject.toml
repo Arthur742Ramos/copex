@@ -1,0 +1,56 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "copex"
+version = "0.1.0"
+description = "Copilot Extended - Resilient wrapper for GitHub Copilot SDK with auto-retry, Ralph Wiggum loops, and more"
+readme = "README.md"
+requires-python = ">=3.10"
+license = "MIT"
+authors = [{ name = "Arthur Ramos", email = "arthur742ramos@users.noreply.github.com" }]
+keywords = ["copilot", "github", "ai", "sdk", "retry", "copex", "ralph-wiggum"]
+
+[project.urls]
+Homepage = "https://github.com/Arthur742Ramos/copex"
+Repository = "https://github.com/Arthur742Ramos/copex"
+Issues = "https://github.com/Arthur742Ramos/copex/issues"
+classifiers = [
+    "Development Status :: 3 - Alpha",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: MIT License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+]
+dependencies = [
+    "github-copilot-sdk>=0.1.0",
+    "pydantic>=2.0.0",
+    "rich>=13.0.0",
+    "typer>=0.9.0",
+    "tomli-w>=1.0.0",
+]
+
+[project.optional-dependencies]
+dev = ["pytest", "pytest-asyncio", "ruff"]
+
+[project.scripts]
+copex = "copex.cli:app"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/copex"]
+
+[tool.hatch.build.targets.sdist]
+include = ["src/copex"]
+
+[tool.ruff]
+line-length = 100
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "W"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "auto"
