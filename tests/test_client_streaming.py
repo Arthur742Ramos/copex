@@ -220,10 +220,85 @@ def test_session_error_raises():
         build_event(EventType.SESSION_ERROR.value, message="boom"),
     ]
     session = FakeSession(events)
-    client = Copex(CopexConfig())
+    # Disable auto_continue and set max_retries=1 for fast failure
+    from copex.config import RetryConfig
+    config = CopexConfig(auto_continue=False, retry=RetryConfig(max_retries=1, base_delay=0.1))
+    client = Copex(config)
     client._started = True
     client._client = DummyClient()
     client._session = session
 
     with pytest.raises(RuntimeError, match="boom"):
         run(client.send("prompt"))
+
+
+def test_auto_continue_after_exhausted_retries():
+    """Test that auto-continue triggers with session recovery after retries exhausted."""
+    call_count = 0
+    prompts_seen = []
+    sessions_created = 0
+
+    class CountingSession:
+        def __init__(self):
+            self._handler = None
+
+        def on(self, handler):
+            self._handler = handler
+            return lambda: None
+
+        async def send(self, options):
+            nonlocal call_count
+            call_count += 1
+            prompts_seen.append(options.get("prompt"))
+            # First few calls fail, then succeed
+            if call_count <= 4:  # 2 retries + 1 auto-continue + 1 more retry
+                if self._handler:
+                    self._handler(SimpleNamespace(
+                        type=EventType.SESSION_ERROR.value,
+                        data=SimpleNamespace(message="500 Internal Server Error")
+                    ))
+            else:
+                if self._handler:
+                    self._handler(SimpleNamespace(
+                        type=EventType.ASSISTANT_MESSAGE.value,
+                        data=SimpleNamespace(content="success!")
+                    ))
+                    self._handler(SimpleNamespace(
+                        type=EventType.SESSION_IDLE.value,
+                        data=None
+                    ))
+
+        async def get_messages(self):
+            return []
+
+        async def destroy(self):
+            pass
+
+    class MockClient:
+        async def start(self):
+            return None
+
+        async def create_session(self, options):
+            nonlocal sessions_created
+            sessions_created += 1
+            return CountingSession()
+
+    from copex.config import RetryConfig
+    config = CopexConfig(
+        auto_continue=True,
+        continue_prompt="Keep going",
+        retry=RetryConfig(max_retries=2, max_auto_continues=2, base_delay=0.1)
+    )
+    client = Copex(config)
+    client._started = True
+    client._client = MockClient()
+    client._session = CountingSession()
+
+    result = run(client.send("original prompt"))
+
+    assert result.content == "success!"
+    assert result.auto_continues >= 1
+    # Session recovery should have created a new session
+    assert sessions_created >= 1
+    # Should have seen recovery prompt (contains "Keep going")
+    assert any("Keep going" in p for p in prompts_seen if p)

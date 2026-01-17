@@ -104,6 +104,70 @@ class Copex:
             self._session = await self._client.create_session(self.config.to_session_options())
         return self._session
 
+    async def _get_session_context(self, session: Any) -> str | None:
+        """Extract conversation context from session for recovery."""
+        try:
+            messages = await session.get_messages()
+            if not messages:
+                return None
+
+            # Build a summary of the conversation
+            context_parts = []
+            for msg in messages:
+                msg_type = getattr(msg, "type", None)
+                msg_value = msg_type.value if hasattr(msg_type, "value") else str(msg_type)
+                data = getattr(msg, "data", None)
+
+                if msg_value == EventType.USER_MESSAGE.value:
+                    content = getattr(data, "content", "") or getattr(data, "prompt", "")
+                    if content:
+                        context_parts.append(f"User: {content[:500]}")
+                elif msg_value == EventType.ASSISTANT_MESSAGE.value:
+                    content = getattr(data, "content", "") or ""
+                    if content:
+                        # Truncate long responses
+                        truncated = content[:1000] + "..." if len(content) > 1000 else content
+                        context_parts.append(f"Assistant: {truncated}")
+
+            if not context_parts:
+                return None
+
+            return "\n\n".join(context_parts[-10:])  # Last 10 messages max
+        except Exception:
+            return None
+
+    async def _recover_session(self, on_chunk: Callable[[StreamChunk], None] | None) -> tuple[Any, str]:
+        """Destroy bad session and create new one, preserving context."""
+        context = None
+        if self._session:
+            context = await self._get_session_context(self._session)
+            try:
+                await self._session.destroy()
+            except Exception:
+                pass
+            self._session = None
+
+        # Create fresh session
+        session = await self._ensure_session()
+
+        # Build recovery prompt with context
+        if context:
+            recovery_prompt = (
+                f"[Session recovered. Previous conversation context:]\n\n"
+                f"{context}\n\n"
+                f"[End of context. {self.config.continue_prompt}]"
+            )
+        else:
+            recovery_prompt = self.config.continue_prompt
+
+        if on_chunk:
+            on_chunk(StreamChunk(
+                type="system",
+                delta="\n[Session recovered with fresh connection]\n",
+            ))
+
+        return session, recovery_prompt
+
     async def send(
         self,
         prompt: str,
@@ -127,7 +191,7 @@ class Copex:
         auto_continues = 0
         last_error: Exception | None = None
 
-        while retries <= self.config.retry.max_retries:
+        while True:
             try:
                 result = await self._send_once(session, prompt, tools, on_chunk)
                 result.retries = retries
@@ -138,25 +202,34 @@ class Copex:
                 last_error = e
                 error_str = str(e)
 
-                if self._should_retry(e):
-                    retries += 1
-                    if retries <= self.config.retry.max_retries:
-                        delay = self._calculate_delay(retries - 1)
-                        if on_chunk:
-                            on_chunk(StreamChunk(
-                                type="system",
-                                delta=f"\n[Retry {retries}/{self.config.retry.max_retries} after error: {error_str[:50]}...]\n",
-                            ))
-                        await asyncio.sleep(delay)
+                if not self._should_retry(e):
+                    raise
 
-                        # Try auto-continue if enabled
-                        if self.config.auto_continue:
-                            auto_continues += 1
-                            prompt = self.config.continue_prompt
-                        continue
-                raise
-
-        raise last_error or RuntimeError("Max retries exceeded")
+                retries += 1
+                if retries <= self.config.retry.max_retries:
+                    # Normal retry with exponential backoff (same session)
+                    delay = self._calculate_delay(retries - 1)
+                    if on_chunk:
+                        on_chunk(StreamChunk(
+                            type="system",
+                            delta=f"\n[Retry {retries}/{self.config.retry.max_retries} after error: {error_str[:50]}...]\n",
+                        ))
+                    await asyncio.sleep(delay)
+                elif self.config.auto_continue and auto_continues < self.config.retry.max_auto_continues:
+                    # Retries exhausted - session may be in bad state
+                    # Recover with fresh session, preserving context
+                    auto_continues += 1
+                    retries = 0
+                    session, prompt = await self._recover_session(on_chunk)
+                    delay = self._calculate_delay(0)
+                    if on_chunk:
+                        on_chunk(StreamChunk(
+                            type="system",
+                            delta=f"\n[Auto-continue #{auto_continues}/{self.config.retry.max_auto_continues} with fresh session]\n",
+                        ))
+                    await asyncio.sleep(delay)
+                else:
+                    raise last_error or RuntimeError("Max retries exceeded")
 
     async def _send_once(
         self,
@@ -415,8 +488,14 @@ class Copex:
     def new_session(self) -> None:
         """Start a fresh session (clears conversation history)."""
         if self._session:
-            asyncio.create_task(self._session.destroy())
+            session = self._session
             self._session = None
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                asyncio.run(session.destroy())
+            else:
+                loop.create_task(session.destroy())
 
 
 @asynccontextmanager

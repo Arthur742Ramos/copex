@@ -35,6 +35,7 @@ class ReasoningEffort(str, Enum):
 class EventType(str, Enum):
     """Copilot session event types."""
 
+    USER_MESSAGE = "user.message"
     ASSISTANT_MESSAGE = "assistant.message"
     ASSISTANT_MESSAGE_DELTA = "assistant.message_delta"
     ASSISTANT_REASONING = "assistant.reasoning"

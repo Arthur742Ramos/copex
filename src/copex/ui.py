@@ -12,6 +12,7 @@ from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
+from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
@@ -44,6 +45,78 @@ class Theme:
     BORDER_ACTIVE = "cyan"
     HEADER = "bold cyan"
     SUBHEADER = "bold white"
+
+
+THEME_PRESETS = {
+    "default": {
+        "PRIMARY": "cyan",
+        "SECONDARY": "blue",
+        "ACCENT": "magenta",
+        "SUCCESS": "green",
+        "WARNING": "yellow",
+        "ERROR": "red",
+        "INFO": "blue",
+        "REASONING": "dim italic",
+        "MESSAGE": "white",
+        "CODE": "bright_white",
+        "MUTED": "dim",
+        "BORDER": "bright_black",
+        "BORDER_ACTIVE": "cyan",
+        "HEADER": "bold cyan",
+        "SUBHEADER": "bold white",
+    },
+    "midnight": {
+        "PRIMARY": "bright_cyan",
+        "SECONDARY": "bright_blue",
+        "ACCENT": "bright_magenta",
+        "SUCCESS": "bright_green",
+        "WARNING": "bright_yellow",
+        "ERROR": "bright_red",
+        "INFO": "bright_blue",
+        "REASONING": "dim italic",
+        "MESSAGE": "white",
+        "CODE": "bright_white",
+        "MUTED": "grey70",
+        "BORDER": "grey39",
+        "BORDER_ACTIVE": "bright_cyan",
+        "HEADER": "bold bright_cyan",
+        "SUBHEADER": "bold bright_white",
+    },
+    "mono": {
+        "PRIMARY": "white",
+        "SECONDARY": "white",
+        "ACCENT": "white",
+        "SUCCESS": "white",
+        "WARNING": "white",
+        "ERROR": "white",
+        "INFO": "white",
+        "REASONING": "dim",
+        "MESSAGE": "white",
+        "CODE": "white",
+        "MUTED": "dim",
+        "BORDER": "grey66",
+        "BORDER_ACTIVE": "white",
+        "HEADER": "bold white",
+        "SUBHEADER": "bold white",
+    },
+    "sunset": {
+        "PRIMARY": "bright_yellow",
+        "SECONDARY": "bright_red",
+        "ACCENT": "bright_magenta",
+        "SUCCESS": "green",
+        "WARNING": "yellow",
+        "ERROR": "red",
+        "INFO": "bright_yellow",
+        "REASONING": "dim italic",
+        "MESSAGE": "white",
+        "CODE": "bright_white",
+        "MUTED": "grey70",
+        "BORDER": "grey39",
+        "BORDER_ACTIVE": "bright_yellow",
+        "HEADER": "bold bright_yellow",
+        "SUBHEADER": "bold bright_white",
+    },
+}
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -105,6 +178,7 @@ class ToolCallInfo:
     result: str | None = None
     status: str = "running"  # running, success, error
     duration: float | None = None
+    started_at: float = field(default_factory=time.time)
 
     @property
     def icon(self) -> str:
@@ -124,6 +198,12 @@ class ToolCallInfo:
             return Icons.GLOBE
         return Icons.TOOL
 
+    @property
+    def elapsed(self) -> float:
+        if self.duration is not None:
+            return self.duration
+        return time.time() - self.started_at
+
 
 @dataclass
 class UIState:
@@ -135,6 +215,7 @@ class UIState:
     start_time: float = field(default_factory=time.time)
     model: str = ""
     retries: int = 0
+    last_update: float = field(default_factory=time.time)
 
     @property
     def elapsed(self) -> float:
@@ -149,6 +230,19 @@ class UIState:
         seconds = elapsed % 60
         return f"{minutes}m {seconds:.0f}s"
 
+    @property
+    def idle(self) -> float:
+        return time.time() - self.last_update
+
+    @property
+    def idle_str(self) -> str:
+        idle = self.idle
+        if idle < 60:
+            return f"{idle:.1f}s"
+        minutes = int(idle // 60)
+        seconds = idle % 60
+        return f"{minutes}m {seconds:.0f}s"
+
 
 # ═══════════════════════════════════════════════════════════════════════════════
 # UI Components
@@ -157,17 +251,24 @@ class UIState:
 class CopexUI:
     """Beautiful UI for Copex CLI."""
 
-    def __init__(self, console: Console | None = None):
+    def __init__(self, console: Console | None = None, *, theme: str = "default", density: str = "extended"):
         self.console = console or Console()
+        self.set_theme(theme)
+        self.density = density
         self.state = UIState()
         self._live: Live | None = None
         self._spinners = ["◐", "◓", "◑", "◒"]
         self._spinner_idx = 0
+        self._max_live_message_chars = 2000 if density == "extended" else 900
+        self._max_live_reasoning_chars = 800 if density == "extended" else 320
 
     def _get_spinner(self) -> str:
         """Get current spinner frame."""
-        self._spinner_idx = (self._spinner_idx + 1) % len(self._spinners)
         return self._spinners[self._spinner_idx]
+
+    def _advance_frame(self) -> None:
+        """Advance animation frame."""
+        self._spinner_idx = (self._spinner_idx + 1) % len(self._spinners)
 
     def _build_header(self) -> Text:
         """Build the header with model and status."""
@@ -216,8 +317,8 @@ class CopexUI:
 
         # Truncate for live display
         reasoning = self.state.reasoning
-        if len(reasoning) > 500:
-            reasoning = reasoning[-500:] + "..."
+        if len(reasoning) > self._max_live_reasoning_chars:
+            reasoning = "..." + reasoning[-self._max_live_reasoning_chars:]
 
         content = Text(reasoning, style=Theme.REASONING)
         if self.state.activity == ActivityType.REASONING:
@@ -227,8 +328,9 @@ class CopexUI:
             content,
             title=f"[{Theme.ACCENT}]{Icons.BRAIN} Reasoning[/{Theme.ACCENT}]",
             title_align="left",
-            border_style=Theme.BORDER,
+            border_style=Theme.BORDER_ACTIVE if self.state.activity == ActivityType.REASONING else Theme.BORDER,
             padding=(0, 1),
+            box=ROUNDED,
         )
 
     def _build_tool_calls_panel(self) -> Panel | None:
@@ -236,9 +338,23 @@ class CopexUI:
         if not self.state.tool_calls:
             return None
 
+        spinner = self._get_spinner()
+        running = sum(1 for t in self.state.tool_calls if t.status == "running")
+        successful = sum(1 for t in self.state.tool_calls if t.status == "success")
+        failed = sum(1 for t in self.state.tool_calls if t.status == "error")
+        title_parts = [f"{Icons.TOOL} Tools"]
+        if running:
+            title_parts.append(f"{running} running")
+        if successful:
+            title_parts.append(f"{successful} ok")
+        if failed:
+            title_parts.append(f"{failed} failed")
+        title = f"[{Theme.WARNING}]{' • '.join(title_parts)}[/{Theme.WARNING}]"
+
         tree = Tree(f"[{Theme.WARNING}]{Icons.TOOL} Tool Calls[/{Theme.WARNING}]")
 
-        for tool in self.state.tool_calls[-5:]:  # Show last 5
+        max_tools = 5 if self.density == "extended" else 3
+        for tool in self.state.tool_calls[-max_tools:]:
             status_style = {
                 "running": Theme.WARNING,
                 "success": Theme.SUCCESS,
@@ -247,16 +363,22 @@ class CopexUI:
 
             # Build tool info
             tool_text = Text()
+            status_icon = spinner if tool.status == "running" else (
+                Icons.DONE if tool.status == "success" else Icons.ERROR
+            )
+            tool_text.append(f"{status_icon} ", style=status_style)
             tool_text.append(f"{tool.icon} ", style=status_style)
             tool_text.append(tool.name, style=f"bold {status_style}")
 
             # Add key arguments (truncated)
-            if tool.arguments:
+            if tool.arguments and self.density == "extended":
                 args_preview = self._format_args_preview(tool.arguments)
                 if args_preview:
                     tool_text.append(f" {args_preview}", style=Theme.MUTED)
 
-            if tool.duration:
+            if tool.status == "running":
+                tool_text.append(f" ({tool.elapsed:.1f}s)", style=Theme.MUTED)
+            elif tool.duration:
                 tool_text.append(f" ({tool.duration:.1f}s)", style=Theme.MUTED)
 
             branch = tree.add(tool_text)
@@ -268,13 +390,22 @@ class CopexUI:
                     result_preview += "..."
                 branch.add(Text(result_preview, style=Theme.MUTED))
 
-        if len(self.state.tool_calls) > 5:
-            tree.add(Text(f"... and {len(self.state.tool_calls) - 5} more", style=Theme.MUTED))
+        if len(self.state.tool_calls) > max_tools:
+            tree.add(Text(f"... and {len(self.state.tool_calls) - max_tools} more", style=Theme.MUTED))
+
+        border_style = Theme.BORDER
+        if self.state.activity == ActivityType.TOOL_CALL or running:
+            border_style = Theme.BORDER_ACTIVE
+        if failed:
+            border_style = Theme.ERROR
 
         return Panel(
             tree,
-            border_style=Theme.BORDER,
+            title=title,
+            title_align="left",
+            border_style=border_style,
             padding=(0, 1),
+            box=ROUNDED,
         )
 
     def _format_args_preview(self, args: dict[str, Any], max_len: int = 60) -> str:
@@ -301,7 +432,10 @@ class CopexUI:
             return None
 
         # For live display, show raw text with cursor
-        content = Text(self.state.message)
+        message = self.state.message
+        if len(message) > self._max_live_message_chars:
+            message = "..." + message[-self._max_live_message_chars:]
+        content = Text(message, style=Theme.MESSAGE)
         if self.state.activity == ActivityType.RESPONDING:
             content.append("▌", style=f"bold {Theme.PRIMARY}")
 
@@ -311,18 +445,108 @@ class CopexUI:
             title_align="left",
             border_style=Theme.BORDER_ACTIVE if self.state.activity == ActivityType.RESPONDING else Theme.BORDER,
             padding=(0, 1),
+            box=ROUNDED,
+        )
+
+    def _build_status_panel(self) -> Panel:
+        """Build a status panel with live progress details."""
+        activity = self._build_activity_indicator()
+        message_chars = len(self.state.message)
+        reasoning_chars = len(self.state.reasoning)
+        running_tools = sum(1 for t in self.state.tool_calls if t.status == "running")
+        successful_tools = sum(1 for t in self.state.tool_calls if t.status == "success")
+        failed_tools = sum(1 for t in self.state.tool_calls if t.status == "error")
+
+        message_text = Text()
+        message_text.append(f"{Icons.ROBOT} ", style=Theme.PRIMARY)
+        message_text.append(f"{message_chars} chars", style=Theme.PRIMARY)
+
+        reasoning_text = Text()
+        reasoning_text.append(f"{Icons.BRAIN} ", style=Theme.ACCENT)
+        reasoning_text.append(f"{reasoning_chars} chars", style=Theme.ACCENT)
+
+        tools_text = Text()
+        tools_text.append(f"{Icons.TOOL} ", style=Theme.WARNING)
+        if not self.state.tool_calls:
+            tools_text.append("no tools", style=Theme.MUTED)
+        else:
+            parts = []
+            if running_tools:
+                parts.append(f"{running_tools} running")
+            if successful_tools:
+                parts.append(f"{successful_tools} ok")
+            if failed_tools:
+                parts.append(f"{failed_tools} failed")
+            tools_text.append(" • ".join(parts), style=Theme.WARNING if not failed_tools else Theme.ERROR)
+
+        elapsed_text = Text()
+        elapsed_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
+        elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
+
+        updated_text = Text()
+        updated_text.append(f"{Icons.SPARKLE} ", style=Theme.MUTED)
+        updated_text.append(f"updated {self.state.idle_str} ago", style=Theme.MUTED)
+
+        model_text = Text()
+        if self.state.model:
+            model_text.append(f"{Icons.ROBOT} ", style=Theme.PRIMARY)
+            model_text.append(self.state.model, style=Theme.MUTED)
+        else:
+            model_text.append(f"{Icons.ROBOT} default model", style=Theme.MUTED)
+
+        retry_text = Text()
+        if self.state.retries:
+            retry_text.append(f"{Icons.WARNING} ", style=Theme.WARNING)
+            retry_text.append(f"{self.state.retries} retries", style=Theme.WARNING)
+        else:
+            retry_text.append(f"{Icons.DONE} no retries", style=Theme.MUTED)
+
+        grid = Table.grid(expand=True)
+        grid.add_column(justify="left")
+        if self.density == "extended":
+            grid.add_column(justify="center")
+            grid.add_column(justify="right")
+            grid.add_row(activity, elapsed_text, updated_text)
+            grid.add_row(message_text, reasoning_text, tools_text)
+            grid.add_row(model_text, Text(), retry_text)
+        else:
+            grid.add_column(justify="right")
+            grid.add_row(activity, elapsed_text)
+            grid.add_row(message_text, tools_text)
+
+        progress_bar = self._build_progress_bar()
+
+        if self.state.activity == ActivityType.ERROR:
+            border_style = Theme.ERROR
+        elif self.state.activity == ActivityType.DONE:
+            border_style = Theme.SUCCESS
+        elif self.state.activity == ActivityType.WAITING:
+            border_style = Theme.BORDER
+        else:
+            border_style = Theme.BORDER_ACTIVE
+
+        title = f"[{Theme.PRIMARY}]{Icons.ROBOT} Copex[/{Theme.PRIMARY}]"
+        if self.state.model:
+            title += f" [{Theme.MUTED}]• {self.state.model}[/{Theme.MUTED}]"
+
+        content = Group(grid, Text(), progress_bar) if self.density == "extended" else Group(grid, progress_bar)
+
+        return Panel(
+            content,
+            title=title,
+            title_align="left",
+            border_style=border_style,
+            padding=(0, 1),
+            box=ROUNDED,
         )
 
     def build_live_display(self) -> Group:
         """Build the complete live display."""
+        self._advance_frame()
         elements = []
 
-        # Header
-        elements.append(self._build_header())
-        elements.append(Text())  # Spacer
-
-        # Activity indicator
-        elements.append(self._build_activity_indicator())
+        # Status panel
+        elements.append(self._build_status_panel())
         elements.append(Text())  # Spacer
 
         # Reasoning (if any)
@@ -349,30 +573,15 @@ class CopexUI:
         elements = []
 
         # Reasoning panel (collapsed/summary)
-        if self.state.reasoning:
+        if self.state.reasoning and self.density == "extended":
             elements.append(Panel(
                 Markdown(self.state.reasoning),
                 title=f"[{Theme.ACCENT}]{Icons.BRAIN} Reasoning[/{Theme.ACCENT}]",
                 title_align="left",
                 border_style=Theme.BORDER,
                 padding=(0, 1),
+                box=ROUNDED,
             ))
-            elements.append(Text())
-
-        # Tool calls summary
-        if self.state.tool_calls:
-            successful = sum(1 for t in self.state.tool_calls if t.status == "success")
-            failed = sum(1 for t in self.state.tool_calls if t.status == "error")
-
-            summary = Text()
-            summary.append(f"{Icons.TOOL} ", style=Theme.WARNING)
-            summary.append(f"{len(self.state.tool_calls)} tool calls", style=Theme.WARNING)
-            if successful:
-                summary.append(f" • {Icons.DONE} {successful} succeeded", style=Theme.SUCCESS)
-            if failed:
-                summary.append(f" • {Icons.ERROR} {failed} failed", style=Theme.ERROR)
-
-            elements.append(summary)
             elements.append(Text())
 
         # Main response with markdown
@@ -386,13 +595,8 @@ class CopexUI:
                 box=ROUNDED,
             ))
 
-        # Footer with stats
-        footer = Text()
-        footer.append(f"\n{Icons.DONE} ", style=Theme.SUCCESS)
-        footer.append(f"Completed in {self.state.elapsed_str}", style=Theme.MUTED)
-        if self.state.retries > 0:
-            footer.append(f" • {self.state.retries} retries", style=Theme.WARNING)
-        elements.append(footer)
+        # Summary panel
+        elements.append(self._build_summary_panel())
 
         return Group(*elements)
 
@@ -407,23 +611,27 @@ class CopexUI:
     def set_activity(self, activity: ActivityType) -> None:
         """Set the current activity."""
         self.state.activity = activity
+        self._touch()
 
     def add_reasoning(self, delta: str) -> None:
         """Add reasoning content."""
         self.state.reasoning += delta
         if self.state.activity != ActivityType.REASONING:
             self.state.activity = ActivityType.REASONING
+        self._touch()
 
     def add_message(self, delta: str) -> None:
         """Add message content."""
         self.state.message += delta
         if self.state.activity != ActivityType.RESPONDING:
             self.state.activity = ActivityType.RESPONDING
+        self._touch()
 
     def add_tool_call(self, tool: ToolCallInfo) -> None:
         """Add a tool call."""
         self.state.tool_calls.append(tool)
         self.state.activity = ActivityType.TOOL_CALL
+        self._touch()
 
     def update_tool_call(self, name: str, status: str, result: str | None = None, duration: float | None = None) -> None:
         """Update a tool call status."""
@@ -433,10 +641,16 @@ class CopexUI:
                 tool.result = result
                 tool.duration = duration
                 break
+        if self.state.activity == ActivityType.TOOL_CALL:
+            running_tools = any(tool.status == "running" for tool in self.state.tool_calls)
+            if not running_tools:
+                self.state.activity = ActivityType.THINKING
+        self._touch()
 
     def increment_retries(self) -> None:
         """Increment retry count."""
         self.state.retries += 1
+        self._touch()
 
     def set_final_content(self, message: str, reasoning: str | None = None) -> None:
         """Set final content."""
@@ -445,6 +659,97 @@ class CopexUI:
         if reasoning:
             self.state.reasoning = reasoning
         self.state.activity = ActivityType.DONE
+        self._touch()
+
+    def _touch(self) -> None:
+        """Update last activity timestamp."""
+        self.state.last_update = time.time()
+
+    def _build_summary_panel(self) -> Panel:
+        """Build a summary panel for completed output."""
+        summary = Table.grid(expand=True)
+        summary.add_column(justify="left")
+        summary.add_column(justify="right")
+
+        elapsed_text = Text()
+        elapsed_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
+        elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
+
+        retry_text = Text()
+        if self.state.retries:
+            retry_text.append(f"{Icons.WARNING} ", style=Theme.WARNING)
+            retry_text.append(f"{self.state.retries} retries", style=Theme.WARNING)
+        else:
+            retry_text.append(f"{Icons.DONE} no retries", style=Theme.MUTED)
+
+        summary.add_row(elapsed_text, retry_text)
+
+        if self.state.tool_calls:
+            successful = sum(1 for t in self.state.tool_calls if t.status == "success")
+            failed = sum(1 for t in self.state.tool_calls if t.status == "error")
+            tool_left = Text()
+            tool_left.append(f"{Icons.TOOL} ", style=Theme.WARNING)
+            tool_left.append(f"{len(self.state.tool_calls)} tool calls", style=Theme.WARNING)
+
+            tool_right = Text()
+            if successful:
+                tool_right.append(f"{Icons.DONE} {successful} ok", style=Theme.SUCCESS)
+            if failed:
+                if tool_right:
+                    tool_right.append(" • ", style=Theme.MUTED)
+                tool_right.append(f"{Icons.ERROR} {failed} failed", style=Theme.ERROR)
+            summary.add_row(tool_left, tool_right)
+
+        return Panel(
+            summary,
+            title=f"[{Theme.SUCCESS}]{Icons.DONE} Summary[/{Theme.SUCCESS}]",
+            title_align="left",
+            border_style=Theme.BORDER_ACTIVE,
+            padding=(0, 1),
+            box=ROUNDED,
+        )
+
+    def _build_progress_bar(self, width: int = 28) -> Text:
+        """Build a smooth animated progress bar."""
+        if self.density == "compact":
+            width = min(20, width)
+        if width < 10:
+            width = 10
+        pos = self._spinner_idx % width
+        trail = max(1, width // 6)
+        bar = ["░"] * width
+        for offset in range(trail):
+            idx = (pos - offset) % width
+            bar[idx] = "█" if offset == 0 else "▓"
+
+        if self.state.activity == ActivityType.ERROR:
+            color = Theme.ERROR
+        elif self.state.activity == ActivityType.DONE:
+            color = Theme.SUCCESS
+        elif self.state.activity == ActivityType.TOOL_CALL:
+            color = Theme.WARNING
+        elif self.state.activity == ActivityType.REASONING:
+            color = Theme.ACCENT
+        elif self.state.activity == ActivityType.RESPONDING:
+            color = Theme.SUCCESS
+        else:
+            color = Theme.PRIMARY
+
+        bar_text = Text()
+        bar_text.append("Progress ", style=Theme.MUTED)
+        bar_text.append("[" + "".join(bar) + "]", style=color)
+        return bar_text
+
+    def set_theme(self, theme: str) -> None:
+        """Apply a theme preset."""
+        apply_theme(theme)
+
+
+def apply_theme(theme: str) -> None:
+    """Apply a theme preset globally."""
+    palette = THEME_PRESETS.get(theme, THEME_PRESETS["default"])
+    for key, value in palette.items():
+        setattr(Theme, key, value)
 
 
 # ═══════════════════════════════════════════════════════════════════════════════

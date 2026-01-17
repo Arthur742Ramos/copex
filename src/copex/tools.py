@@ -190,25 +190,53 @@ class ToolRegistry:
 
         async def limited_execute(name: str, params: dict) -> ToolResult:
             async with semaphore:
+                if self.config.retry_on_error:
+                    return await self.execute_with_retry(name, params)
                 return await self.execute(name, params)
 
-        tasks = [limited_execute(name, params) for name, params in calls]
-        results = await asyncio.gather(*tasks, return_exceptions=True)
+        tasks: list[asyncio.Task] = []
+        task_map: dict[asyncio.Task, int] = {}
+        for idx, (name, params) in enumerate(calls):
+            task = asyncio.create_task(limited_execute(name, params))
+            tasks.append(task)
+            task_map[task] = idx
 
-        # Convert exceptions to ToolResults
-        final_results = []
-        for i, result in enumerate(results):
-            if isinstance(result, Exception):
-                name = calls[i][0]
-                final_results.append(ToolResult(
-                    name=name,
-                    success=False,
-                    error=str(result),
-                ))
-            else:
-                final_results.append(result)
+        results: list[ToolResult | None] = [None] * len(calls)
+        pending = set(tasks)
 
-        return final_results
+        try:
+            for task in asyncio.as_completed(tasks):
+                idx = task_map[task]
+                try:
+                    result = await task
+                except Exception as exc:
+                    result = ToolResult(
+                        name=calls[idx][0],
+                        success=False,
+                        error=str(exc),
+                    )
+
+                results[idx] = result
+                pending.discard(task)
+
+                if self.config.fail_fast and not result.success:
+                    for pending_task in pending:
+                        pending_task.cancel()
+                    break
+        finally:
+            if pending:
+                await asyncio.gather(*pending, return_exceptions=True)
+
+        if self.config.fail_fast and any(r is None for r in results):
+            for idx, result in enumerate(results):
+                if result is None:
+                    results[idx] = ToolResult(
+                        name=calls[idx][0],
+                        success=False,
+                        error="Cancelled due to fail_fast",
+                    )
+
+        return [result for result in results if result is not None]
 
     async def execute_with_retry(
         self,

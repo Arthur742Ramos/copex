@@ -35,7 +35,8 @@ from copex.ui import (
 app = typer.Typer(
     name="copex",
     help="Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops.",
-    no_args_is_help=True,
+    no_args_is_help=False,
+    invoke_without_command=True,
 )
 console = Console()
 
@@ -60,6 +61,22 @@ def reasoning_callback(value: str | None) -> ReasoningEffort | None:
     except ValueError:
         valid = ", ".join(r.value for r in ReasoningEffort)
         raise typer.BadParameter(f"Invalid reasoning effort. Valid: {valid}")
+
+
+@app.callback(invoke_without_command=True)
+def main(
+    ctx: typer.Context,
+    model: Annotated[
+        str, typer.Option("--model", "-m", help="Model to use")
+    ] = Model.GPT_5_2_CODEX.value,
+    reasoning: Annotated[
+        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.XHIGH.value,
+) -> None:
+    """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
+    if ctx.invoked_subcommand is None:
+        # No command provided - launch interactive mode
+        interactive(model=model, reasoning=reasoning)
 
 
 def _build_prompt_session() -> PromptSession:
@@ -112,6 +129,12 @@ def chat(
     raw: Annotated[
         bool, typer.Option("--raw", help="Output raw text without formatting")
     ] = False,
+    ui_theme: Annotated[
+        Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
+    ] = None,
+    ui_density: Annotated[
+        Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
+    ] = None,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors."""
     # Load config
@@ -135,6 +158,10 @@ def chat(
 
     config.retry.max_retries = max_retries
     config.streaming = not no_stream
+    if ui_theme:
+        config.ui_theme = ui_theme
+    if ui_density:
+        config.ui_density = ui_density
 
     # Get prompt from stdin if not provided
     if prompt is None:
@@ -190,7 +217,7 @@ async def _stream_response(
     client: Copex, prompt: str, show_reasoning: bool
 ) -> None:
     """Stream response with beautiful live updates."""
-    ui = CopexUI(console)
+    ui = CopexUI(console, theme=client.config.ui_theme, density=client.config.ui_density)
     ui.reset(model=client.config.model.value)
     ui.set_activity(ActivityType.THINKING)
 
@@ -327,6 +354,8 @@ def init(
             "exponential_base": 2.0,
             "retry_on_errors": ["500", "502", "503", "504", "Internal Server Error", "rate limit"],
         },
+        "ui_theme": "default",
+        "ui_density": "extended",
     }
 
     with open(path, "wb") as f:
@@ -343,6 +372,12 @@ def interactive(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.XHIGH.value,
+    ui_theme: Annotated[
+        Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
+    ] = None,
+    ui_density: Annotated[
+        Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
+    ] = None,
 ) -> None:
     """Start an interactive chat session."""
     try:
@@ -354,7 +389,13 @@ def interactive(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    print_welcome(console, config.model.value, config.reasoning_effort.value)
+    print_welcome(
+        console,
+        config.model.value,
+        config.reasoning_effort.value,
+        theme=config.ui_theme,
+        density=config.ui_density,
+    )
     asyncio.run(_interactive_loop(config))
 
 
@@ -363,6 +404,21 @@ async def _interactive_loop(config: CopexConfig) -> None:
     client = Copex(config)
     await client.start()
     session = _build_prompt_session()
+
+    def show_help() -> None:
+        console.print(f"\n[{Theme.MUTED}]Commands:[/{Theme.MUTED}]")
+        console.print(f"  [{Theme.PRIMARY}]/model <name>[/{Theme.PRIMARY}]     - Change model (e.g., /model gpt-5.1-codex)")
+        console.print(f"  [{Theme.PRIMARY}]/reasoning <level>[/{Theme.PRIMARY}] - Change reasoning (low, medium, high, xhigh)")
+        console.print(f"  [{Theme.PRIMARY}]/models[/{Theme.PRIMARY}]            - List available models")
+        console.print(f"  [{Theme.PRIMARY}]/new[/{Theme.PRIMARY}]               - Start new session")
+        console.print(f"  [{Theme.PRIMARY}]/status[/{Theme.PRIMARY}]            - Show current settings")
+        console.print(f"  [{Theme.PRIMARY}]/help[/{Theme.PRIMARY}]              - Show this help")
+        console.print(f"  [{Theme.PRIMARY}]exit[/{Theme.PRIMARY}]               - Exit\n")
+
+    def show_status() -> None:
+        console.print(f"\n[{Theme.MUTED}]Current settings:[/{Theme.MUTED}]")
+        console.print(f"  Model:     [{Theme.PRIMARY}]{client.config.model.value}[/{Theme.PRIMARY}]")
+        console.print(f"  Reasoning: [{Theme.PRIMARY}]{client.config.reasoning_effort.value}[/{Theme.PRIMARY}]\n")
 
     try:
         while True:
@@ -376,15 +432,63 @@ async def _interactive_loop(config: CopexConfig) -> None:
             prompt = prompt.strip()
             if not prompt:
                 continue
+
             command = prompt.lower()
+
             if command in {"exit", "quit"}:
                 break
+
             if command in {"new", "/new"}:
                 client.new_session()
                 console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Started new session[/{Theme.SUCCESS}]\n")
                 continue
+
             if command in {"help", "/help"}:
-                console.print(f"\n[{Theme.MUTED}]Commands: exit, new, help[/{Theme.MUTED}]\n")
+                show_help()
+                continue
+
+            if command in {"status", "/status"}:
+                show_status()
+                continue
+
+            if command in {"models", "/models"}:
+                console.print(f"\n[{Theme.MUTED}]Available models:[/{Theme.MUTED}]")
+                for m in Model:
+                    marker = " ← current" if m == client.config.model else ""
+                    console.print(f"  [{Theme.PRIMARY}]{m.value}[/{Theme.PRIMARY}]{marker}")
+                console.print()
+                continue
+
+            if command.startswith("/model ") or command.startswith("model "):
+                parts = prompt.split(maxsplit=1)
+                if len(parts) < 2:
+                    console.print(f"[{Theme.ERROR}]Usage: /model <model-name>[/{Theme.ERROR}]")
+                    continue
+                model_name = parts[1].strip()
+                try:
+                    new_model = Model(model_name)
+                    client.config.model = new_model
+                    client.new_session()  # Need new session for model change
+                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_model.value} (new session started)[/{Theme.SUCCESS}]\n")
+                except ValueError:
+                    console.print(f"[{Theme.ERROR}]Unknown model: {model_name}[/{Theme.ERROR}]")
+                    console.print(f"[{Theme.MUTED}]Use /models to see available models[/{Theme.MUTED}]")
+                continue
+
+            if command.startswith("/reasoning ") or command.startswith("reasoning "):
+                parts = prompt.split(maxsplit=1)
+                if len(parts) < 2:
+                    console.print(f"[{Theme.ERROR}]Usage: /reasoning <level>[/{Theme.ERROR}]")
+                    continue
+                level = parts[1].strip()
+                try:
+                    new_reasoning = ReasoningEffort(level)
+                    client.config.reasoning_effort = new_reasoning
+                    client.new_session()  # Need new session for reasoning change
+                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_reasoning.value} reasoning (new session started)[/{Theme.SUCCESS}]\n")
+                except ValueError:
+                    valid = ", ".join(r.value for r in ReasoningEffort)
+                    console.print(f"[{Theme.ERROR}]Invalid reasoning level. Valid: {valid}[/{Theme.ERROR}]")
                 continue
 
             try:
@@ -401,7 +505,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
 
 async def _stream_response_interactive(client: Copex, prompt: str) -> None:
     """Stream response with beautiful UI in interactive mode."""
-    ui = CopexUI(console)
+    ui = CopexUI(console, theme=client.config.ui_theme, density=client.config.ui_density)
     ui.reset(model=client.config.model.value)
     ui.set_activity(ActivityType.THINKING)
 
@@ -664,8 +768,12 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.3.2"
+__version__ = "0.4.0"
 
 
 if __name__ == "__main__":
     app()
+    if ui_theme:
+        config.ui_theme = ui_theme
+    if ui_density:
+        config.ui_density = ui_density

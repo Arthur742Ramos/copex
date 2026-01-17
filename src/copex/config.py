@@ -6,7 +6,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, field_validator
 
 from copex.models import Model, ReasoningEffort
 
@@ -78,10 +78,15 @@ def find_copilot_cli() -> str | None:
     return None
 
 
+UI_THEMES = {"default", "midnight", "mono", "sunset"}
+UI_DENSITIES = {"compact", "extended"}
+
+
 class RetryConfig(BaseModel):
     """Retry configuration."""
 
     max_retries: int = Field(default=5, ge=1, le=20, description="Maximum retry attempts")
+    max_auto_continues: int = Field(default=3, ge=0, le=10, description="Maximum auto-continue cycles after exhausting retries")
     base_delay: float = Field(default=1.0, ge=0.1, description="Base delay between retries (seconds)")
     max_delay: float = Field(default=30.0, ge=1.0, description="Maximum delay between retries (seconds)")
     exponential_base: float = Field(default=2.0, ge=1.5, description="Exponential backoff multiplier")
@@ -155,6 +160,32 @@ class CopexConfig(BaseModel):
         description="Blacklist of tools to disable"
     )
 
+    # UI options
+    ui_theme: str = Field(
+        default="default",
+        description="UI theme (default, midnight, mono, sunset)"
+    )
+    ui_density: str = Field(
+        default="extended",
+        description="UI density (compact or extended)"
+    )
+
+    @field_validator("ui_theme")
+    @classmethod
+    def _validate_ui_theme(cls, value: str) -> str:
+        if value not in UI_THEMES:
+            valid = ", ".join(sorted(UI_THEMES))
+            raise ValueError(f"Invalid ui_theme. Valid: {valid}")
+        return value
+
+    @field_validator("ui_density")
+    @classmethod
+    def _validate_ui_density(cls, value: str) -> str:
+        if value not in UI_DENSITIES:
+            valid = ", ".join(sorted(UI_DENSITIES))
+            raise ValueError(f"Invalid ui_density. Valid: {valid}")
+        return value
+
     @classmethod
     def from_file(cls, path: str | Path) -> "CopexConfig":
         """Load configuration from TOML file."""
@@ -209,24 +240,24 @@ class CopexConfig(BaseModel):
         if self.instructions:
             opts["instructions"] = self.instructions
         elif self.instructions_file:
-            try:
-                with open(self.instructions_file, "r", encoding="utf-8") as f:
-                    opts["instructions"] = f.read()
-            except Exception:
-                pass
+            instructions_path = Path(self.instructions_file)
+            if not instructions_path.exists():
+                raise FileNotFoundError(f"Instructions file not found: {instructions_path}")
+            with open(instructions_path, "r", encoding="utf-8") as f:
+                opts["instructions"] = f.read()
 
         # MCP servers
         if self.mcp_servers:
             opts["mcp_servers"] = self.mcp_servers
         elif self.mcp_config_file:
-            try:
-                import json
-                with open(self.mcp_config_file, "r", encoding="utf-8") as f:
-                    mcp_data = json.load(f)
-                    if "servers" in mcp_data:
-                        opts["mcp_servers"] = list(mcp_data["servers"].values())
-            except Exception:
-                pass
+            config_path = Path(self.mcp_config_file)
+            if not config_path.exists():
+                raise FileNotFoundError(f"MCP config file not found: {config_path}")
+            import json
+            with open(config_path, "r", encoding="utf-8") as f:
+                mcp_data = json.load(f)
+                if "servers" in mcp_data:
+                    opts["mcp_servers"] = list(mcp_data["servers"].values())
 
         # Tool filtering
         if self.available_tools is not None:

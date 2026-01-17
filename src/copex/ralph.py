@@ -123,12 +123,10 @@ class RalphWiggum:
 
         consecutive_errors = 0
 
-        # Build the system message for Ralph
-        ralph_instructions = self._build_ralph_instructions()
-
         try:
             while not self._cancelled:
                 self._state.iteration += 1
+                ralph_instructions = self._build_ralph_instructions()
 
                 # Check max iterations
                 if self._state.max_iterations and self._state.iteration > self._state.max_iterations:
