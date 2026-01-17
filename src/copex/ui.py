@@ -756,7 +756,13 @@ def apply_theme(theme: str) -> None:
 # Utility Functions
 # ═══════════════════════════════════════════════════════════════════════════════
 
-def print_welcome(console: Console, model: str, reasoning: str) -> None:
+def print_welcome(
+    console: Console,
+    model: str,
+    reasoning: str,
+    theme: str | None = None,
+    density: str | None = None,
+) -> None:
     """Print the welcome banner."""
     console.print()
     console.print(Panel(
