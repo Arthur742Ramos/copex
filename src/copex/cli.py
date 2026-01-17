@@ -65,8 +65,8 @@ def chat(
         bool, typer.Option("--no-stream", help="Disable streaming output")
     ] = False,
     show_reasoning: Annotated[
-        bool, typer.Option("--show-reasoning", help="Show model reasoning")
-    ] = False,
+        bool, typer.Option("--show-reasoning/--no-reasoning", help="Show model reasoning")
+    ] = True,
     config_file: Annotated[
         Optional[Path], typer.Option("--config", "-c", help="Config file path")
     ] = None,
@@ -154,6 +154,7 @@ async def _stream_response(
     content = ""
     reasoning = ""
     retries = 0
+    live_display: Live | None = None
 
     def on_chunk(chunk: StreamChunk) -> None:
         nonlocal content, reasoning
@@ -162,37 +163,43 @@ async def _stream_response(
                 content = chunk.content or content
             else:
                 content += chunk.delta
+            # Update live display dynamically as chunks arrive
+            if live_display:
+                live_display.update(Text(content + "▌"))
         elif chunk.type == "reasoning":
             if chunk.is_final:
                 reasoning = chunk.content or reasoning
             else:
                 reasoning += chunk.delta
+            # Show reasoning in real-time if enabled
+            if live_display and show_reasoning:
+                output = Text()
+                output.append("─── Reasoning ───\n", style="dim")
+                output.append(reasoning + "▌\n", style="dim italic")
+                if content:
+                    output.append("\n─── Response ───\n", style="dim")
+                    output.append(content)
+                live_display.update(output)
         elif chunk.type == "system":
             # Retry notification
             console.print(f"[yellow]{chunk.delta.strip()}[/yellow]")
 
-    with Live(console=console, refresh_per_second=10) as live:
+    with Live(console=console, refresh_per_second=15) as live:
+        live_display = live
         response = await client.send(prompt, on_chunk=on_chunk)
         retries = response.retries
 
-        # Update live display
-        output = Text()
-        if show_reasoning and reasoning:
-            output.append("─── Reasoning ───\n", style="dim")
-            output.append(reasoning + "\n\n", style="dim italic")
-            output.append("─── Response ───\n", style="dim")
-        output.append(content)
-        live.update(output)
+        # Final update with formatted markdown (remove cursor)
+        live.update(Markdown(content))
 
-    # Final formatted output
-    console.print()
+    # Show reasoning panel after streaming if requested
     if show_reasoning and reasoning:
+        console.print()
         console.print(Panel(
             Markdown(reasoning),
             title="[dim]Reasoning[/dim]",
             border_style="dim",
         ))
-    console.print(Markdown(content))
 
     if retries > 0:
         console.print(f"\n[dim]Completed with {retries} retries[/dim]")
