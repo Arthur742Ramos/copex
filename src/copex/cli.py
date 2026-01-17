@@ -404,5 +404,106 @@ async def _run_ralph(
         await client.stop()
 
 
+@app.command("login")
+def login() -> None:
+    """Login to GitHub (uses GitHub CLI for authentication)."""
+    import shutil
+    import subprocess
+    
+    # Check for gh CLI
+    gh_path = shutil.which("gh")
+    if not gh_path:
+        console.print("[red]Error: GitHub CLI (gh) not found.[/red]")
+        console.print("Install it from: [bold]https://cli.github.com/[/bold]")
+        console.print("\nOr with:")
+        console.print("  Windows: [bold]winget install GitHub.cli[/bold]")
+        console.print("  macOS:   [bold]brew install gh[/bold]")
+        console.print("  Linux:   [bold]sudo apt install gh[/bold]")
+        raise typer.Exit(1)
+    
+    console.print("[blue]Opening browser for GitHub authentication...[/blue]\n")
+    
+    try:
+        result = subprocess.run([gh_path, "auth", "login"], check=False)
+        if result.returncode == 0:
+            console.print("\n[green]✓ Successfully logged in![/green]")
+            console.print("You can now use [bold]copex chat[/bold]")
+        else:
+            console.print("\n[yellow]Login may have failed. Check status with:[/yellow]")
+            console.print("  [bold]copex status[/bold]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("logout")
+def logout() -> None:
+    """Logout from GitHub."""
+    import shutil
+    import subprocess
+    
+    gh_path = shutil.which("gh")
+    if not gh_path:
+        console.print("[red]Error: GitHub CLI (gh) not found.[/red]")
+        raise typer.Exit(1)
+    
+    try:
+        result = subprocess.run([gh_path, "auth", "logout"], check=False)
+        if result.returncode == 0:
+            console.print("[green]✓ Logged out[/green]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+
+@app.command("status")
+def status() -> None:
+    """Check Copilot CLI and GitHub authentication status."""
+    import shutil
+    import subprocess
+    from copex.config import find_copilot_cli
+    
+    cli_path = find_copilot_cli()
+    gh_path = shutil.which("gh")
+    
+    # Get copilot version
+    copilot_version = "N/A"
+    if cli_path:
+        try:
+            result = subprocess.run(
+                [cli_path, "--version"],
+                capture_output=True, text=True, timeout=5
+            )
+            copilot_version = result.stdout.strip() or result.stderr.strip()
+        except Exception:
+            pass
+    
+    console.print(Panel(
+        f"[bold]Copex Version:[/bold] {__version__}\n"
+        f"[bold]Copilot CLI:[/bold] {cli_path or '[red]Not found[/red]'}\n"
+        f"[bold]Copilot Version:[/bold] {copilot_version}\n"
+        f"[bold]GitHub CLI:[/bold] {gh_path or '[red]Not found[/red]'}",
+        title="Copex Status",
+        border_style="blue",
+    ))
+    
+    if not cli_path:
+        console.print("\n[red]Copilot CLI not found.[/red]")
+        console.print("Install: [bold]npm install -g @github/copilot[/bold]")
+    
+    if gh_path:
+        console.print("\n[bold]GitHub Auth Status:[/bold]")
+        try:
+            subprocess.run([gh_path, "auth", "status"], check=False)
+        except Exception as e:
+            console.print(f"[red]Error checking status: {e}[/red]")
+    else:
+        console.print("\n[yellow]GitHub CLI not found - cannot check auth status[/yellow]")
+        console.print("Install: [bold]https://cli.github.com/[/bold]")
+
+
+__version__ = "0.1.0"
+
+
 if __name__ == "__main__":
     app()
