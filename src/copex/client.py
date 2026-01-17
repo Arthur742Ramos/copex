@@ -322,8 +322,10 @@ class Copex:
             except Exception:
                 pass
 
-        # If we never got explicit content events, try to extract a final message from history
-        if not received_content:
+        # If we never got explicit content events and NOT streaming, try to extract from history
+        # When streaming (on_chunk provided), we trust the streamed chunks and don't use history
+        # fallback which could return stale content from previous turns
+        if not received_content and on_chunk is None:
             try:
                 messages = await session.get_messages()
                 for message in reversed(messages):

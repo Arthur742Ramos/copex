@@ -245,7 +245,10 @@ async def _stream_response(
         refresh_task = asyncio.create_task(refresh_loop())
         try:
             response = await client.send(prompt, on_chunk=on_chunk)
-            ui.set_final_content(response.content, response.reasoning if show_reasoning else None)
+            # Prefer streamed content over response object (which may have stale fallback)
+            final_message = ui.state.message if ui.state.message else response.content
+            final_reasoning = (ui.state.reasoning if ui.state.reasoning else response.reasoning) if show_reasoning else None
+            ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
         finally:
             refresh_stop.set()
@@ -449,7 +452,10 @@ async def _stream_response_interactive(client: Copex, prompt: str) -> None:
         refresh_task = asyncio.create_task(refresh_loop())
         try:
             response = await client.send(prompt, on_chunk=on_chunk)
-            ui.set_final_content(response.content, response.reasoning)
+            # Prefer streamed content over response object (which may have stale fallback)
+            final_message = ui.state.message if ui.state.message else response.content
+            final_reasoning = ui.state.reasoning if ui.state.reasoning else response.reasoning
+            ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
         finally:
             refresh_stop.set()
