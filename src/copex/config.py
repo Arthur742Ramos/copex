@@ -113,7 +113,7 @@ class CopexConfig(BaseModel):
     log_level: str = Field(default="warning", description="Log level")
 
     # Session options
-    timeout: float = Field(default=300.0, ge=10.0, description="Response timeout (seconds)")
+    timeout: float = Field(default=300.0, ge=10.0, description="Inactivity timeout (seconds) - resets on each event")
     auto_continue: bool = Field(
         default=True, description="Auto-send 'Keep going' on interruption/error"
     )

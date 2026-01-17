@@ -8,6 +8,9 @@ from pathlib import Path
 from typing import Annotated, Optional
 
 import typer
+from prompt_toolkit import PromptSession
+from prompt_toolkit.history import FileHistory
+from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -18,6 +21,19 @@ from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig
 from copex.models import Model, ReasoningEffort
 from copex.ralph import RalphWiggum, RalphState
+from copex.ui import (
+    CopexUI,
+    ActivityType,
+    ToolCallInfo,
+    Theme,
+    Icons,
+    print_welcome,
+    print_user_prompt,
+    print_error,
+    print_retry,
+    print_tool_call,
+    print_tool_result,
+)
 
 app = typer.Typer(
     name="copex",
@@ -47,6 +63,32 @@ def reasoning_callback(value: str | None) -> ReasoningEffort | None:
     except ValueError:
         valid = ", ".join(r.value for r in ReasoningEffort)
         raise typer.BadParameter(f"Invalid reasoning effort. Valid: {valid}")
+
+
+def _build_prompt_session() -> PromptSession:
+    history_path = Path.home() / ".copex" / "history"
+    history_path.parent.mkdir(parents=True, exist_ok=True)
+    bindings = KeyBindings()
+
+    @bindings.add("enter")
+    def _(event) -> None:
+        buffer = event.app.current_buffer
+        if buffer.document.text.strip():
+            buffer.validate_and_handle()
+        else:
+            buffer.reset()
+
+    @bindings.add("s-enter")
+    def _(event) -> None:
+        event.app.current_buffer.insert_text("\n")
+
+    return PromptSession(
+        message="copilot> ",
+        history=FileHistory(str(history_path)),
+        key_bindings=bindings,
+        multiline=True,
+        prompt_continuation=lambda width, line_number, is_soft_wrap: "... ",
+    )
 
 
 @app.command()
@@ -150,59 +192,83 @@ async def _run_chat(
 async def _stream_response(
     client: Copex, prompt: str, show_reasoning: bool
 ) -> None:
-    """Stream response with live updates."""
-    content = ""
-    reasoning = ""
-    retries = 0
+    """Stream response with beautiful live updates."""
+    ui = CopexUI(console)
+    ui.reset(model=client.config.model.value)
+    ui.set_activity(ActivityType.THINKING)
+    
     live_display: Live | None = None
 
     def on_chunk(chunk: StreamChunk) -> None:
-        nonlocal content, reasoning
         if chunk.type == "message":
             if chunk.is_final:
-                content = chunk.content or content
+                ui.set_final_content(chunk.content or ui.state.message, ui.state.reasoning)
             else:
-                content += chunk.delta
-            # Update live display dynamically as chunks arrive
-            if live_display:
-                live_display.update(Text(content + "▌"))
+                ui.add_message(chunk.delta)
         elif chunk.type == "reasoning":
-            if chunk.is_final:
-                reasoning = chunk.content or reasoning
-            else:
-                reasoning += chunk.delta
-            # Show reasoning in real-time if enabled
-            if live_display and show_reasoning:
-                output = Text()
-                output.append("─── Reasoning ───\n", style="dim")
-                output.append(reasoning + "▌\n", style="dim italic")
-                if content:
-                    output.append("\n─── Response ───\n", style="dim")
-                    output.append(content)
-                live_display.update(output)
+            if show_reasoning:
+                if chunk.is_final:
+                    pass  # Already captured incrementally
+                else:
+                    ui.add_reasoning(chunk.delta)
+        elif chunk.type == "tool_call":
+            tool = ToolCallInfo(
+                name=chunk.tool_name or "unknown",
+                arguments=chunk.tool_args or {},
+                status="running",
+            )
+            ui.add_tool_call(tool)
         elif chunk.type == "system":
             # Retry notification
+            ui.increment_retries()
+            print_retry(console, ui.state.retries, client.config.retry.max_retries, chunk.delta)
+        
+        # Update the live display
+        if live_display:
+            live_display.update(ui.build_live_display())
+
+    with Live(console=console, refresh_per_second=12, transient=True) as live:
+        live_display = live
+        live.update(ui.build_live_display())
+        response = await client.send(prompt, on_chunk=on_chunk)
+        ui.set_final_content(response.content, response.reasoning if show_reasoning else None)
+        ui.state.retries = response.retries
+
+    # Print final beautiful output
+    console.print(ui.build_final_display())
+
+
+async def _stream_response_plain(client: Copex, prompt: str) -> None:
+    """Stream response as plain text."""
+    content = ""
+    retries = 0
+
+    def on_chunk(chunk: StreamChunk) -> None:
+        nonlocal content
+        if chunk.type == "message":
+            if chunk.is_final:
+                if chunk.content:
+                    content = chunk.content
+                return
+            if chunk.delta:
+                content += chunk.delta
+                sys.stdout.write(chunk.delta)
+                sys.stdout.flush()
+        elif chunk.type == "system":
             console.print(f"[yellow]{chunk.delta.strip()}[/yellow]")
 
-    with Live(console=console, refresh_per_second=15) as live:
-        live_display = live
-        response = await client.send(prompt, on_chunk=on_chunk)
-        retries = response.retries
-
-        # Final update with formatted markdown (remove cursor)
-        live.update(Markdown(content))
-
-    # Show reasoning panel after streaming if requested
-    if show_reasoning and reasoning:
-        console.print()
-        console.print(Panel(
-            Markdown(reasoning),
-            title="[dim]Reasoning[/dim]",
-            border_style="dim",
-        ))
+    response = await client.send(prompt, on_chunk=on_chunk)
+    retries = response.retries
+    if response.content and response.content != content:
+        if response.content.startswith(content):
+            sys.stdout.write(response.content[len(content):])
+        else:
+            sys.stdout.write(response.content)
+    sys.stdout.write("\n")
+    sys.stdout.flush()
 
     if retries > 0:
-        console.print(f"\n[dim]Completed with {retries} retries[/dim]")
+        console.print(f"[dim]Completed with {retries} retries[/dim]")
 
 
 @app.command()
@@ -265,17 +331,7 @@ def interactive(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    console.print(Panel(
-        f"[bold]Copex[/bold] - Copilot Extended\n"
-        f"Model: {config.model.value}\n"
-        f"Reasoning: {config.reasoning_effort.value}\n"
-        f"Auto-retry: {config.retry.max_retries}x\n"
-        f"Ralph Wiggum: Active 🧠",
-        title="Interactive Mode",
-        border_style="blue",
-    ))
-    console.print("[dim]Type 'exit' or Ctrl+C to quit, 'new' for fresh session[/dim]\n")
-
+    print_welcome(console, config.model.value, config.reasoning_effort.value)
     asyncio.run(_interactive_loop(config))
 
 
@@ -283,35 +339,84 @@ async def _interactive_loop(config: CopexConfig) -> None:
     """Run interactive chat loop."""
     client = Copex(config)
     await client.start()
+    session = _build_prompt_session()
 
     try:
         while True:
             try:
-                prompt = console.input("[bold blue]>[/bold blue] ")
+                prompt = await session.prompt_async()
             except EOFError:
+                break
+            except KeyboardInterrupt:
                 break
 
             prompt = prompt.strip()
             if not prompt:
                 continue
-            if prompt.lower() == "exit":
+            command = prompt.lower()
+            if command in {"exit", "quit"}:
                 break
-            if prompt.lower() == "new":
+            if command in {"new", "/new"}:
                 client.new_session()
-                console.print("[dim]Started new session[/dim]\n")
+                console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Started new session[/{Theme.SUCCESS}]\n")
+                continue
+            if command in {"help", "/help"}:
+                console.print(f"\n[{Theme.MUTED}]Commands: exit, new, help[/{Theme.MUTED}]\n")
                 continue
 
-            console.print()
             try:
-                await _stream_response(client, prompt, show_reasoning=False)
+                print_user_prompt(console, prompt)
+                await _stream_response_interactive(client, prompt)
             except Exception as e:
-                console.print(f"[red]Error: {e}[/red]")
-            console.print()
+                print_error(console, str(e))
 
     except KeyboardInterrupt:
-        console.print("\n[yellow]Goodbye![/yellow]")
+        console.print(f"\n[{Theme.WARNING}]{Icons.INFO} Goodbye![/{Theme.WARNING}]")
     finally:
         await client.stop()
+
+
+async def _stream_response_interactive(client: Copex, prompt: str) -> None:
+    """Stream response with beautiful UI in interactive mode."""
+    ui = CopexUI(console)
+    ui.reset(model=client.config.model.value)
+    ui.set_activity(ActivityType.THINKING)
+    
+    live_display: Live | None = None
+
+    def on_chunk(chunk: StreamChunk) -> None:
+        if chunk.type == "message":
+            if chunk.is_final:
+                ui.set_final_content(chunk.content or ui.state.message, ui.state.reasoning)
+            else:
+                ui.add_message(chunk.delta)
+        elif chunk.type == "reasoning":
+            if chunk.is_final:
+                pass
+            else:
+                ui.add_reasoning(chunk.delta)
+        elif chunk.type == "tool_call":
+            tool = ToolCallInfo(
+                name=chunk.tool_name or "unknown",
+                arguments=chunk.tool_args or {},
+                status="running",
+            )
+            ui.add_tool_call(tool)
+        elif chunk.type == "system":
+            ui.increment_retries()
+        
+        if live_display:
+            live_display.update(ui.build_live_display())
+
+    with Live(console=console, refresh_per_second=12, transient=True) as live:
+        live_display = live
+        live.update(ui.build_live_display())
+        response = await client.send(prompt, on_chunk=on_chunk)
+        ui.set_final_content(response.content, response.reasoning)
+        ui.state.retries = response.retries
+
+    console.print(ui.build_final_display())
+    console.print()  # Extra spacing
 
 
 @app.command("ralph")
@@ -509,7 +614,7 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
 
 
 if __name__ == "__main__":

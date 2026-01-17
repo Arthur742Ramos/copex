@@ -31,10 +31,16 @@ class Response:
 class StreamChunk:
     """A streaming chunk from Copilot."""
 
-    type: str  # "message" or "reasoning"
-    delta: str
+    type: str  # "message", "reasoning", "tool_call", "tool_result", "system"
+    delta: str = ""
     is_final: bool = False
     content: str | None = None  # Full content when is_final=True
+    # Tool call info
+    tool_name: str | None = None
+    tool_args: dict[str, Any] | None = None
+    tool_result: str | None = None
+    tool_success: bool | None = None
+    tool_duration: float | None = None
 
 
 class Copex:
@@ -168,8 +174,11 @@ class Copex:
         final_content: str | None = None
         final_reasoning: str | None = None
         raw_events: list[dict[str, Any]] = []
+        last_activity = asyncio.get_event_loop().time()
 
         def on_event(event: Any) -> None:
+            nonlocal last_activity
+            last_activity = asyncio.get_event_loop().time()
             try:
                 event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
                 raw_events.append({"type": event_type, "data": getattr(event, "data", None)})
@@ -212,6 +221,24 @@ class Copex:
                     error_msg = str(getattr(event.data, "message", event.data))
                     error_holder.append(RuntimeError(error_msg))
 
+                elif event_type == EventType.TOOL_CALL.value:
+                    # Extract tool call info
+                    data = event.data
+                    tool_name = getattr(data, "name", None) or getattr(data, "tool", None) or "unknown"
+                    tool_args = getattr(data, "arguments", None) or getattr(data, "args", {})
+                    if isinstance(tool_args, str):
+                        import json
+                        try:
+                            tool_args = json.loads(tool_args)
+                        except Exception:
+                            tool_args = {"raw": tool_args}
+                    if on_chunk:
+                        on_chunk(StreamChunk(
+                            type="tool_call",
+                            tool_name=str(tool_name),
+                            tool_args=tool_args if isinstance(tool_args, dict) else {},
+                        ))
+
                 elif event_type == EventType.SESSION_IDLE.value:
                     done.set()
 
@@ -223,9 +250,18 @@ class Copex:
 
         try:
             await session.send({"prompt": prompt})
-            await asyncio.wait_for(done.wait(), timeout=self.config.timeout)
-        except asyncio.TimeoutError:
-            raise TimeoutError(f"Response timed out after {self.config.timeout}s")
+            # Activity-based timeout: only timeout if no events received for timeout period
+            while not done.is_set():
+                try:
+                    await asyncio.wait_for(done.wait(), timeout=self.config.timeout)
+                except asyncio.TimeoutError:
+                    # Check if we've had activity within the timeout window
+                    idle_time = asyncio.get_event_loop().time() - last_activity
+                    if idle_time >= self.config.timeout:
+                        raise TimeoutError(
+                            f"Response timed out after {idle_time:.1f}s of inactivity"
+                        )
+                    # Had recent activity, keep waiting
         finally:
             # Remove event handler to avoid duplicates
             try:
