@@ -175,9 +175,13 @@ class Copex:
         raw_events: list[dict[str, Any]] = []
         last_activity = asyncio.get_event_loop().time()
         received_content = False
+        pending_tools = 0
+        awaiting_post_tool_response = False
+        tool_execution_seen = False
 
         def on_event(event: Any) -> None:
             nonlocal last_activity, final_content, final_reasoning, received_content
+            nonlocal pending_tools, awaiting_post_tool_response, tool_execution_seen
             last_activity = asyncio.get_event_loop().time()
             try:
                 event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
@@ -190,6 +194,8 @@ class Copex:
                     if delta:
                         received_content = True
                     content_parts.append(delta)
+                    if awaiting_post_tool_response and tool_execution_seen and pending_tools == 0:
+                        awaiting_post_tool_response = False
                     if on_chunk:
                         on_chunk(StreamChunk(type="message", delta=delta))
 
@@ -206,6 +212,8 @@ class Copex:
                     final_content = content
                     if content:
                         received_content = True
+                    if awaiting_post_tool_response and tool_execution_seen and pending_tools == 0:
+                        awaiting_post_tool_response = False
                     if on_chunk:
                         on_chunk(StreamChunk(
                             type="message",
@@ -227,6 +235,9 @@ class Copex:
                 elif event_type == EventType.TOOL_EXECUTION_START.value:
                     tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
                     tool_args = getattr(event.data, "arguments", None)
+                    pending_tools += 1
+                    awaiting_post_tool_response = True
+                    tool_execution_seen = True
                     if on_chunk:
                         on_chunk(StreamChunk(
                             type="tool_call",
@@ -237,6 +248,8 @@ class Copex:
                 elif event_type == EventType.TOOL_EXECUTION_PARTIAL_RESULT.value:
                     tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
                     partial = getattr(event.data, "partial_output", None)
+                    awaiting_post_tool_response = True
+                    tool_execution_seen = True
                     if on_chunk and partial:
                         on_chunk(StreamChunk(
                             type="tool_result",
@@ -252,6 +265,9 @@ class Copex:
                         result_text = getattr(result_obj, "content", "") or str(result_obj)
                     success = getattr(event.data, "success", None)
                     duration = getattr(event.data, "duration", None)
+                    pending_tools = max(0, pending_tools - 1)
+                    awaiting_post_tool_response = True
+                    tool_execution_seen = True
                     if on_chunk:
                         on_chunk(StreamChunk(
                             type="tool_result",
@@ -276,6 +292,7 @@ class Copex:
                     data = event.data
                     tool_name = getattr(data, "name", None) or getattr(data, "tool", None) or "unknown"
                     tool_args = getattr(data, "arguments", None) or getattr(data, "args", {})
+                    awaiting_post_tool_response = True
                     if isinstance(tool_args, str):
                         import json
                         try:
@@ -290,7 +307,8 @@ class Copex:
                         ))
 
                 elif event_type == EventType.ASSISTANT_TURN_END.value:
-                    done.set()
+                    if not awaiting_post_tool_response:
+                        done.set()
 
                 elif event_type == EventType.SESSION_IDLE.value:
                     done.set()
