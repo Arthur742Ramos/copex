@@ -12,13 +12,13 @@ Provides:
 from __future__ import annotations
 
 import json
+import threading
 import time
 from collections import defaultdict
 from dataclasses import dataclass, field
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Callable
-import threading
+from typing import Any
 
 
 @dataclass
@@ -339,17 +339,17 @@ class MetricsCollector:
         """Get printable summary string."""
         s = self.session
         lines = [
-            f"═══ Copex Metrics Summary ═══",
+            "═══ Copex Metrics Summary ═══",
             f"Session: {s.session_id}",
             f"Started: {s.started_at}",
-            f"",
+            "",
             f"Requests: {s.total_requests} ({s.successful_requests} ok, {s.failed_requests} failed)",
             f"Success Rate: {s.success_rate:.1%}",
             f"Total Retries: {s.total_retries}",
-            f"",
+            "",
             f"Total Tokens: {s.total_tokens:,}",
             f"Estimated Cost: ${self.cost_estimate():.4f}",
-            f"",
+            "",
             f"Total Time: {s.total_duration_ms / 1000:.1f}s",
             f"Avg Time/Request: {s.avg_duration_ms:.0f}ms",
         ]

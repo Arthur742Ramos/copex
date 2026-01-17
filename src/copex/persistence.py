@@ -73,13 +73,13 @@ class SessionStore:
 
     Usage:
         store = SessionStore()
-        
+
         # Save a session
         store.save(session_id, messages, model, reasoning)
-        
+
         # Load a session
         data = store.load(session_id)
-        
+
         # List all sessions
         sessions = store.list_sessions()
     """
@@ -211,12 +211,12 @@ class SessionStore:
         elif format == "markdown":
             lines = [
                 f"# Session: {data.id}",
-                f"",
+                "",
                 f"- **Model**: {data.model}",
                 f"- **Reasoning**: {data.reasoning_effort}",
                 f"- **Created**: {data.created_at}",
                 f"- **Updated**: {data.updated_at}",
-                f"",
+                "",
                 "---",
                 "",
             ]

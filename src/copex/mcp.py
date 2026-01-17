@@ -15,8 +15,8 @@ import asyncio
 import json
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable
 from pathlib import Path
+from typing import Any, Awaitable, Callable
 
 
 @dataclass
@@ -48,11 +48,11 @@ class MCPServerConfig:
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     cwd: str | None = None
-    
+
     # Connection settings
     transport: str = "stdio"  # "stdio" or "http"
     url: str | None = None  # For HTTP transport
-    
+
     # Behavior
     auto_start: bool = True
     restart_on_crash: bool = True
@@ -117,7 +117,7 @@ class StdioTransport(MCPTransport):
 
     async def _initialize(self) -> None:
         """Send MCP initialization."""
-        response = await self.send({
+        await self.send({
             "jsonrpc": "2.0",
             "method": "initialize",
             "params": {
@@ -132,7 +132,7 @@ class StdioTransport(MCPTransport):
                 },
             },
         })
-        
+
         # Send initialized notification
         await self._write({
             "jsonrpc": "2.0",
@@ -144,7 +144,6 @@ class StdioTransport(MCPTransport):
         if not self._process or not self._process.stdout:
             return
 
-        buffer = ""
         while True:
             try:
                 line = await self._process.stdout.readline()

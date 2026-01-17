@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "copex"
-version = "0.2.1"
+version = "0.3.0"
 description = "Copilot Extended - Resilient wrapper for GitHub Copilot SDK with auto-retry, Ralph Wiggum loops, and more"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -52,6 +52,5 @@ target-version = "py310"
 
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
+ignore = ["E501"]
 
-[tool.pytest.ini_options]
-asyncio_mode = "auto"

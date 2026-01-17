@@ -19,8 +19,6 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any, Callable
 
-from copex.models import EventType
-
 
 @dataclass
 class RalphState:
@@ -162,7 +160,7 @@ class RalphWiggum:
                     if on_iteration:
                         on_iteration(self._state.iteration, content)
 
-                except Exception as e:
+                except Exception:
                     consecutive_errors += 1
                     if consecutive_errors >= self.config.max_consecutive_errors:
                         self._state.completed = True

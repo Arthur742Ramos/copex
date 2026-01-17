@@ -10,9 +10,8 @@ Enables:
 from __future__ import annotations
 
 import asyncio
-from dataclasses import dataclass, field
-from typing import Any, Callable, Awaitable
-from functools import wraps
+from dataclasses import dataclass
+from typing import Any, Awaitable, Callable
 
 
 @dataclass
@@ -332,11 +331,11 @@ class ParallelToolExecutor:
 
                 param_type = "string"
                 if param.annotation != inspect.Parameter.empty:
-                    if param.annotation == int:
+                    if param.annotation is int:
                         param_type = "integer"
-                    elif param.annotation == float:
+                    elif param.annotation is float:
                         param_type = "number"
-                    elif param.annotation == bool:
+                    elif param.annotation is bool:
                         param_type = "boolean"
 
                 properties[param_name] = {"type": param_type}

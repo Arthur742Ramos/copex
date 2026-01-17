@@ -15,24 +15,21 @@ from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.text import Text
 
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig
 from copex.models import Model, ReasoningEffort
-from copex.ralph import RalphWiggum, RalphState
+from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
-    CopexUI,
     ActivityType,
-    ToolCallInfo,
-    Theme,
+    CopexUI,
     Icons,
-    print_welcome,
-    print_user_prompt,
+    Theme,
+    ToolCallInfo,
     print_error,
     print_retry,
-    print_tool_call,
-    print_tool_result,
+    print_user_prompt,
+    print_welcome,
 )
 
 app = typer.Typer(
@@ -196,8 +193,9 @@ async def _stream_response(
     ui = CopexUI(console)
     ui.reset(model=client.config.model.value)
     ui.set_activity(ActivityType.THINKING)
-    
+
     live_display: Live | None = None
+    refresh_stop = asyncio.Event()
 
     def on_chunk(chunk: StreamChunk) -> None:
         if chunk.type == "message":
@@ -218,21 +216,43 @@ async def _stream_response(
                 status="running",
             )
             ui.add_tool_call(tool)
+        elif chunk.type == "tool_result":
+            status = "success" if chunk.tool_success is not False else "error"
+            ui.update_tool_call(
+                chunk.tool_name or "unknown",
+                status,
+                result=chunk.tool_result,
+                duration=chunk.tool_duration,
+            )
         elif chunk.type == "system":
             # Retry notification
             ui.increment_retries()
             print_retry(console, ui.state.retries, client.config.retry.max_retries, chunk.delta)
-        
+
         # Update the live display
         if live_display:
             live_display.update(ui.build_live_display())
 
-    with Live(console=console, refresh_per_second=12, transient=True) as live:
+    async def refresh_loop() -> None:
+        while not refresh_stop.is_set():
+            if live_display:
+                live_display.update(ui.build_live_display())
+            await asyncio.sleep(0.1)
+
+    with Live(console=console, refresh_per_second=10, transient=True) as live:
         live_display = live
         live.update(ui.build_live_display())
-        response = await client.send(prompt, on_chunk=on_chunk)
-        ui.set_final_content(response.content, response.reasoning if show_reasoning else None)
-        ui.state.retries = response.retries
+        refresh_task = asyncio.create_task(refresh_loop())
+        try:
+            response = await client.send(prompt, on_chunk=on_chunk)
+            ui.set_final_content(response.content, response.reasoning if show_reasoning else None)
+            ui.state.retries = response.retries
+        finally:
+            refresh_stop.set()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
 
     # Print final beautiful output
     console.print(ui.build_final_display())
@@ -381,8 +401,9 @@ async def _stream_response_interactive(client: Copex, prompt: str) -> None:
     ui = CopexUI(console)
     ui.reset(model=client.config.model.value)
     ui.set_activity(ActivityType.THINKING)
-    
+
     live_display: Live | None = None
+    refresh_stop = asyncio.Event()
 
     def on_chunk(chunk: StreamChunk) -> None:
         if chunk.type == "message":
@@ -402,18 +423,40 @@ async def _stream_response_interactive(client: Copex, prompt: str) -> None:
                 status="running",
             )
             ui.add_tool_call(tool)
+        elif chunk.type == "tool_result":
+            status = "success" if chunk.tool_success is not False else "error"
+            ui.update_tool_call(
+                chunk.tool_name or "unknown",
+                status,
+                result=chunk.tool_result,
+                duration=chunk.tool_duration,
+            )
         elif chunk.type == "system":
             ui.increment_retries()
-        
+
         if live_display:
             live_display.update(ui.build_live_display())
 
-    with Live(console=console, refresh_per_second=12, transient=True) as live:
+    async def refresh_loop() -> None:
+        while not refresh_stop.is_set():
+            if live_display:
+                live_display.update(ui.build_live_display())
+            await asyncio.sleep(0.1)
+
+    with Live(console=console, refresh_per_second=10, transient=True) as live:
         live_display = live
         live.update(ui.build_live_display())
-        response = await client.send(prompt, on_chunk=on_chunk)
-        ui.set_final_content(response.content, response.reasoning)
-        ui.state.retries = response.retries
+        refresh_task = asyncio.create_task(refresh_loop())
+        try:
+            response = await client.send(prompt, on_chunk=on_chunk)
+            ui.set_final_content(response.content, response.reasoning)
+            ui.state.retries = response.retries
+        finally:
+            refresh_stop.set()
+            try:
+                await refresh_task
+            except asyncio.CancelledError:
+                pass
 
     console.print(ui.build_final_display())
     console.print()  # Extra spacing
@@ -521,7 +564,7 @@ def login() -> None:
     """Login to GitHub (uses GitHub CLI for authentication)."""
     import shutil
     import subprocess
-    
+
     # Check for gh CLI
     gh_path = shutil.which("gh")
     if not gh_path:
@@ -532,9 +575,9 @@ def login() -> None:
         console.print("  macOS:   [bold]brew install gh[/bold]")
         console.print("  Linux:   [bold]sudo apt install gh[/bold]")
         raise typer.Exit(1)
-    
+
     console.print("[blue]Opening browser for GitHub authentication...[/blue]\n")
-    
+
     try:
         result = subprocess.run([gh_path, "auth", "login"], check=False)
         if result.returncode == 0:
@@ -553,12 +596,12 @@ def logout() -> None:
     """Logout from GitHub."""
     import shutil
     import subprocess
-    
+
     gh_path = shutil.which("gh")
     if not gh_path:
         console.print("[red]Error: GitHub CLI (gh) not found.[/red]")
         raise typer.Exit(1)
-    
+
     try:
         result = subprocess.run([gh_path, "auth", "logout"], check=False)
         if result.returncode == 0:
@@ -573,11 +616,12 @@ def status() -> None:
     """Check Copilot CLI and GitHub authentication status."""
     import shutil
     import subprocess
+
     from copex.config import find_copilot_cli
-    
+
     cli_path = find_copilot_cli()
     gh_path = shutil.which("gh")
-    
+
     # Get copilot version
     copilot_version = "N/A"
     if cli_path:
@@ -589,7 +633,7 @@ def status() -> None:
             copilot_version = result.stdout.strip() or result.stderr.strip()
         except Exception:
             pass
-    
+
     console.print(Panel(
         f"[bold]Copex Version:[/bold] {__version__}\n"
         f"[bold]Copilot CLI:[/bold] {cli_path or '[red]Not found[/red]'}\n"
@@ -598,11 +642,11 @@ def status() -> None:
         title="Copex Status",
         border_style="blue",
     ))
-    
+
     if not cli_path:
         console.print("\n[red]Copilot CLI not found.[/red]")
         console.print("Install: [bold]npm install -g @github/copilot[/bold]")
-    
+
     if gh_path:
         console.print("\n[bold]GitHub Auth Status:[/bold]")
         try:
@@ -614,7 +658,7 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 
 if __name__ == "__main__":

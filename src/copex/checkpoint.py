@@ -63,13 +63,13 @@ class CheckpointStore:
 
     Usage:
         store = CheckpointStore()
-        
+
         # Create checkpoint
         cp = store.create("my-loop", prompt, iteration, ...)
-        
+
         # Update on each iteration
         store.update(cp.checkpoint_id, iteration=5, history=[...])
-        
+
         # Resume after crash
         cp = store.get_latest("my-loop")
     """
@@ -374,21 +374,18 @@ class CheckpointedRalph:
         Returns:
             Final checkpoint state
         """
-        from copex.ralph import RalphWiggum, RalphConfig
+        from copex.ralph import RalphConfig, RalphWiggum
 
         # Check for existing checkpoint to resume
         if resume:
             existing = self.store.get_latest(self.loop_id)
             if existing and not existing.completed:
                 self._checkpoint = existing
-                start_iteration = existing.iteration
                 history = existing.history
             else:
                 self._checkpoint = None
-                start_iteration = 0
                 history = []
         else:
-            start_iteration = 0
             history = []
 
         # Create new checkpoint if needed

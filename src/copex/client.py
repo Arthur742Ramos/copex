@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import asyncio
 import random
-import re
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -175,9 +174,10 @@ class Copex:
         final_reasoning: str | None = None
         raw_events: list[dict[str, Any]] = []
         last_activity = asyncio.get_event_loop().time()
+        received_content = False
 
         def on_event(event: Any) -> None:
-            nonlocal last_activity
+            nonlocal last_activity, final_content, final_reasoning, received_content
             last_activity = asyncio.get_event_loop().time()
             try:
                 event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
@@ -185,6 +185,10 @@ class Copex:
 
                 if event_type == EventType.ASSISTANT_MESSAGE_DELTA.value:
                     delta = getattr(event.data, "delta_content", "") or ""
+                    if not delta:
+                        delta = getattr(event.data, "transformed_content", "") or ""
+                    if delta:
+                        received_content = True
                     content_parts.append(delta)
                     if on_chunk:
                         on_chunk(StreamChunk(type="message", delta=delta))
@@ -196,8 +200,12 @@ class Copex:
                         on_chunk(StreamChunk(type="reasoning", delta=delta))
 
                 elif event_type == EventType.ASSISTANT_MESSAGE.value:
-                    nonlocal final_content
-                    final_content = getattr(event.data, "content", "")
+                    content = getattr(event.data, "content", "") or ""
+                    if not content:
+                        content = getattr(event.data, "transformed_content", "") or ""
+                    final_content = content
+                    if content:
+                        received_content = True
                     if on_chunk:
                         on_chunk(StreamChunk(
                             type="message",
@@ -207,8 +215,7 @@ class Copex:
                         ))
 
                 elif event_type == EventType.ASSISTANT_REASONING.value:
-                    nonlocal final_reasoning
-                    final_reasoning = getattr(event.data, "content", "")
+                    final_reasoning = getattr(event.data, "content", "") or ""
                     if on_chunk:
                         on_chunk(StreamChunk(
                             type="reasoning",
@@ -217,9 +224,52 @@ class Copex:
                             content=final_reasoning,
                         ))
 
+                elif event_type == EventType.TOOL_EXECUTION_START.value:
+                    tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
+                    tool_args = getattr(event.data, "arguments", None)
+                    if on_chunk:
+                        on_chunk(StreamChunk(
+                            type="tool_call",
+                            tool_name=str(tool_name) if tool_name else "unknown",
+                            tool_args=tool_args if isinstance(tool_args, dict) else {},
+                        ))
+
+                elif event_type == EventType.TOOL_EXECUTION_PARTIAL_RESULT.value:
+                    tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
+                    partial = getattr(event.data, "partial_output", None)
+                    if on_chunk and partial:
+                        on_chunk(StreamChunk(
+                            type="tool_result",
+                            tool_name=str(tool_name) if tool_name else "unknown",
+                            tool_result=str(partial),
+                        ))
+
+                elif event_type == EventType.TOOL_EXECUTION_COMPLETE.value:
+                    tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
+                    result_obj = getattr(event.data, "result", None)
+                    result_text = ""
+                    if result_obj is not None:
+                        result_text = getattr(result_obj, "content", "") or str(result_obj)
+                    success = getattr(event.data, "success", None)
+                    duration = getattr(event.data, "duration", None)
+                    if on_chunk:
+                        on_chunk(StreamChunk(
+                            type="tool_result",
+                            tool_name=str(tool_name) if tool_name else "unknown",
+                            tool_result=result_text,
+                            tool_success=success,
+                            tool_duration=duration,
+                        ))
+
                 elif event_type == EventType.ERROR.value:
                     error_msg = str(getattr(event.data, "message", event.data))
                     error_holder.append(RuntimeError(error_msg))
+                    done.set()
+
+                elif event_type == EventType.SESSION_ERROR.value:
+                    error_msg = str(getattr(event.data, "message", event.data))
+                    error_holder.append(RuntimeError(error_msg))
+                    done.set()
 
                 elif event_type == EventType.TOOL_CALL.value:
                     # Extract tool call info
@@ -239,6 +289,9 @@ class Copex:
                             tool_args=tool_args if isinstance(tool_args, dict) else {},
                         ))
 
+                elif event_type == EventType.ASSISTANT_TURN_END.value:
+                    done.set()
+
                 elif event_type == EventType.SESSION_IDLE.value:
                     done.set()
 
@@ -246,7 +299,7 @@ class Copex:
                 error_holder.append(e)
                 done.set()
 
-        session.on(on_event)
+        unsubscribe = session.on(on_event)
 
         try:
             await session.send({"prompt": prompt})
@@ -265,7 +318,23 @@ class Copex:
         finally:
             # Remove event handler to avoid duplicates
             try:
-                session.off(on_event)
+                unsubscribe()
+            except Exception:
+                pass
+
+        # If we never got explicit content events, try to extract a final message from history
+        if not received_content:
+            try:
+                messages = await session.get_messages()
+                for message in reversed(messages):
+                    message_type = getattr(message, "type", None)
+                    message_value = (
+                        message_type.value if hasattr(message_type, "value") else str(message_type)
+                    )
+                    if message_value == EventType.ASSISTANT_MESSAGE.value:
+                        final_content = getattr(message.data, "content", "") or final_content
+                        if final_content:
+                            break
             except Exception:
                 pass
 

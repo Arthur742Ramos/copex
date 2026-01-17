@@ -31,3 +31,6 @@ jobs:
 
       - name: Type check imports
         run: python -c "from copex import Copex, CopexConfig, Model, ReasoningEffort, find_copilot_cli; print('Imports OK')"
+
+      - name: Run tests
+        run: pytest tests/ -v

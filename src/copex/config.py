@@ -13,12 +13,12 @@ from copex.models import Model, ReasoningEffort
 
 def find_copilot_cli() -> str | None:
     """Auto-detect the Copilot CLI path across platforms.
-    
+
     Searches in order:
     1. shutil.which('copilot') - system PATH
     2. Common npm global locations
     3. Common installation paths
-    
+
     Returns the path if found, None otherwise.
     """
     # First try PATH (works on all platforms)
@@ -30,7 +30,7 @@ def find_copilot_cli() -> str | None:
             if os.path.exists(cmd_path):
                 return cmd_path
         return cli_path
-    
+
     # Platform-specific common locations
     if sys.platform == "win32":
         # Windows locations
@@ -59,11 +59,11 @@ def find_copilot_cli() -> str | None:
             Path("/usr/bin/copilot"),
             Path.home() / ".local" / "bin" / "copilot",
         ]
-    
+
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
             return str(candidate)
-    
+
     # Check for NVM installations (macOS/Linux)
     if sys.platform != "win32":
         nvm_dir = Path.home() / ".nvm" / "versions" / "node"
@@ -74,7 +74,7 @@ def find_copilot_cli() -> str | None:
                 copilot_path = version / "bin" / "copilot"
                 if copilot_path.exists():
                     return str(copilot_path)
-    
+
     return None
 
 
@@ -181,12 +181,12 @@ class CopexConfig(BaseModel):
             "auto_restart": self.auto_restart,
             "log_level": self.log_level,
         }
-        
+
         # Use provided cli_path or auto-detect
         cli_path = self.cli_path or find_copilot_cli()
         if cli_path:
             opts["cli_path"] = cli_path
-            
+
         if self.cli_url:
             opts["cli_url"] = self.cli_url
         if self.cwd:
