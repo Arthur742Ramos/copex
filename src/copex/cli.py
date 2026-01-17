@@ -78,7 +78,7 @@ def _build_prompt_session() -> PromptSession:
         else:
             buffer.reset()
 
-    @bindings.add("s-enter")
+    @bindings.add("escape", "enter")
     def _(event) -> None:
         event.app.current_buffer.insert_text("\n")
 
