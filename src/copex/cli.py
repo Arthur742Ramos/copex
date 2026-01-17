@@ -9,6 +9,7 @@ from typing import Annotated, Optional
 
 import typer
 from prompt_toolkit import PromptSession
+from prompt_toolkit.completion import WordCompleter
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
@@ -83,6 +84,8 @@ def _build_prompt_session() -> PromptSession:
     history_path = Path.home() / ".copex" / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     bindings = KeyBindings()
+    commands = ["/model", "/reasoning", "/models", "/new", "/status", "/help"]
+    completer = WordCompleter(commands, ignore_case=True)
 
     @bindings.add("enter")
     def _(event) -> None:
@@ -100,6 +103,8 @@ def _build_prompt_session() -> PromptSession:
         message="copilot> ",
         history=FileHistory(str(history_path)),
         key_bindings=bindings,
+        completer=completer,
+        complete_while_typing=True,
         multiline=True,
         prompt_continuation=lambda width, line_number, is_soft_wrap: "... ",
     )
@@ -768,7 +773,7 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.4.1"
+__version__ = "0.4.2"
 
 
 if __name__ == "__main__":

@@ -259,6 +259,7 @@ class CopexUI:
         self._live: Live | None = None
         self._spinners = ["◐", "◓", "◑", "◒"]
         self._spinner_idx = 0
+        self._last_frame_at = 0.0
         self._max_live_message_chars = 2000 if density == "extended" else 900
         self._max_live_reasoning_chars = 800 if density == "extended" else 320
 
@@ -268,6 +269,10 @@ class CopexUI:
 
     def _advance_frame(self) -> None:
         """Advance animation frame."""
+        now = time.time()
+        if now - self._last_frame_at < 0.25:
+            return
+        self._last_frame_at = now
         self._spinner_idx = (self._spinner_idx + 1) % len(self._spinners)
 
     def _build_header(self) -> Text:
@@ -715,12 +720,12 @@ class CopexUI:
             width = min(20, width)
         if width < 10:
             width = 10
-        pos = self._spinner_idx % width
-        trail = max(1, width // 6)
+        pos = (self._spinner_idx // 2) % width
+        trail = 1
         bar = ["░"] * width
         for offset in range(trail):
             idx = (pos - offset) % width
-            bar[idx] = "█" if offset == 0 else "▓"
+            bar[idx] = "█"
 
         if self.state.activity == ActivityType.ERROR:
             color = Theme.ERROR
