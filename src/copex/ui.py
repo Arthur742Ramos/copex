@@ -206,6 +206,15 @@ class ToolCallInfo:
 
 
 @dataclass
+class HistoryEntry:
+    """A single conversation turn."""
+    role: str  # "user" or "assistant"
+    content: str
+    reasoning: str | None = None
+    tool_calls: list[ToolCallInfo] = field(default_factory=list)
+
+
+@dataclass
 class UIState:
     """Current state of the UI."""
     activity: ActivityType = ActivityType.WAITING
@@ -216,6 +225,7 @@ class UIState:
     model: str = ""
     retries: int = 0
     last_update: float = field(default_factory=time.time)
+    history: list[HistoryEntry] = field(default_factory=list)
 
     @property
     def elapsed(self) -> float:
@@ -251,7 +261,14 @@ class UIState:
 class CopexUI:
     """Beautiful UI for Copex CLI."""
 
-    def __init__(self, console: Console | None = None, *, theme: str = "default", density: str = "extended"):
+    def __init__(
+        self,
+        console: Console | None = None,
+        *,
+        theme: str = "default",
+        density: str = "extended",
+        show_all_tools: bool = False,
+    ):
         self.console = console or Console()
         self.set_theme(theme)
         self.density = density
@@ -260,12 +277,18 @@ class CopexUI:
         self._spinners = ["◐", "◓", "◑", "◒"]
         self._spinner_idx = 0
         self._last_frame_at = 0.0
+        self._dot_frames = [".", "..", "..."]
+        self.show_all_tools = show_all_tools
         self._max_live_message_chars = 2000 if density == "extended" else 900
         self._max_live_reasoning_chars = 800 if density == "extended" else 320
 
     def _get_spinner(self) -> str:
         """Get current spinner frame."""
         return self._spinners[self._spinner_idx]
+
+    def _get_dots(self) -> str:
+        """Get current dot animation frame."""
+        return self._dot_frames[self._spinner_idx % len(self._dot_frames)]
 
     def _advance_frame(self) -> None:
         """Advance animation frame."""
@@ -290,19 +313,21 @@ class CopexUI:
     def _build_activity_indicator(self) -> Text:
         """Build the current activity indicator."""
         indicator = Text()
+        dots = self._get_dots()
+        spinner = self._get_spinner()
 
         if self.state.activity == ActivityType.THINKING:
-            indicator.append(f" {self._get_spinner()} ", style=f"bold {Theme.PRIMARY}")
-            indicator.append("Thinking...", style=Theme.PRIMARY)
+            indicator.append(f" {spinner} ", style=f"bold {Theme.PRIMARY}")
+            indicator.append(f"Thinking{dots}", style=Theme.PRIMARY)
         elif self.state.activity == ActivityType.REASONING:
-            indicator.append(f" {Icons.BRAIN} ", style=f"bold {Theme.ACCENT}")
-            indicator.append("Reasoning...", style=Theme.ACCENT)
+            indicator.append(f" {spinner} ", style=f"bold {Theme.ACCENT}")
+            indicator.append(f"Reasoning{dots}", style=Theme.ACCENT)
         elif self.state.activity == ActivityType.RESPONDING:
-            indicator.append(f" {self._get_spinner()} ", style=f"bold {Theme.SUCCESS}")
-            indicator.append("Responding...", style=Theme.SUCCESS)
+            indicator.append(f" {spinner} ", style=f"bold {Theme.SUCCESS}")
+            indicator.append(f"Responding{dots}", style=Theme.SUCCESS)
         elif self.state.activity == ActivityType.TOOL_CALL:
-            indicator.append(f" {Icons.LIGHTNING} ", style=f"bold {Theme.WARNING}")
-            indicator.append("Executing tools...", style=Theme.WARNING)
+            indicator.append(f" {spinner} ", style=f"bold {Theme.WARNING}")
+            indicator.append(f"Executing tools{dots}", style=Theme.WARNING)
         elif self.state.activity == ActivityType.DONE:
             indicator.append(f" {Icons.DONE} ", style=f"bold {Theme.SUCCESS}")
             indicator.append("Complete", style=Theme.SUCCESS)
@@ -310,8 +335,8 @@ class CopexUI:
             indicator.append(f" {Icons.ERROR} ", style=f"bold {Theme.ERROR}")
             indicator.append("Error", style=Theme.ERROR)
         else:
-            indicator.append(f" {self._get_spinner()} ", style=Theme.MUTED)
-            indicator.append("Waiting...", style=Theme.MUTED)
+            indicator.append(f" {spinner} ", style=Theme.MUTED)
+            indicator.append(f"Waiting{dots}", style=Theme.MUTED)
 
         return indicator
 
@@ -359,7 +384,8 @@ class CopexUI:
         tree = Tree(f"[{Theme.WARNING}]{Icons.TOOL} Tool Calls[/{Theme.WARNING}]")
 
         max_tools = 5 if self.density == "extended" else 3
-        for tool in self.state.tool_calls[-max_tools:]:
+        tools_to_show = self.state.tool_calls if self.show_all_tools else self.state.tool_calls[-max_tools:]
+        for tool in tools_to_show:
             status_style = {
                 "running": Theme.WARNING,
                 "success": Theme.SUCCESS,
@@ -396,7 +422,13 @@ class CopexUI:
                 branch.add(Text(result_preview, style=Theme.MUTED))
 
         if len(self.state.tool_calls) > max_tools:
-            tree.add(Text(f"... and {len(self.state.tool_calls) - max_tools} more", style=Theme.MUTED))
+            if self.show_all_tools:
+                tree.add(Text("Showing all tools (use /tools to collapse)", style=Theme.MUTED))
+            else:
+                tree.add(Text(
+                    f"... and {len(self.state.tool_calls) - max_tools} more (use /tools to expand)",
+                    style=Theme.MUTED,
+                ))
 
         border_style = Theme.BORDER
         if self.state.activity == ActivityType.TOOL_CALL or running:
@@ -519,8 +551,6 @@ class CopexUI:
             grid.add_row(activity, elapsed_text)
             grid.add_row(message_text, tools_text)
 
-        progress_bar = self._build_progress_bar()
-
         if self.state.activity == ActivityType.ERROR:
             border_style = Theme.ERROR
         elif self.state.activity == ActivityType.DONE:
@@ -534,7 +564,7 @@ class CopexUI:
         if self.state.model:
             title += f" [{Theme.MUTED}]• {self.state.model}[/{Theme.MUTED}]"
 
-        content = Group(grid, Text(), progress_bar) if self.density == "extended" else Group(grid, progress_bar)
+        content = Group(grid, Text()) if self.density == "extended" else grid
 
         return Panel(
             content,
@@ -573,9 +603,68 @@ class CopexUI:
 
         return Group(*elements)
 
+    def _build_history_panel(self) -> Panel | None:
+        """Build the conversation history panel."""
+        if not self.state.history:
+            return None
+
+        elements = []
+        for i, entry in enumerate(self.state.history):
+            if entry.role == "user":
+                # User message
+                user_text = Text()
+                user_text.append(f"❯ ", style=f"bold {Theme.SUCCESS}")
+                # Truncate long user messages
+                content = entry.content
+                if len(content) > 200:
+                    content = content[:200] + "..."
+                user_text.append(content, style="bold")
+                elements.append(user_text)
+                elements.append(Text())  # Spacer
+            else:
+                # Assistant message
+                if entry.reasoning and self.density == "extended":
+                    elements.append(Panel(
+                        Markdown(entry.reasoning),
+                        title=f"[{Theme.ACCENT}]{Icons.BRAIN} Reasoning[/{Theme.ACCENT}]",
+                        title_align="left",
+                        border_style=Theme.BORDER,
+                        padding=(0, 1),
+                        box=ROUNDED,
+                    ))
+                    elements.append(Text())
+
+                elements.append(Panel(
+                    Markdown(entry.content),
+                    title=f"[{Theme.PRIMARY}]{Icons.ROBOT} Response[/{Theme.PRIMARY}]",
+                    title_align="left",
+                    border_style=Theme.BORDER,
+                    padding=(0, 1),
+                    box=ROUNDED,
+                ))
+                elements.append(Text())  # Spacer between turns
+
+        if not elements:
+            return None
+
+        return Panel(
+            Group(*elements),
+            title=f"[{Theme.MUTED}]Conversation History ({len([e for e in self.state.history if e.role == 'user'])} turns)[/{Theme.MUTED}]",
+            title_align="left",
+            border_style=Theme.BORDER,
+            padding=(0, 1),
+            box=ROUNDED,
+        )
+
     def build_final_display(self) -> Group:
         """Build the final formatted display after streaming completes."""
         elements = []
+
+        # History panel (previous turns)
+        history_panel = self._build_history_panel()
+        if history_panel:
+            elements.append(history_panel)
+            elements.append(Text())
 
         # Reasoning panel (collapsed/summary)
         if self.state.reasoning and self.density == "extended":
@@ -609,9 +698,10 @@ class CopexUI:
     # Public Methods
     # ═══════════════════════════════════════════════════════════════════════════
 
-    def reset(self, model: str = "") -> None:
+    def reset(self, model: str = "", preserve_history: bool = False) -> None:
         """Reset state for a new interaction."""
-        self.state = UIState(model=model)
+        old_history = self.state.history if preserve_history else []
+        self.state = UIState(model=model, history=old_history)
 
     def set_activity(self, activity: ActivityType) -> None:
         """Set the current activity."""
@@ -664,6 +754,22 @@ class CopexUI:
         if reasoning:
             self.state.reasoning = reasoning
         self.state.activity = ActivityType.DONE
+        self._touch()
+
+    def add_user_message(self, content: str) -> None:
+        """Add a user message to history."""
+        self.state.history.append(HistoryEntry(role="user", content=content))
+        self._touch()
+
+    def finalize_assistant_response(self) -> None:
+        """Finalize the current assistant response and add to history."""
+        if self.state.message:
+            self.state.history.append(HistoryEntry(
+                role="assistant",
+                content=self.state.message,
+                reasoning=self.state.reasoning if self.state.reasoning else None,
+                tool_calls=list(self.state.tool_calls),
+            ))
         self._touch()
 
     def _touch(self) -> None:

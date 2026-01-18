@@ -88,6 +88,11 @@ class Copex:
             pattern.lower() in error_str for pattern in self.config.retry.retry_on_errors
         )
 
+    def _is_tool_state_error(self, error: str | Exception) -> bool:
+        """Detect tool-state mismatch errors that require session recovery."""
+        error_str = str(error).lower()
+        return "tool_use_id" in error_str and "tool_result" in error_str
+
     def _calculate_delay(self, attempt: int) -> float:
         """Calculate delay with exponential backoff and jitter."""
         delay = self.config.retry.base_delay * (self.config.retry.exponential_base ** attempt)
@@ -201,6 +206,21 @@ class Copex:
             except Exception as e:
                 last_error = e
                 error_str = str(e)
+
+                if self._is_tool_state_error(e) and self.config.auto_continue:
+                    auto_continues += 1
+                    if auto_continues > self.config.retry.max_auto_continues:
+                        raise last_error
+                    retries = 0
+                    session, prompt = await self._recover_session(on_chunk)
+                    if on_chunk:
+                        on_chunk(StreamChunk(
+                            type="system",
+                            delta="\n[Tool state mismatch detected; recovered session]\n",
+                        ))
+                    delay = self._calculate_delay(0)
+                    await asyncio.sleep(delay)
+                    continue
 
                 if not self._should_retry(e):
                     raise

@@ -202,6 +202,15 @@ copex interactive
 copex interactive --model claude-sonnet-4.5 --reasoning high
 ```
 
+Interactive slash commands:
+- `/model <name>` - Change model
+- `/reasoning <level>` - Change reasoning effort
+- `/models` - List available models
+- `/new` - Start a new session
+- `/status` - Show current settings
+- `/tools` - Toggle full tool call list
+- `/help` - Show commands
+
 ### Other commands
 
 ```bash

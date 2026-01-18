@@ -84,7 +84,7 @@ def _build_prompt_session() -> PromptSession:
     history_path = Path.home() / ".copex" / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     bindings = KeyBindings()
-    commands = ["/model", "/reasoning", "/models", "/new", "/status", "/help"]
+    commands = ["/model", "/reasoning", "/models", "/new", "/status", "/tools", "/help"]
     completer = WordCompleter(commands, ignore_case=True)
 
     @bindings.add("enter")
@@ -108,6 +108,126 @@ def _build_prompt_session() -> PromptSession:
         multiline=True,
         prompt_continuation=lambda width, line_number, is_soft_wrap: "... ",
     )
+
+
+async def _model_picker(current: Model) -> Model | None:
+    """Interactive model picker using arrow keys."""
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    models = list(Model)
+    selected_idx = models.index(current) if current in models else 0
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def move_up(event) -> None:
+        nonlocal selected_idx
+        selected_idx = (selected_idx - 1) % len(models)
+
+    @kb.add("down")
+    def move_down(event) -> None:
+        nonlocal selected_idx
+        selected_idx = (selected_idx + 1) % len(models)
+
+    @kb.add("enter")
+    def select(event) -> None:
+        event.app.exit(result=models[selected_idx])
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def cancel(event) -> None:
+        event.app.exit(result=None)
+
+    def get_text():
+        lines = [("bold", "Select a model (↑/↓ to navigate, Enter to select, Esc to cancel):\n\n")]
+        for i, m in enumerate(models):
+            if i == selected_idx:
+                lines.append(("class:selected", f"  ▸ {m.value}"))
+            else:
+                lines.append(("", f"    {m.value}"))
+            if m == current:
+                lines.append(("class:current", " ← current"))
+            lines.append(("", "\n"))
+        return lines
+
+    from prompt_toolkit.styles import Style
+    style = Style.from_dict({
+        "selected": "fg:ansicyan bold",
+        "current": "fg:ansiyellow italic",
+    })
+
+    app: Application[Model | None] = Application(
+        layout=Layout(Window(FormattedTextControl(get_text))),
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+    )
+
+    return await app.run_async()
+
+
+async def _reasoning_picker(current: ReasoningEffort) -> ReasoningEffort | None:
+    """Interactive reasoning effort picker."""
+    from prompt_toolkit.application import Application
+    from prompt_toolkit.key_binding import KeyBindings
+    from prompt_toolkit.layout import Layout
+    from prompt_toolkit.layout.containers import Window
+    from prompt_toolkit.layout.controls import FormattedTextControl
+
+    efforts = list(ReasoningEffort)
+    selected_idx = efforts.index(current) if current in efforts else 0
+
+    kb = KeyBindings()
+
+    @kb.add("up")
+    def move_up(event) -> None:
+        nonlocal selected_idx
+        selected_idx = (selected_idx - 1) % len(efforts)
+
+    @kb.add("down")
+    def move_down(event) -> None:
+        nonlocal selected_idx
+        selected_idx = (selected_idx + 1) % len(efforts)
+
+    @kb.add("enter")
+    def select(event) -> None:
+        event.app.exit(result=efforts[selected_idx])
+
+    @kb.add("escape")
+    @kb.add("c-c")
+    def cancel(event) -> None:
+        event.app.exit(result=None)
+
+    def get_text():
+        lines = [("bold", "Select reasoning effort (↑/↓ to navigate, Enter to select, Esc to cancel):\n\n")]
+        for i, r in enumerate(efforts):
+            if i == selected_idx:
+                lines.append(("class:selected", f"  ▸ {r.value}"))
+            else:
+                lines.append(("", f"    {r.value}"))
+            if r == current:
+                lines.append(("class:current", " ← current"))
+            lines.append(("", "\n"))
+        return lines
+
+    from prompt_toolkit.styles import Style
+    style = Style.from_dict({
+        "selected": "fg:ansicyan bold",
+        "current": "fg:ansiyellow italic",
+    })
+
+    app: Application[ReasoningEffort | None] = Application(
+        layout=Layout(Window(FormattedTextControl(get_text))),
+        key_bindings=kb,
+        style=style,
+        full_screen=False,
+    )
+
+    return await app.run_async()
 
 
 @app.command()
@@ -222,7 +342,7 @@ async def _stream_response(
     client: Copex, prompt: str, show_reasoning: bool
 ) -> None:
     """Stream response with beautiful live updates."""
-    ui = CopexUI(console, theme=client.config.ui_theme, density=client.config.ui_density)
+    ui = CopexUI(console, theme=client.config.ui_theme, density=client.config.ui_density, show_all_tools=True)
     ui.reset(model=client.config.model.value)
     ui.set_activity(ActivityType.THINKING)
 
@@ -409,6 +529,15 @@ async def _interactive_loop(config: CopexConfig) -> None:
     client = Copex(config)
     await client.start()
     session = _build_prompt_session()
+    show_all_tools = False
+    
+    # Create persistent UI for conversation history
+    ui = CopexUI(
+        console,
+        theme=config.ui_theme,
+        density=config.ui_density,
+        show_all_tools=show_all_tools,
+    )
 
     def show_help() -> None:
         console.print(f"\n[{Theme.MUTED}]Commands:[/{Theme.MUTED}]")
@@ -417,6 +546,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
         console.print(f"  [{Theme.PRIMARY}]/models[/{Theme.PRIMARY}]            - List available models")
         console.print(f"  [{Theme.PRIMARY}]/new[/{Theme.PRIMARY}]               - Start new session")
         console.print(f"  [{Theme.PRIMARY}]/status[/{Theme.PRIMARY}]            - Show current settings")
+        console.print(f"  [{Theme.PRIMARY}]/tools[/{Theme.PRIMARY}]             - Toggle full tool call list")
         console.print(f"  [{Theme.PRIMARY}]/help[/{Theme.PRIMARY}]              - Show this help")
         console.print(f"  [{Theme.PRIMARY}]exit[/{Theme.PRIMARY}]               - Exit\n")
 
@@ -445,6 +575,8 @@ async def _interactive_loop(config: CopexConfig) -> None:
 
             if command in {"new", "/new"}:
                 client.new_session()
+                # Clear UI history for new session
+                ui.state.history = []
                 console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Started new session[/{Theme.SUCCESS}]\n")
                 continue
 
@@ -457,11 +589,25 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 continue
 
             if command in {"models", "/models"}:
-                console.print(f"\n[{Theme.MUTED}]Available models:[/{Theme.MUTED}]")
-                for m in Model:
-                    marker = " ← current" if m == client.config.model else ""
-                    console.print(f"  [{Theme.PRIMARY}]{m.value}[/{Theme.PRIMARY}]{marker}")
-                console.print()
+                selected = await _model_picker(client.config.model)
+                if selected and selected != client.config.model:
+                    client.config.model = selected
+                    # Prompt for reasoning effort if GPT model
+                    if selected.value.startswith("gpt-"):
+                        new_reasoning = await _reasoning_picker(client.config.reasoning_effort)
+                        if new_reasoning:
+                            client.config.reasoning_effort = new_reasoning
+                    client.new_session()
+                    # Clear UI history for new session
+                    ui.state.history = []
+                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {selected.value} (new session started)[/{Theme.SUCCESS}]\n")
+                continue
+ 
+            if command in {"tools", "/tools"}:
+                show_all_tools = not show_all_tools
+                ui.show_all_tools = show_all_tools
+                mode = "all tools" if show_all_tools else "recent tools"
+                console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Showing {mode}[/{Theme.SUCCESS}]\n")
                 continue
 
             if command.startswith("/model ") or command.startswith("model "):
@@ -474,6 +620,8 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     new_model = Model(model_name)
                     client.config.model = new_model
                     client.new_session()  # Need new session for model change
+                    # Clear UI history for new session
+                    ui.state.history = []
                     console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_model.value} (new session started)[/{Theme.SUCCESS}]\n")
                 except ValueError:
                     console.print(f"[{Theme.ERROR}]Unknown model: {model_name}[/{Theme.ERROR}]")
@@ -490,6 +638,8 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     new_reasoning = ReasoningEffort(level)
                     client.config.reasoning_effort = new_reasoning
                     client.new_session()  # Need new session for reasoning change
+                    # Clear UI history for new session
+                    ui.state.history = []
                     console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_reasoning.value} reasoning (new session started)[/{Theme.SUCCESS}]\n")
                 except ValueError:
                     valid = ", ".join(r.value for r in ReasoningEffort)
@@ -498,7 +648,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
 
             try:
                 print_user_prompt(console, prompt)
-                await _stream_response_interactive(client, prompt)
+                await _stream_response_interactive(client, prompt, ui)
             except Exception as e:
                 print_error(console, str(e))
 
@@ -508,10 +658,17 @@ async def _interactive_loop(config: CopexConfig) -> None:
         await client.stop()
 
 
-async def _stream_response_interactive(client: Copex, prompt: str) -> None:
+async def _stream_response_interactive(
+    client: Copex,
+    prompt: str,
+    ui: CopexUI,
+) -> None:
     """Stream response with beautiful UI in interactive mode."""
-    ui = CopexUI(console, theme=client.config.ui_theme, density=client.config.ui_density)
-    ui.reset(model=client.config.model.value)
+    # Add user message to history
+    ui.add_user_message(prompt)
+    
+    # Reset for new turn but preserve history
+    ui.reset(model=client.config.model.value, preserve_history=True)
     ui.set_activity(ActivityType.THINKING)
 
     live_display: Live | None = None
@@ -572,6 +729,9 @@ async def _stream_response_interactive(client: Copex, prompt: str) -> None:
                 await refresh_task
             except asyncio.CancelledError:
                 pass
+
+    # Finalize the assistant response to history
+    ui.finalize_assistant_response()
 
     console.print(ui.build_final_display())
     console.print()  # Extra spacing
@@ -773,7 +933,7 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.4.2"
+__version__ = "0.5.0"
 
 
 if __name__ == "__main__":

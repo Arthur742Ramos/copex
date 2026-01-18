@@ -231,6 +231,44 @@ class TestSessionRecovery:
         assert result.auto_continues >= 1
         assert mock_client.sessions_created >= 1
 
+    def test_tool_state_mismatch_recovers_session(self):
+        """Tool state mismatch error triggers session recovery."""
+        tool_error = (
+            "Model call failed: messages.0.content.1: unexpected `tool_use_id` found in "
+            "`tool_result` blocks: toolu_123. Each `tool_result` block must have a "
+            "corresponding `tool_use` block in the previous message."
+        )
+        sessions = []
+
+        def create_session():
+            if not sessions:
+                s = ScriptedSession([
+                    [build_event(EventType.SESSION_ERROR.value, message=tool_error)],
+                ])
+            else:
+                s = ScriptedSession([
+                    [build_event(EventType.ASSISTANT_MESSAGE.value, content="Recovered!"),
+                     build_event(EventType.SESSION_IDLE.value)],
+                ])
+            sessions.append(s)
+            return s
+
+        mock_client = MockClient(create_session)
+        config = CopexConfig(
+            auto_continue=True,
+            retry=RetryConfig(max_retries=2, max_auto_continues=2, base_delay=0.1)
+        )
+        client = Copex(config)
+        client._started = True
+        client._client = mock_client
+        client._session = create_session()
+
+        result = run(client.send("Hi"))
+
+        assert result.content == "Recovered!"
+        assert result.auto_continues == 1
+        assert mock_client.sessions_created == 1
+
     def test_session_recovery_preserves_context(self):
         """Recovery prompt includes conversation history."""
         # First session has message history
