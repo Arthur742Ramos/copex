@@ -99,10 +99,53 @@ class RetryConfig(BaseModel):
     )
 
 
+def get_user_state_path() -> Path:
+    """Get path to user state file."""
+    return Path.home() / ".copex" / "state.json"
+
+
+def load_last_model() -> Model | None:
+    """Load the last used model from user state."""
+    state_path = get_user_state_path()
+    if not state_path.exists():
+        return None
+    try:
+        import json
+        with open(state_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        model_value = data.get("last_model")
+        if model_value:
+            return Model(model_value)
+    except (ValueError, OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
+def save_last_model(model: Model) -> None:
+    """Save the last used model to user state."""
+    import json
+    state_path = get_user_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+    
+    # Load existing state
+    data: dict[str, Any] = {}
+    if state_path.exists():
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+    
+    # Update and save
+    data["last_model"] = model.value
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
 class CopexConfig(BaseModel):
     """Main configuration for Copex client."""
 
-    model: Model = Field(default=Model.GPT_5_2_CODEX, description="Model to use")
+    model: Model = Field(default=Model.CLAUDE_OPUS_4_5, description="Model to use")
     reasoning_effort: ReasoningEffort = Field(
         default=ReasoningEffort.XHIGH, description="Reasoning effort level"
     )

@@ -254,7 +254,7 @@ class PersistentSession:
         self,
         session_id: str,
         store: SessionStore,
-        model: Model | str = Model.GPT_5_2_CODEX,
+        model: Model | str = Model.CLAUDE_OPUS_4_5,
         reasoning_effort: ReasoningEffort | str = ReasoningEffort.XHIGH,
         auto_save: bool = True,
     ):

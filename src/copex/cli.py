@@ -18,8 +18,11 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from copex.client import Copex, StreamChunk
-from copex.config import CopexConfig
+from copex.config import CopexConfig, load_last_model, save_last_model
 from copex.models import Model, ReasoningEffort
+
+# Effective default: last used model or claude-opus-4.5
+_DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
 from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
     ActivityType,
@@ -68,8 +71,8 @@ def reasoning_callback(value: str | None) -> ReasoningEffort | None:
 def main(
     ctx: typer.Context,
     model: Annotated[
-        str, typer.Option("--model", "-m", help="Model to use")
-    ] = Model.GPT_5_2_CODEX.value,
+        str | None, typer.Option("--model", "-m", help="Model to use")
+    ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.XHIGH.value,
@@ -77,7 +80,8 @@ def main(
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
     if ctx.invoked_subcommand is None:
         # No command provided - launch interactive mode
-        interactive(model=model, reasoning=reasoning)
+        effective_model = model or _DEFAULT_MODEL.value
+        interactive(model=effective_model, reasoning=reasoning)
 
 
 class SlashCompleter(Completer):
@@ -249,8 +253,8 @@ async def _reasoning_picker(current: ReasoningEffort) -> ReasoningEffort | None:
 def chat(
     prompt: Annotated[Optional[str], typer.Argument(help="Prompt to send (or read from stdin)")] = None,
     model: Annotated[
-        str, typer.Option("--model", "-m", help="Model to use")
-    ] = Model.GPT_5_2_CODEX.value,
+        str | None, typer.Option("--model", "-m", help="Model to use")
+    ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.XHIGH.value,
@@ -284,10 +288,11 @@ def chat(
         config = CopexConfig()
 
     # Override with CLI options
+    effective_model = model or _DEFAULT_MODEL.value
     try:
-        config.model = Model(model)
+        config.model = Model(effective_model)
     except ValueError:
-        console.print(f"[red]Invalid model: {model}[/red]")
+        console.print(f"[red]Invalid model: {effective_model}[/red]")
         raise typer.Exit(1)
 
     try:
@@ -481,7 +486,7 @@ def init(
     path.parent.mkdir(parents=True, exist_ok=True)
 
     config = {
-        "model": Model.GPT_5_2_CODEX.value,
+        "model": Model.CLAUDE_OPUS_4_5.value,
         "reasoning_effort": ReasoningEffort.XHIGH.value,
         "streaming": True,
         "timeout": 300.0,
@@ -507,8 +512,8 @@ def init(
 @app.command()
 def interactive(
     model: Annotated[
-        str, typer.Option("--model", "-m", help="Model to use")
-    ] = Model.GPT_5_2_CODEX.value,
+        str | None, typer.Option("--model", "-m", help="Model to use")
+    ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.XHIGH.value,
@@ -520,9 +525,10 @@ def interactive(
     ] = None,
 ) -> None:
     """Start an interactive chat session."""
+    effective_model = model or _DEFAULT_MODEL.value
     try:
         config = CopexConfig(
-            model=Model(model),
+            model=Model(effective_model),
             reasoning_effort=ReasoningEffort(reasoning),
         )
     except ValueError as e:
@@ -607,6 +613,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 selected = await _model_picker(client.config.model)
                 if selected and selected != client.config.model:
                     client.config.model = selected
+                    save_last_model(selected)  # Persist for next run
                     # Prompt for reasoning effort if GPT model
                     if selected.value.startswith("gpt-"):
                         new_reasoning = await _reasoning_picker(client.config.reasoning_effort)
@@ -634,6 +641,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 try:
                     new_model = Model(model_name)
                     client.config.model = new_model
+                    save_last_model(new_model)  # Persist for next run
                     client.new_session()  # Need new session for model change
                     # Clear UI history for new session
                     ui.state.history = []
@@ -762,8 +770,8 @@ def ralph_command(
         Optional[str], typer.Option("--promise", "-p", help="Completion promise text")
     ] = None,
     model: Annotated[
-        str, typer.Option("--model", "-m", help="Model to use")
-    ] = Model.GPT_5_2_CODEX.value,
+        str | None, typer.Option("--model", "-m", help="Model to use")
+    ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.XHIGH.value,
@@ -777,9 +785,10 @@ def ralph_command(
     Example:
         copex ralph "Build a REST API with CRUD and tests" --promise "ALL TESTS PASSING" -n 20
     """
+    effective_model = model or _DEFAULT_MODEL.value
     try:
         config = CopexConfig(
-            model=Model(model),
+            model=Model(effective_model),
             reasoning_effort=ReasoningEffort(reasoning),
         )
     except ValueError as e:
@@ -948,7 +957,7 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.6.0"
+__version__ = "0.7.0"
 
 
 if __name__ == "__main__":

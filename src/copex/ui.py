@@ -408,9 +408,9 @@ class CopexUI:
                     tool_text.append(f" {args_preview}", style=Theme.MUTED)
 
             if tool.status == "running":
-                tool_text.append(f" ({tool.elapsed:.1f}s)", style=Theme.MUTED)
+                tool_text.append(f" ({tool.elapsed:5.1f}s)", style=Theme.MUTED)
             elif tool.duration:
-                tool_text.append(f" ({tool.duration:.1f}s)", style=Theme.MUTED)
+                tool_text.append(f" ({tool.duration:5.1f}s)", style=Theme.MUTED)
 
             branch = tree.add(tool_text)
 
@@ -656,12 +656,6 @@ class CopexUI:
     def build_final_display(self) -> Group:
         """Build the final formatted display after streaming completes."""
         elements = []
-
-        # History panel (previous turns)
-        history_panel = self._build_history_panel()
-        if history_panel:
-            elements.append(history_panel)
-            elements.append(Text())
 
         # Reasoning panel (collapsed/summary)
         if self.state.reasoning and self.density == "extended":
