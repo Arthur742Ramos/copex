@@ -226,16 +226,9 @@ class UIState:
     retries: int = 0
     last_update: float = field(default_factory=time.time)
     history: list[HistoryEntry] = field(default_factory=list)
-    # Token tracking
-    input_tokens: int = 0
-    output_tokens: int = 0
-    # Completion time
-    completed_at: float | None = None
 
     @property
     def elapsed(self) -> float:
-        if self.completed_at:
-            return self.completed_at - self.start_time
         return time.time() - self.start_time
 
     @property
@@ -259,16 +252,6 @@ class UIState:
         minutes = int(idle // 60)
         seconds = idle % 60
         return f"{minutes}m {seconds:.0f}s"
-
-    @property
-    def total_tokens(self) -> int:
-        return self.input_tokens + self.output_tokens
-
-    @property
-    def estimated_cost(self) -> float:
-        """Rough cost estimate (varies by model)."""
-        # Approximate pricing: $0.01 per 1K tokens average
-        return self.total_tokens * 0.00001
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -298,7 +281,6 @@ class CopexUI:
         self.show_all_tools = show_all_tools
         self._max_live_message_chars = 2000 if density == "extended" else 900
         self._max_live_reasoning_chars = 800 if density == "extended" else 320
-        self._bell_on_complete = False  # Can be toggled
 
     def _get_spinner(self) -> str:
         """Get current spinner frame."""
@@ -441,22 +423,12 @@ class CopexUI:
 
             branch = tree.add(tool_text)
 
-            # Add result preview if available (truncated but useful)
+            # Add result preview if available
             if tool.result and tool.status != "running":
-                lines = tool.result.strip().split("\n")
-                max_preview_lines = 3 if self.density == "extended" else 1
-                preview_lines = lines[:max_preview_lines]
-                
-                for line in preview_lines:
-                    # Truncate long lines
-                    if len(line) > 80:
-                        line = line[:77] + "..."
-                    if line.strip():
-                        branch.add(Text(f"  {line}", style=Theme.MUTED))
-                
-                remaining = len(lines) - max_preview_lines
-                if remaining > 0:
-                    branch.add(Text(f"  ... +{remaining} more lines", style=Theme.MUTED))
+                result_preview = tool.result[:100]
+                if len(tool.result) > 100:
+                    result_preview += "..."
+                branch.add(Text(result_preview, style=Theme.MUTED))
 
         if len(self.state.tool_calls) > max_tools:
             if self.show_all_tools:
@@ -552,18 +524,11 @@ class CopexUI:
 
         elapsed_text = Text()
         elapsed_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
-        elapsed_text.append(f"{self.state.elapsed_str}", style=Theme.MUTED)
+        elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
 
-        # Token/cost display
-        tokens_text = Text()
-        if self.state.total_tokens > 0:
-            tokens_text.append("💰 ", style=Theme.SUCCESS)
-            tokens_text.append(f"{self.state.total_tokens:,} tokens", style=Theme.SUCCESS)
-            if self.state.estimated_cost > 0:
-                tokens_text.append(f" (~${self.state.estimated_cost:.4f})", style=Theme.MUTED)
-        else:
-            tokens_text.append("💰 ", style=Theme.MUTED)
-            tokens_text.append("0 tokens", style=Theme.MUTED)
+        updated_text = Text()
+        updated_text.append(f"{Icons.SPARKLE} ", style=Theme.MUTED)
+        updated_text.append(f"updated {self.state.idle_str} ago", style=Theme.MUTED)
 
         model_text = Text()
         if self.state.model:
@@ -584,7 +549,7 @@ class CopexUI:
         if self.density == "extended":
             grid.add_column(justify="center")
             grid.add_column(justify="right")
-            grid.add_row(activity, elapsed_text, tokens_text)
+            grid.add_row(activity, elapsed_text, updated_text)
             grid.add_row(message_text, reasoning_text, tools_text)
             grid.add_row(model_text, Text(), retry_text)
         else:
@@ -782,18 +747,6 @@ class CopexUI:
         self.state.retries += 1
         self._touch()
 
-    def set_tokens(self, input_tokens: int = 0, output_tokens: int = 0) -> None:
-        """Set token counts."""
-        self.state.input_tokens = input_tokens
-        self.state.output_tokens = output_tokens
-        self._touch()
-
-    def add_tokens(self, input_tokens: int = 0, output_tokens: int = 0) -> None:
-        """Add to token counts."""
-        self.state.input_tokens += input_tokens
-        self.state.output_tokens += output_tokens
-        self._touch()
-
     def set_final_content(self, message: str, reasoning: str | None = None) -> None:
         """Set final content."""
         if message:
@@ -801,50 +754,7 @@ class CopexUI:
         if reasoning:
             self.state.reasoning = reasoning
         self.state.activity = ActivityType.DONE
-        self.state.completed_at = time.time()
-        # Ring bell if enabled
-        if self._bell_on_complete:
-            print("\a", end="", flush=True)
         self._touch()
-
-    def toggle_bell(self) -> bool:
-        """Toggle bell on completion. Returns new state."""
-        self._bell_on_complete = not self._bell_on_complete
-        return self._bell_on_complete
-
-    def get_last_response(self) -> str | None:
-        """Get the last assistant response for clipboard."""
-        return self.state.message if self.state.message else None
-
-    def export_conversation(self) -> str:
-        """Export conversation as markdown."""
-        lines = ["# Copex Conversation\n"]
-        lines.append(f"**Model:** {self.state.model}\n")
-        lines.append(f"**Date:** {time.strftime('%Y-%m-%d %H:%M:%S')}\n")
-        lines.append("---\n")
-        
-        for entry in self.state.history:
-            if entry.role == "user":
-                lines.append(f"## 👤 User\n\n{entry.content}\n")
-            else:
-                lines.append(f"## 🤖 Assistant\n\n{entry.content}\n")
-                if entry.reasoning:
-                    lines.append(f"\n<details>\n<summary>Reasoning</summary>\n\n{entry.reasoning}\n</details>\n")
-                if entry.tool_calls:
-                    lines.append("\n**Tool Calls:**\n")
-                    for tool in entry.tool_calls:
-                        status = "✅" if tool.status == "success" else "❌" if tool.status == "error" else "🔄"
-                        lines.append(f"- {status} `{tool.name}`")
-                        if tool.duration:
-                            lines.append(f" ({tool.duration:.2f}s)")
-                        lines.append("\n")
-            lines.append("\n---\n")
-        
-        # Add current response if not in history
-        if self.state.message and (not self.state.history or self.state.history[-1].content != self.state.message):
-            lines.append(f"## 🤖 Assistant\n\n{self.state.message}\n")
-        
-        return "".join(lines)
 
     def add_user_message(self, content: str) -> None:
         """Add a user message to history."""
@@ -873,26 +783,17 @@ class CopexUI:
         summary.add_column(justify="right")
 
         elapsed_text = Text()
-        elapsed_text.append(f"{Icons.CLOCK} ", style=Theme.SUCCESS)
-        elapsed_text.append(f"{self.state.elapsed_str}", style=Theme.SUCCESS)
-
-        # Token/cost summary
-        tokens_text = Text()
-        if self.state.total_tokens > 0:
-            tokens_text.append("💰 ", style=Theme.SUCCESS)
-            tokens_text.append(f"{self.state.total_tokens:,} tokens", style=Theme.SUCCESS)
-            if self.state.estimated_cost > 0.0001:
-                tokens_text.append(f" (~${self.state.estimated_cost:.4f})", style=Theme.MUTED)
-        else:
-            tokens_text.append("", style=Theme.MUTED)
-
-        summary.add_row(elapsed_text, tokens_text)
+        elapsed_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
+        elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
 
         retry_text = Text()
         if self.state.retries:
             retry_text.append(f"{Icons.WARNING} ", style=Theme.WARNING)
             retry_text.append(f"{self.state.retries} retries", style=Theme.WARNING)
-            summary.add_row(retry_text, Text())
+        else:
+            retry_text.append(f"{Icons.DONE} no retries", style=Theme.MUTED)
+
+        summary.add_row(elapsed_text, retry_text)
 
         if self.state.tool_calls:
             successful = sum(1 for t in self.state.tool_calls if t.status == "success")
@@ -912,9 +813,9 @@ class CopexUI:
 
         return Panel(
             summary,
-            title=f"[{Theme.SUCCESS}]{Icons.DONE} Complete[/{Theme.SUCCESS}]",
+            title=f"[{Theme.SUCCESS}]{Icons.DONE} Summary[/{Theme.SUCCESS}]",
             title_align="left",
-            border_style=Theme.SUCCESS,
+            border_style=Theme.BORDER_ACTIVE,
             padding=(0, 1),
             box=ROUNDED,
         )
@@ -981,8 +882,8 @@ def print_welcome(
             f"[{Theme.MUTED}]- Copilot Extended[/{Theme.MUTED}]\n\n"
             f"[{Theme.MUTED}]Model:[/{Theme.MUTED}] [{Theme.PRIMARY}]{model}[/{Theme.PRIMARY}]\n"
             f"[{Theme.MUTED}]Reasoning:[/{Theme.MUTED}] [{Theme.PRIMARY}]{reasoning}[/{Theme.PRIMARY}]\n\n"
-            f"[{Theme.MUTED}]Type [bold]/help[/bold] for commands, [bold]exit[/bold] to quit[/{Theme.MUTED}]\n"
-            f"[{Theme.MUTED}][bold]Ctrl+R[/bold] history search, [bold]Shift+Enter[/bold] newline[/{Theme.MUTED}]"
+            f"[{Theme.MUTED}]Type [bold]exit[/bold] to quit, [bold]new[/bold] for fresh session[/{Theme.MUTED}]\n"
+            f"[{Theme.MUTED}]Press [bold]Shift+Enter[/bold] for newline[/{Theme.MUTED}]"
         ),
         border_style=Theme.BORDER_ACTIVE,
         box=ROUNDED,

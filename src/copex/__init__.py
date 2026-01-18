@@ -10,7 +10,7 @@ from copex.mcp import MCPClient, MCPManager, MCPServerConfig, MCPTool, load_mcp_
 
 # Metrics
 from copex.metrics import MetricsCollector, RequestMetrics, SessionMetrics, get_collector
-from copex.models import Model, ReasoningEffort, supports_reasoning
+from copex.models import Model, ReasoningEffort
 
 # Persistence
 from copex.persistence import Message, PersistentSession, SessionData, SessionStore
@@ -27,7 +27,6 @@ __all__ = [
     "CopexConfig",
     "Model",
     "ReasoningEffort",
-    "supports_reasoning",
     "find_copilot_cli",
     # Ralph
     "RalphWiggum",

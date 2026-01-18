@@ -21,16 +21,6 @@ class Model(str, Enum):
     CLAUDE_OPUS_4_5 = "claude-opus-4.5"
     GEMINI_3_PRO = "gemini-3-pro-preview"
 
-    def supports_reasoning(self) -> bool:
-        """Check if this model supports reasoning effort."""
-        return self.value.startswith("gpt-")
-
-
-def supports_reasoning(model: Model | str) -> bool:
-    """Check if a model supports reasoning effort."""
-    model_str = model.value if isinstance(model, Model) else model
-    return model_str.startswith("gpt-")
-
 
 class ReasoningEffort(str, Enum):
     """Reasoning effort levels for supported models."""
