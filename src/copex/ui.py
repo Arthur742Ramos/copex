@@ -274,7 +274,7 @@ class CopexUI:
         self.density = density
         self.state = UIState()
         self._live: Live | None = None
-        self._spinners = ["◐", "◓", "◑", "◒"]
+        self._spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self._spinner_idx = 0
         self._last_frame_at = 0.0
         self._dot_frames = [".", "..", "..."]
@@ -293,7 +293,7 @@ class CopexUI:
     def _advance_frame(self) -> None:
         """Advance animation frame."""
         now = time.time()
-        if now - self._last_frame_at < 0.25:
+        if now - self._last_frame_at < 0.08:
             return
         self._last_frame_at = now
         self._spinner_idx = (self._spinner_idx + 1) % len(self._spinners)
@@ -468,11 +468,8 @@ class CopexUI:
         if not self.state.message:
             return None
 
-        # For live display, show raw text with cursor
-        message = self.state.message
-        if len(message) > self._max_live_message_chars:
-            message = "..." + message[-self._max_live_message_chars:]
-        content = Text(message, style=Theme.MESSAGE)
+        # Show full message content (no truncation) so box expands with content
+        content = Text(self.state.message, style=Theme.MESSAGE)
         if self.state.activity == ActivityType.RESPONDING:
             content.append("▌", style=f"bold {Theme.PRIMARY}")
 

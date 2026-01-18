@@ -9,7 +9,7 @@ from typing import Annotated, Optional
 
 import typer
 from prompt_toolkit import PromptSession
-from prompt_toolkit.completion import WordCompleter
+from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
 from rich.console import Console
@@ -80,12 +80,27 @@ def main(
         interactive(model=model, reasoning=reasoning)
 
 
+class SlashCompleter(Completer):
+    """Completer that only triggers on slash commands."""
+
+    def __init__(self, commands: list[str]) -> None:
+        self.commands = commands
+
+    def get_completions(self, document, complete_event):
+        text = document.text_before_cursor.lstrip()
+        if not text.startswith("/"):
+            return
+        for cmd in self.commands:
+            if cmd.lower().startswith(text.lower()):
+                yield Completion(cmd, start_position=-len(text))
+
+
 def _build_prompt_session() -> PromptSession:
     history_path = Path.home() / ".copex" / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     bindings = KeyBindings()
     commands = ["/model", "/reasoning", "/models", "/new", "/status", "/tools", "/help"]
-    completer = WordCompleter(commands, ignore_case=True)
+    completer = SlashCompleter(commands)
 
     @bindings.add("enter")
     def _(event) -> None:
@@ -933,7 +948,7 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.5.0"
+__version__ = "0.6.0"
 
 
 if __name__ == "__main__":
