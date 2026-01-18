@@ -311,32 +311,41 @@ class CopexUI:
         return header
 
     def _build_activity_indicator(self) -> Text:
-        """Build the current activity indicator."""
+        """Build the current activity indicator with fixed width to prevent shifting."""
         indicator = Text()
         dots = self._get_dots()
         spinner = self._get_spinner()
 
+        # Fixed width for activity text to prevent elapsed time from shifting
+        # "Executing tools" is longest at 15 chars + "..." = 18 chars
+        activity_width = 18
+
         if self.state.activity == ActivityType.THINKING:
             indicator.append(f" {spinner} ", style=f"bold {Theme.PRIMARY}")
-            indicator.append(f"Thinking{dots}", style=Theme.PRIMARY)
+            label = f"Thinking{dots}"
+            indicator.append(label.ljust(activity_width), style=Theme.PRIMARY)
         elif self.state.activity == ActivityType.REASONING:
             indicator.append(f" {spinner} ", style=f"bold {Theme.ACCENT}")
-            indicator.append(f"Reasoning{dots}", style=Theme.ACCENT)
+            label = f"Reasoning{dots}"
+            indicator.append(label.ljust(activity_width), style=Theme.ACCENT)
         elif self.state.activity == ActivityType.RESPONDING:
             indicator.append(f" {spinner} ", style=f"bold {Theme.SUCCESS}")
-            indicator.append(f"Responding{dots}", style=Theme.SUCCESS)
+            label = f"Responding{dots}"
+            indicator.append(label.ljust(activity_width), style=Theme.SUCCESS)
         elif self.state.activity == ActivityType.TOOL_CALL:
             indicator.append(f" {spinner} ", style=f"bold {Theme.WARNING}")
-            indicator.append(f"Executing tools{dots}", style=Theme.WARNING)
+            label = f"Executing tools{dots}"
+            indicator.append(label.ljust(activity_width), style=Theme.WARNING)
         elif self.state.activity == ActivityType.DONE:
             indicator.append(f" {Icons.DONE} ", style=f"bold {Theme.SUCCESS}")
-            indicator.append("Complete", style=Theme.SUCCESS)
+            indicator.append("Complete".ljust(activity_width), style=Theme.SUCCESS)
         elif self.state.activity == ActivityType.ERROR:
             indicator.append(f" {Icons.ERROR} ", style=f"bold {Theme.ERROR}")
-            indicator.append("Error", style=Theme.ERROR)
+            indicator.append("Error".ljust(activity_width), style=Theme.ERROR)
         else:
             indicator.append(f" {spinner} ", style=Theme.MUTED)
-            indicator.append(f"Waiting{dots}", style=Theme.MUTED)
+            label = f"Waiting{dots}"
+            indicator.append(label.ljust(activity_width), style=Theme.MUTED)
 
         return indicator
 

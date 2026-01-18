@@ -957,7 +957,7 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.7.0"
+__version__ = "0.7.1"
 
 
 if __name__ == "__main__":
