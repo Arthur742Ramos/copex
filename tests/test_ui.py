@@ -55,17 +55,16 @@ class TestCopexUISpinner:
         ui.state.activity = ActivityType.TOOL_CALL
         tool_spinner = ui._get_spinner()
         
-        # Different activities should have different spinners
-        # (emoji spinners vs braille spinners)
-        assert thinking_spinner in CopexUI.SPINNERS["thinking"]
-        assert tool_spinner in CopexUI.SPINNERS["tools"]
+        # All activities use the same spinner set now
+        assert thinking_spinner in ui._spinners
+        assert tool_spinner in ui._spinners
 
     def test_spinner_default_for_waiting(self):
         """Default spinner for waiting activity."""
         ui = CopexUI()
         ui.state.activity = ActivityType.WAITING
         spinner = ui._get_spinner()
-        assert spinner in CopexUI.SPINNERS["default"]
+        assert spinner in ui._spinners
 
     def test_spinner_advances_after_interval(self):
         """Spinner should advance after interval."""
@@ -73,10 +72,10 @@ class TestCopexUISpinner:
         initial_idx = ui._spinner_idx
 
         # Force time to pass
-        ui._last_frame_at = time.time() - 0.2  # 200ms ago
+        ui._last_frame_at = time.time() - 0.1  # 100ms ago
         ui._advance_frame()
 
-        assert ui._spinner_idx == (initial_idx + 1) % 10
+        assert ui._spinner_idx == (initial_idx + 1) % len(ui._spinners)
 
     def test_spinner_does_not_advance_too_quickly(self):
         """Spinner should not advance if less than interval passed."""

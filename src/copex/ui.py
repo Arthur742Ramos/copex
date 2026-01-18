@@ -278,15 +278,6 @@ class UIState:
 class CopexUI:
     """Beautiful UI for Copex CLI."""
 
-    # Different spinners for different activities
-    SPINNERS = {
-        "thinking": ["🤔", "💭", "🧠", "💡"],
-        "reasoning": ["🔍", "📊", "🔬", "📈"],
-        "tools": ["⚙️", "🔧", "🛠️", "⚡"],
-        "responding": ["✍️", "📝", "💬", "📢"],
-        "default": ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"],
-    }
-
     def __init__(
         self,
         console: Console | None = None,
@@ -300,7 +291,7 @@ class CopexUI:
         self.density = density
         self.state = UIState()
         self._live: Live | None = None
-        self._spinners = self.SPINNERS["default"]
+        self._spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self._spinner_idx = 0
         self._last_frame_at = 0.0
         self._dot_frames = [".", "..", "..."]
@@ -310,19 +301,8 @@ class CopexUI:
         self._bell_on_complete = False  # Can be toggled
 
     def _get_spinner(self) -> str:
-        """Get current spinner frame based on current activity."""
-        activity = self.state.activity
-        if activity == ActivityType.THINKING:
-            spinners = self.SPINNERS["thinking"]
-        elif activity == ActivityType.REASONING:
-            spinners = self.SPINNERS["reasoning"]
-        elif activity == ActivityType.TOOL_CALL:
-            spinners = self.SPINNERS["tools"]
-        elif activity == ActivityType.RESPONDING:
-            spinners = self.SPINNERS["responding"]
-        else:
-            spinners = self.SPINNERS["default"]
-        return spinners[self._spinner_idx % len(spinners)]
+        """Get current spinner frame."""
+        return self._spinners[self._spinner_idx]
 
     def _get_dots(self) -> str:
         """Get current dot animation frame."""
@@ -331,10 +311,10 @@ class CopexUI:
     def _advance_frame(self) -> None:
         """Advance animation frame."""
         now = time.time()
-        if now - self._last_frame_at < 0.15:  # Slower for emoji spinners
+        if now - self._last_frame_at < 0.08:
             return
         self._last_frame_at = now
-        self._spinner_idx = (self._spinner_idx + 1) % 10  # Common denominator
+        self._spinner_idx = (self._spinner_idx + 1) % len(self._spinners)
 
     def _build_header(self) -> Text:
         """Build the header with model and status."""
