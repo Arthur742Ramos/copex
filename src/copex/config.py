@@ -269,11 +269,16 @@ class CopexConfig(BaseModel):
 
     def to_session_options(self) -> dict[str, Any]:
         """Convert to create_session options."""
+        from copex.models import supports_reasoning
+
         opts: dict[str, Any] = {
             "model": self.model.value,
-            "model_reasoning_effort": self.reasoning_effort.value,
             "streaming": self.streaming,
         }
+
+        # Only include reasoning_effort for GPT models
+        if supports_reasoning(self.model):
+            opts["model_reasoning_effort"] = self.reasoning_effort.value
 
         # Skills
         if self.skills:

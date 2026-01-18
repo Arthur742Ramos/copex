@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -19,7 +20,7 @@ from rich.panel import Panel
 
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig, load_last_model, save_last_model
-from copex.models import Model, ReasoningEffort
+from copex.models import Model, ReasoningEffort, supports_reasoning
 
 # Effective default: last used model or claude-opus-4.5
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
@@ -99,11 +100,11 @@ class SlashCompleter(Completer):
                 yield Completion(cmd, start_position=-len(text))
 
 
-def _build_prompt_session() -> PromptSession:
+def _build_prompt_session(model: str = "") -> PromptSession:
     history_path = Path.home() / ".copex" / "history"
     history_path.parent.mkdir(parents=True, exist_ok=True)
     bindings = KeyBindings()
-    commands = ["/model", "/reasoning", "/models", "/new", "/status", "/tools", "/help"]
+    commands = ["/model", "/reasoning", "/thinking", "/models", "/new", "/status", "/tools", "/copy", "/export", "/bell", "/help"]
     completer = SlashCompleter(commands)
 
     @bindings.add("enter")
@@ -118,14 +119,18 @@ def _build_prompt_session() -> PromptSession:
     def _(event) -> None:
         event.app.current_buffer.insert_text("\n")
 
+    # Model indicator in prompt
+    prompt_msg = f"[{model}] > " if model else "copilot> "
+    
     return PromptSession(
-        message="copilot> ",
+        message=prompt_msg,
         history=FileHistory(str(history_path)),
         key_bindings=bindings,
         completer=completer,
         complete_while_typing=True,
         multiline=True,
         prompt_continuation=lambda width, line_number, is_soft_wrap: "... ",
+        enable_history_search=True,  # Ctrl+R for history search
     )
 
 
@@ -265,8 +270,8 @@ def chat(
         bool, typer.Option("--no-stream", help="Disable streaming output")
     ] = False,
     show_reasoning: Annotated[
-        bool, typer.Option("--show-reasoning/--no-reasoning", help="Show model reasoning")
-    ] = True,
+        bool, typer.Option("--show-reasoning/--no-reasoning", help="Show model reasoning (GPT models only)")
+    ] = False,
     config_file: Annotated[
         Optional[Path], typer.Option("--config", "-c", help="Config file path")
     ] = None,
@@ -325,18 +330,20 @@ async def _run_chat(
 ) -> None:
     """Run the chat command."""
     client = Copex(config)
+    # Only show reasoning for GPT models
+    effective_show_reasoning = show_reasoning and supports_reasoning(config.model)
 
     try:
         await client.start()
 
         if config.streaming and not raw:
-            await _stream_response(client, prompt, show_reasoning)
+            await _stream_response(client, prompt, effective_show_reasoning)
         else:
             response = await client.send(prompt)
             if raw:
                 print(response.content)
             else:
-                if show_reasoning and response.reasoning:
+                if effective_show_reasoning and response.reasoning:
                     console.print(Panel(
                         Markdown(response.reasoning),
                         title="[dim]Reasoning[/dim]",
@@ -517,6 +524,9 @@ def interactive(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.XHIGH.value,
+    show_reasoning: Annotated[
+        bool, typer.Option("--show-reasoning/--no-reasoning", help="Show model reasoning (GPT models only)")
+    ] = False,
     ui_theme: Annotated[
         Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
     ] = None,
@@ -542,14 +552,14 @@ def interactive(
         theme=config.ui_theme,
         density=config.ui_density,
     )
-    asyncio.run(_interactive_loop(config))
+    asyncio.run(_interactive_loop(config, show_reasoning))
 
 
-async def _interactive_loop(config: CopexConfig) -> None:
+async def _interactive_loop(config: CopexConfig, show_reasoning: bool = False) -> None:
     """Run interactive chat loop."""
     client = Copex(config)
     await client.start()
-    session = _build_prompt_session()
+    session = _build_prompt_session(config.model.value)
     show_all_tools = False
     
     # Create persistent UI for conversation history
@@ -560,21 +570,38 @@ async def _interactive_loop(config: CopexConfig) -> None:
         show_all_tools=show_all_tools,
     )
 
+    def rebuild_session() -> None:
+        """Rebuild prompt session with updated model."""
+        nonlocal session
+        session = _build_prompt_session(client.config.model.value)
+
     def show_help() -> None:
         console.print(f"\n[{Theme.MUTED}]Commands:[/{Theme.MUTED}]")
         console.print(f"  [{Theme.PRIMARY}]/model <name>[/{Theme.PRIMARY}]     - Change model (e.g., /model gpt-5.1-codex)")
-        console.print(f"  [{Theme.PRIMARY}]/reasoning <level>[/{Theme.PRIMARY}] - Change reasoning (low, medium, high, xhigh)")
+        if supports_reasoning(client.config.model):
+            console.print(f"  [{Theme.PRIMARY}]/reasoning <level>[/{Theme.PRIMARY}] - Change reasoning (low, medium, high, xhigh)")
+            console.print(f"  [{Theme.PRIMARY}]/thinking[/{Theme.PRIMARY}]           - Toggle reasoning display")
         console.print(f"  [{Theme.PRIMARY}]/models[/{Theme.PRIMARY}]            - List available models")
-        console.print(f"  [{Theme.PRIMARY}]/new[/{Theme.PRIMARY}]               - Start new session")
+        console.print(f"  [{Theme.PRIMARY}]/new[/{Theme.PRIMARY}]               - Start new session (or Ctrl+N)")
         console.print(f"  [{Theme.PRIMARY}]/status[/{Theme.PRIMARY}]            - Show current settings")
         console.print(f"  [{Theme.PRIMARY}]/tools[/{Theme.PRIMARY}]             - Toggle full tool call list")
+        console.print(f"  [{Theme.PRIMARY}]/copy[/{Theme.PRIMARY}]              - Copy last response to clipboard")
+        console.print(f"  [{Theme.PRIMARY}]/export[/{Theme.PRIMARY}]            - Export conversation as markdown")
+        console.print(f"  [{Theme.PRIMARY}]/bell[/{Theme.PRIMARY}]              - Toggle sound on completion")
         console.print(f"  [{Theme.PRIMARY}]/help[/{Theme.PRIMARY}]              - Show this help")
-        console.print(f"  [{Theme.PRIMARY}]exit[/{Theme.PRIMARY}]               - Exit\n")
+        console.print(f"  [{Theme.PRIMARY}]exit[/{Theme.PRIMARY}]               - Exit")
+        console.print(f"\n[{Theme.MUTED}]Shortcuts: Ctrl+R (history search), Shift+Enter (newline)[/{Theme.MUTED}]\n")
 
     def show_status() -> None:
         console.print(f"\n[{Theme.MUTED}]Current settings:[/{Theme.MUTED}]")
         console.print(f"  Model:     [{Theme.PRIMARY}]{client.config.model.value}[/{Theme.PRIMARY}]")
-        console.print(f"  Reasoning: [{Theme.PRIMARY}]{client.config.reasoning_effort.value}[/{Theme.PRIMARY}]\n")
+        if supports_reasoning(client.config.model):
+            console.print(f"  Reasoning: [{Theme.PRIMARY}]{client.config.reasoning_effort.value}[/{Theme.PRIMARY}]")
+            console.print(f"  Thinking:  [{Theme.PRIMARY}]{'on' if show_reasoning else 'off'}[/{Theme.PRIMARY}]")
+        console.print(f"  Bell:      [{Theme.PRIMARY}]{'on' if ui._bell_on_complete else 'off'}[/{Theme.PRIMARY}]")
+        if ui.state.total_tokens > 0:
+            console.print(f"  Tokens:    [{Theme.PRIMARY}]{ui.state.total_tokens:,}[/{Theme.PRIMARY}] (~${ui.state.estimated_cost:.4f})")
+        console.print()
 
     try:
         while True:
@@ -614,14 +641,15 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 if selected and selected != client.config.model:
                     client.config.model = selected
                     save_last_model(selected)  # Persist for next run
-                    # Prompt for reasoning effort if GPT model
-                    if selected.value.startswith("gpt-"):
+                    # Prompt for reasoning effort only for GPT models
+                    if supports_reasoning(selected):
                         new_reasoning = await _reasoning_picker(client.config.reasoning_effort)
                         if new_reasoning:
                             client.config.reasoning_effort = new_reasoning
                     client.new_session()
                     # Clear UI history for new session
                     ui.state.history = []
+                    rebuild_session()  # Update prompt with new model
                     console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {selected.value} (new session started)[/{Theme.SUCCESS}]\n")
                 continue
  
@@ -645,6 +673,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     client.new_session()  # Need new session for model change
                     # Clear UI history for new session
                     ui.state.history = []
+                    rebuild_session()  # Update prompt with new model
                     console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_model.value} (new session started)[/{Theme.SUCCESS}]\n")
                 except ValueError:
                     console.print(f"[{Theme.ERROR}]Unknown model: {model_name}[/{Theme.ERROR}]")
@@ -652,6 +681,9 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 continue
 
             if command.startswith("/reasoning ") or command.startswith("reasoning "):
+                if not supports_reasoning(client.config.model):
+                    console.print(f"[{Theme.MUTED}]Reasoning effort is only supported for GPT models[/{Theme.MUTED}]")
+                    continue
                 parts = prompt.split(maxsplit=1)
                 if len(parts) < 2:
                     console.print(f"[{Theme.ERROR}]Usage: /reasoning <level>[/{Theme.ERROR}]")
@@ -669,9 +701,56 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     console.print(f"[{Theme.ERROR}]Invalid reasoning level. Valid: {valid}[/{Theme.ERROR}]")
                 continue
 
+            if command in {"thinking", "/thinking"}:
+                if not supports_reasoning(client.config.model):
+                    console.print(f"[{Theme.MUTED}]Thinking display is only available for GPT models[/{Theme.MUTED}]")
+                    continue
+                show_reasoning = not show_reasoning
+                mode = "on" if show_reasoning else "off"
+                console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Thinking display {mode}[/{Theme.SUCCESS}]\n")
+                continue
+
+            if command in {"copy", "/copy"}:
+                last_response = ui.get_last_response()
+                if last_response:
+                    try:
+                        import subprocess
+                        # Try pbcopy (macOS), xclip (Linux), or clip (Windows)
+                        if sys.platform == "darwin":
+                            subprocess.run(["pbcopy"], input=last_response.encode(), check=True)
+                        elif sys.platform == "win32":
+                            subprocess.run(["clip"], input=last_response.encode(), check=True)
+                        else:
+                            subprocess.run(["xclip", "-selection", "clipboard"], input=last_response.encode(), check=True)
+                        console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Copied to clipboard ({len(last_response)} chars)[/{Theme.SUCCESS}]\n")
+                    except Exception as e:
+                        console.print(f"[{Theme.ERROR}]Failed to copy: {e}[/{Theme.ERROR}]")
+                else:
+                    console.print(f"[{Theme.MUTED}]No response to copy[/{Theme.MUTED}]")
+                continue
+
+            if command in {"export", "/export"}:
+                markdown = ui.export_conversation()
+                if markdown and len(ui.state.history) > 0:
+                    export_path = Path.home() / ".copex" / "exports"
+                    export_path.mkdir(parents=True, exist_ok=True)
+                    filename = f"conversation_{time.strftime('%Y%m%d_%H%M%S')}.md"
+                    filepath = export_path / filename
+                    filepath.write_text(markdown)
+                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Exported to {filepath}[/{Theme.SUCCESS}]\n")
+                else:
+                    console.print(f"[{Theme.MUTED}]No conversation to export[/{Theme.MUTED}]")
+                continue
+
+            if command in {"bell", "/bell"}:
+                is_on = ui.toggle_bell()
+                mode = "on" if is_on else "off"
+                console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Bell on completion {mode}[/{Theme.SUCCESS}]\n")
+                continue
+
             try:
                 print_user_prompt(console, prompt)
-                await _stream_response_interactive(client, prompt, ui)
+                await _stream_response_interactive(client, prompt, ui, show_reasoning)
             except Exception as e:
                 print_error(console, str(e))
 
@@ -685,6 +764,7 @@ async def _stream_response_interactive(
     client: Copex,
     prompt: str,
     ui: CopexUI,
+    show_reasoning: bool = False,
 ) -> None:
     """Stream response with beautiful UI in interactive mode."""
     # Add user message to history
@@ -693,6 +773,9 @@ async def _stream_response_interactive(
     # Reset for new turn but preserve history
     ui.reset(model=client.config.model.value, preserve_history=True)
     ui.set_activity(ActivityType.THINKING)
+    
+    # Only show reasoning for GPT models when enabled
+    effective_show_reasoning = show_reasoning and supports_reasoning(client.config.model)
 
     live_display: Live | None = None
     refresh_stop = asyncio.Event()
@@ -700,14 +783,15 @@ async def _stream_response_interactive(
     def on_chunk(chunk: StreamChunk) -> None:
         if chunk.type == "message":
             if chunk.is_final:
-                ui.set_final_content(chunk.content or ui.state.message, ui.state.reasoning)
+                ui.set_final_content(chunk.content or ui.state.message, ui.state.reasoning if effective_show_reasoning else None)
             else:
                 ui.add_message(chunk.delta)
         elif chunk.type == "reasoning":
-            if chunk.is_final:
-                pass
-            else:
-                ui.add_reasoning(chunk.delta)
+            if effective_show_reasoning:
+                if chunk.is_final:
+                    pass
+                else:
+                    ui.add_reasoning(chunk.delta)
         elif chunk.type == "tool_call":
             tool = ToolCallInfo(
                 name=chunk.tool_name or "unknown",
@@ -743,7 +827,7 @@ async def _stream_response_interactive(
             response = await client.send(prompt, on_chunk=on_chunk)
             # Prefer streamed content over response object (which may have stale fallback)
             final_message = ui.state.message if ui.state.message else response.content
-            final_reasoning = ui.state.reasoning if ui.state.reasoning else response.reasoning
+            final_reasoning = (ui.state.reasoning if ui.state.reasoning else response.reasoning) if effective_show_reasoning else None
             ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
         finally:
@@ -957,7 +1041,7 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
-__version__ = "0.7.1"
+__version__ = "0.8.0"
 
 
 if __name__ == "__main__":
