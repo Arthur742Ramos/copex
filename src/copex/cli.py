@@ -28,16 +28,12 @@ from copex.config import (
     save_last_reasoning_effort,
 )
 from copex.models import Model, ReasoningEffort
-
-# Effective default: last used model/reasoning or defaults
-_DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
-_DEFAULT_REASONING = load_last_reasoning_effort() or ReasoningEffort.XHIGH
 from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
     ActivityType,
-    CopexUI,
     ASCIIIcons,
+    CopexUI,
     Icons,
     Theme,
     ToolCallInfo,
@@ -46,6 +42,10 @@ from copex.ui import (
     print_user_prompt,
     print_welcome,
 )
+
+# Effective default: last used model/reasoning or defaults
+_DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
+_DEFAULT_REASONING = load_last_reasoning_effort() or ReasoningEffort.XHIGH
 
 app = typer.Typer(
     name="copex",
@@ -583,7 +583,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
     session = _build_prompt_session()
     show_all_tools = False
     show_reasoning = True
-    
+
     # Create persistent UI for conversation history
     ui = CopexUI(
         console,
@@ -672,7 +672,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
                     console.print(f"\n[{Theme.SUCCESS}]{icon_set.DONE} Switched to {selected.value} (new session started)[/{Theme.SUCCESS}]\n")
                 continue
- 
+
             if command in {"tools", "/tools"}:
                 show_all_tools = not show_all_tools
                 ui.show_all_tools = show_all_tools
@@ -744,7 +744,7 @@ async def _stream_response_interactive(
     """Stream response with beautiful UI in interactive mode."""
     # Add user message to history
     ui.add_user_message(prompt)
-    
+
     # Reset for new turn but preserve history
     ui.reset(model=client.config.model.value, preserve_history=True)
     ui.set_activity(ActivityType.THINKING)
@@ -1153,7 +1153,7 @@ def plan_command(
     if not task and not resume and not load_plan:
         console.print("[red]Error: Provide a task, --resume, or --load[/red]")
         raise typer.Exit(1)
-    
+
     effective_model = model or _DEFAULT_MODEL.value
     try:
         config = CopexConfig(
@@ -1231,7 +1231,7 @@ async def _run_plan(
         ralph = RalphWiggum(client)
         executor = PlanExecutor(client, ralph=ralph)
         executor.max_iterations_per_step = max_iterations
-        
+
         # Check for resume from checkpoint
         if resume:
             state = PlanState.load()
@@ -1239,7 +1239,7 @@ async def _run_plan(
                 console.print("[red]No checkpoint found (.copex-state.json)[/red]")
                 console.print("[dim]Run a plan with --execute first to create a checkpoint[/dim]")
                 raise typer.Exit(1)
-            
+
             plan = state.plan
             from_step = state.current_step
             icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
@@ -1267,69 +1267,69 @@ async def _run_plan(
                 title=f"{icon_set.TOOL} Plan Mode",
                 border_style="blue",
             ))
-            
+
             plan = await executor.generate_plan(task)
             icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
             console.print(f"\n[green]{icon_set.DONE} Generated {len(plan.steps)} steps[/green]\n")
-        
+
         # Display plan
         _display_plan(plan, ascii_icons=config.ui_ascii_icons)
-        
+
         # Save plan if requested
         if output:
             plan.save(output)
             icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
             console.print(f"\n[green]{icon_set.DONE} Saved plan to {output}[/green]")
-        
+
         # Execute if requested
         if execute:
             if review:
                 if not typer.confirm("\nProceed with execution?"):
                     console.print("[yellow]Execution cancelled[/yellow]")
                     return
-            
+
             console.print(f"\n[bold blue]Executing from step {from_step}...[/bold blue]\n")
-            
+
             # Track execution timing
             plan_start_time = time.time()
-            
+
             def on_step_start(step: PlanStep) -> None:
                 total = len(plan.steps)
                 icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
                 console.print(f"[blue]{icon_set.CLOCK} Step {step.number}/{total}:[/blue] {step.description}")
-            
+
             def on_step_complete(step: PlanStep) -> None:
                 # Format duration
                 duration = step.duration_seconds or 0
                 duration_str = _format_duration(duration)
-                
+
                 # Get result preview
                 preview = (step.result or "")[:100]
                 if len(step.result or "") > 100:
                     preview += "..."
-                
+
                 icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
                 console.print(f"[green]{icon_set.DONE} Step {step.number} complete ({duration_str})[/green]")
                 if preview:
                     console.print(f"  [dim]— {preview}[/dim]")
-                
+
                 # Show ETA after 2+ steps completed
                 completed_count = plan.completed_count
                 if completed_count >= 2:
                     remaining_est = plan.estimate_remaining_seconds()
                     if remaining_est is not None:
                         console.print(f"  [dim cyan]Estimated remaining: ~{_format_duration(remaining_est)}[/dim cyan]")
-                
+
                 console.print()
-            
+
             def on_error(step: PlanStep, error: Exception) -> bool:
                 duration = step.duration_seconds or 0
                 duration_str = _format_duration(duration)
                 icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
                 console.print(f"[red]{icon_set.ERROR} Step {step.number} failed ({duration_str}): {error}[/red]")
-                console.print(f"[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
+                console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
                 return typer.confirm("Continue with next step?", default=False)
-            
+
             from copex.progress import PlanProgressReporter
             if progress not in {"terminal", "rich", "json", "quiet"}:
                 console.print("[red]Invalid progress format. Use terminal, rich, json, or quiet.[/red]")
@@ -1349,19 +1349,19 @@ async def _run_plan(
 
             if reporter and progress != "quiet":
                 reporter.finish()
-            
+
             # Calculate total time
             total_time = time.time() - plan_start_time
-            
+
             # Show enhanced summary
             _display_plan_summary_enhanced(plan, total_time, ascii_icons=config.ui_ascii_icons)
-            
+
             # Save updated plan
             if output:
                 plan.save(output)
                 icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
                 console.print(f"\n[green]{icon_set.DONE} Updated plan saved to {output}[/green]")
-    
+
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
         console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
@@ -1392,7 +1392,7 @@ def _display_plan_summary(plan: Plan, *, ascii_icons: bool = False) -> None:
     completed = plan.completed_count
     failed = plan.failed_count
     total = len(plan.steps)
-    
+
     icon_set = ASCIIIcons if ascii_icons else Icons
     if plan.is_complete and failed == 0:
         console.print(Panel(
@@ -1419,10 +1419,10 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float, *, ascii_icons
     completed = plan.completed_count
     failed = plan.failed_count
     total = len(plan.steps)
-    
+
     # Build summary lines
     lines = []
-    
+
     icon_set = ASCIIIcons if ascii_icons else Icons
     if plan.is_complete and failed == 0:
         lines.append(f"[green]{icon_set.DONE} {completed}/{total} steps completed successfully![/green]")
@@ -1430,21 +1430,21 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float, *, ascii_icons
         lines.append(f"[yellow]{icon_set.WARNING} {completed}/{total} steps completed, {failed} failed[/yellow]")
     else:
         lines.append(f"[blue]{icon_set.TOOL} {completed}/{total} steps completed[/blue]")
-    
+
     # Timing
     lines.append("")
     lines.append(f"[bold]Total time:[/bold] {_format_duration(total_time)}")
-    
+
     # Per-step breakdown
     if completed > 0:
         avg = plan.avg_step_duration
         if avg:
             lines.append(f"[dim]Avg per step: {_format_duration(avg)}[/dim]")
-    
+
     # Token usage (if tracked)
     if plan.total_tokens > 0:
         lines.append(f"[bold]Tokens used:[/bold] {plan.total_tokens:,}")
-    
+
     # Determine panel style
     if plan.is_complete and failed == 0:
         title = f"{icon_set.DONE} Plan Complete"
@@ -1455,7 +1455,7 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float, *, ascii_icons
     else:
         title = f"{icon_set.TOOL} Progress"
         border = "blue"
-    
+
     console.print(Panel(
         "\n".join(lines),
         title=title,

@@ -10,15 +10,15 @@ Allows saving sessions to disk and resuming later, useful for:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
-import logging
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from copex.models import Model, ReasoningEffort
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass

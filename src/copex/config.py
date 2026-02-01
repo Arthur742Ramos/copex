@@ -264,7 +264,7 @@ def save_last_model(model: Model) -> None:
     import json
     state_path = get_user_state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Load existing state
     data: dict[str, Any] = {}
     if state_path.exists():
@@ -273,7 +273,7 @@ def save_last_model(model: Model) -> None:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             pass
-    
+
     # Update and save
     data["last_model"] = model.value
     with open(state_path, "w", encoding="utf-8") as f:

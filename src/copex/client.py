@@ -434,34 +434,34 @@ class Copex:
 
     async def _create_session_with_reasoning(self) -> CopilotSession:
         """Create a session with reasoning effort support.
-        
+
         The GitHub Copilot SDK's create_session() ignores model_reasoning_effort,
         so we bypass it and call the JSON-RPC directly to inject this parameter.
-        
+
         Falls back to SDK's create_session() in test environments where the
         internal JSON-RPC client isn't accessible.
         """
         opts = self.config.to_session_options()
-        
+
         # Check if we can access the internal JSON-RPC client
         # If not (e.g., in tests with mocked clients), fall back to SDK's create_session
         if not hasattr(self._client, '_client') or self._client._client is None:
             return await self._client.create_session(opts)
-        
+
         # Build the wire payload with proper camelCase keys
         payload: dict[str, Any] = {}
-        
+
         if opts.get("model"):
             payload["model"] = opts["model"]
         if opts.get("streaming") is not None:
             payload["streaming"] = opts["streaming"]
-        
+
         # The key fix: inject modelReasoningEffort directly into the wire payload
         # The SDK's create_session() drops this, but the server accepts it!
         reasoning_effort = opts.get("model_reasoning_effort")
         if reasoning_effort and reasoning_effort != "none":
             payload["modelReasoningEffort"] = reasoning_effort
-        
+
         # Map other session options
         if opts.get("system_message"):
             payload["systemMessage"] = opts["system_message"]
@@ -486,7 +486,7 @@ class Copex:
             elif isinstance(payload["systemMessage"], dict):
                 existing = payload["systemMessage"].get("content", "")
                 payload["systemMessage"]["content"] = f"{existing}\n\n{opts['instructions']}" if existing else opts["instructions"]
-        
+
         # Call the JSON-RPC directly, bypassing the SDK's create_session
         logger.debug(
             "session.create",
@@ -499,18 +499,18 @@ class Copex:
             },
         )
         response = await self._client._client.request("session.create", payload)
-        
+
         session_id = response["sessionId"]
         workspace_path = response.get("workspacePath")
-        
+
         # Create a CopilotSession using the SDK's class
         session = CopilotSession(session_id, self._client._client, workspace_path)
-        
+
         # Register the session with the client for event dispatch
         # Note: we access the internal _sessions dict since we bypassed create_session
         with self._client._sessions_lock:
             self._client._sessions[session_id] = session
-        
+
         return session
 
     async def _get_session_context(self, session: Any) -> str | None:

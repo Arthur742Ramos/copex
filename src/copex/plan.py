@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import json
 import re
-import time
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
@@ -30,7 +29,7 @@ STATE_FILE_NAME = ".copex-state.json"
 
 class StepStatus(Enum):
     """Status of a plan step."""
-    
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -41,7 +40,7 @@ class StepStatus(Enum):
 @dataclass
 class PlanStep:
     """A single step in a plan."""
-    
+
     number: int
     description: str
     status: StepStatus = StepStatus.PENDING
@@ -90,7 +89,7 @@ class PlanStep:
 @dataclass
 class Plan:
     """A complete execution plan."""
-    
+
     task: str
     steps: list[PlanStep] = field(default_factory=list)
     created_at: datetime = field(default_factory=datetime.now)
@@ -223,11 +222,11 @@ class Plan:
 class PlanState:
     """
     Checkpoint state for resumable plan execution.
-    
+
     Saved to .copex-state.json in working directory after each step completes.
     Enables resuming interrupted plans from the last completed step.
     """
-    
+
     task: str
     plan: Plan
     completed: list[int] = field(default_factory=list)
@@ -236,7 +235,7 @@ class PlanState:
     started_at: str = field(default_factory=lambda: datetime.now().isoformat())
     last_updated: str = field(default_factory=lambda: datetime.now().isoformat())
     total_tokens: int = 0
-    
+
     def to_dict(self) -> dict[str, Any]:
         """Convert to dictionary for JSON serialization."""
         return {
@@ -249,7 +248,7 @@ class PlanState:
             "last_updated": self.last_updated,
             "total_tokens": self.total_tokens,
         }
-    
+
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> "PlanState":
         """Create from dictionary."""
@@ -263,14 +262,14 @@ class PlanState:
             last_updated=data.get("last_updated", datetime.now().isoformat()),
             total_tokens=data.get("total_tokens", 0),
         )
-    
+
     def save(self, path: Path | None = None) -> Path:
         """
         Save state to file.
-        
+
         Args:
             path: Optional path. Defaults to .copex-state.json in cwd.
-            
+
         Returns:
             Path where state was saved.
         """
@@ -279,15 +278,15 @@ class PlanState:
         self.last_updated = datetime.now().isoformat()
         path.write_text(json.dumps(self.to_dict(), indent=2))
         return path
-    
+
     @classmethod
     def load(cls, path: Path | None = None) -> "PlanState | None":
         """
         Load state from file.
-        
+
         Args:
             path: Optional path. Defaults to .copex-state.json in cwd.
-            
+
         Returns:
             PlanState if file exists, None otherwise.
         """
@@ -300,19 +299,19 @@ class PlanState:
             return cls.from_dict(data)
         except (json.JSONDecodeError, KeyError):
             return None
-    
+
     @classmethod
     def exists(cls, path: Path | None = None) -> bool:
         """Check if state file exists."""
         if path is None:
             path = Path.cwd() / STATE_FILE_NAME
         return path.exists()
-    
+
     @classmethod
     def cleanup(cls, path: Path | None = None) -> bool:
         """
         Remove state file (called on successful completion).
-        
+
         Returns:
             True if file was removed, False if it didn't exist.
         """
@@ -322,7 +321,7 @@ class PlanState:
             path.unlink()
             return True
         return False
-    
+
     def update_step(self, step: PlanStep) -> None:
         """Update state after a step completes."""
         self.current_step = step.number + 1
@@ -333,7 +332,7 @@ class PlanState:
                 self.step_results[str(step.number)] = step.result[:500]  # Truncate long results
             self.total_tokens += step.tokens_used
         self.last_updated = datetime.now().isoformat()
-    
+
     @classmethod
     def from_plan(cls, plan: Plan) -> "PlanState":
         """Create state from a plan."""
@@ -389,7 +388,7 @@ class PlanExecutor:
     def __init__(self, client: Any, ralph: RalphWiggum | None = None):
         """
         Initialize executor with a Copex client.
-        
+
         Args:
             client: A Copex client instance
             ralph: Optional RalphWiggum instance for iterative step execution
@@ -414,26 +413,26 @@ class PlanExecutor:
         """Generate a plan for a task."""
         prompt = PLAN_GENERATION_PROMPT.format(task=task)
         response = await self.client.send(prompt)
-        
+
         steps = self._parse_steps(response.content)
         plan = Plan(task=task, steps=steps)
-        
+
         if on_plan_generated:
             on_plan_generated(plan)
-        
+
         return plan
 
     def _parse_steps(self, content: str) -> list[PlanStep]:
         """Parse steps from AI response."""
         steps = []
-        
+
         # Try line-by-line parsing first (most reliable)
         lines = content.strip().split("\n")
         for line in lines:
             line = line.strip()
             if not line:
                 continue
-            
+
             # Match "STEP N - description" or "N) description" variants
             match = re.match(
                 r"^(?:STEP\s*)?(\d+)\s*[.:\)-]\s*(.+)$",
@@ -444,7 +443,7 @@ class PlanExecutor:
                 desc = match.group(2).strip()
                 if desc:
                     steps.append(PlanStep(number=len(steps) + 1, description=desc))
-        
+
         # Fallback: if line parsing failed, try multi-line pattern
         if not steps:
             pattern = r"(?:STEP\s*)?(\d+)\s*[.:\)-]\s*(.+?)(?=(?:\n\s*)?(?:STEP\s*)?\d+\s*[.:\)-]|\Z)"
@@ -453,7 +452,7 @@ class PlanExecutor:
                 description = " ".join(desc.strip().split())
                 if description:
                     steps.append(PlanStep(number=i, description=description))
-        
+
         # Final fallback: split by lines and clean prefixes
         if not steps:
             for i, line in enumerate(lines, 1):
@@ -465,7 +464,7 @@ class PlanExecutor:
         if not steps:
             import logging
             logging.getLogger(__name__).warning("No plan steps parsed from response")
-        
+
         return steps
 
     async def execute_plan(
@@ -481,7 +480,7 @@ class PlanExecutor:
     ) -> Plan:
         """
         Execute a plan step by step.
-        
+
         Args:
             plan: The plan to execute
             from_step: Start execution from this step number
@@ -490,41 +489,41 @@ class PlanExecutor:
             on_error: Called on error, return True to continue, False to stop
             save_checkpoints: Whether to save state after each step (for resume)
             state_path: Path for state file (defaults to .copex-state.json in cwd)
-            
+
         Returns:
             The updated plan with execution results
         """
         self._cancelled = False
         self._state_path = state_path
-        
+
         # Initialize state for checkpointing
         if save_checkpoints:
             self._state = PlanState.from_plan(plan)
             self._state.save(self._state_path)
-        
+
         for step in plan.steps:
             if self._cancelled:
                 break
-                
+
             if step.number < from_step:
                 if step.status == StepStatus.PENDING:
                     step.status = StepStatus.SKIPPED
                 continue
-            
+
             if step.status in (StepStatus.COMPLETED, StepStatus.SKIPPED):
                 continue
-            
+
             step.status = StepStatus.RUNNING
             step.started_at = datetime.now()
-            
+
             # Update checkpoint with running step
             if save_checkpoints and self._state:
                 self._state.current_step = step.number
                 self._state.save(self._state_path)
-            
+
             if on_step_start:
                 on_step_start(step)
-            
+
             try:
                 # Build context from completed steps
                 completed_steps = "\n".join(
@@ -532,14 +531,14 @@ class PlanExecutor:
                     for s in plan.steps
                     if s.status == StepStatus.COMPLETED and s.number < step.number
                 ) or "(none)"
-                
+
                 prompt = STEP_EXECUTION_PROMPT.format(
                     step_number=step.number,
                     task=plan.task,
                     completed_steps=completed_steps,
                     current_step=step.description,
                 )
-                
+
                 # Use Ralph loop if available, otherwise single call
                 if self.ralph:
                     completion_promise = f"Step {step.number} complete"
@@ -559,44 +558,44 @@ class PlanExecutor:
                         tokens_total = response.token_usage.total
                         if isinstance(tokens_total, int):
                             step.tokens_used = tokens_total
-                    
+
                 step.status = StepStatus.COMPLETED
                 step.completed_at = datetime.now()
-                
+
                 # Save checkpoint after step completion
                 if save_checkpoints and self._state:
                     self._state.update_step(step)
                     self._state.plan = plan  # Update plan in state
                     self._state.save(self._state_path)
-                
+
                 if on_step_complete:
                     on_step_complete(step)
-                    
+
             except Exception as e:
                 step.status = StepStatus.FAILED
                 step.error = str(e)
                 step.completed_at = datetime.now()
-                
+
                 # Save checkpoint on failure too
                 if save_checkpoints and self._state:
                     self._state.current_step = step.number
                     self._state.plan = plan
                     self._state.save(self._state_path)
-                
+
                 if on_error:
                     should_continue = on_error(step, e)
                     if not should_continue:
                         break
                 else:
                     break
-        
+
         if plan.is_complete:
             plan.completed_at = datetime.now()
             plan.total_tokens = self._state.total_tokens if self._state else 0
             # Clean up state file on successful completion
             if save_checkpoints:
                 PlanState.cleanup(self._state_path)
-        
+
         return plan
 
     async def execute_step(
@@ -608,6 +607,6 @@ class PlanExecutor:
         step = next((s for s in plan.steps if s.number == step_number), None)
         if not step:
             raise ValueError(f"Step {step_number} not found in plan")
-        
+
         await self.execute_plan(plan, from_step=step_number)
         return step
