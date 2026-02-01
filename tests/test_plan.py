@@ -625,3 +625,145 @@ class TestPromptTemplates:
             current_step="Do something",
         )
         assert "Step 1" in result or "step 1" in result
+
+
+class TestRalphLoopIntegration:
+    """Tests for Ralph Wiggum loop integration in plan execution."""
+
+    @pytest.fixture
+    def mock_client(self):
+        """Create a mock Copex client."""
+        return MagicMock()
+
+    @pytest.fixture
+    def mock_ralph(self):
+        """Create a mock RalphWiggum instance."""
+        from copex.ralph import RalphState
+        
+        ralph = MagicMock()
+        ralph.loop = AsyncMock(return_value=RalphState(
+            prompt="test",
+            iteration=3,
+            completed=True,
+            completion_reason="completion_promise",
+            history=["iteration 1", "iteration 2", "Step 1 complete"],
+        ))
+        return ralph
+
+    @pytest.mark.asyncio
+    async def test_execute_plan_uses_ralph_when_provided(self, mock_client, mock_ralph):
+        """Should use Ralph loop when ralph instance is provided."""
+        plan = Plan(
+            task="Build a feature",
+            steps=[PlanStep(number=1, description="Create module")],
+        )
+        
+        executor = PlanExecutor(mock_client, ralph=mock_ralph)
+        result = await executor.execute_plan(plan)
+        
+        # Ralph loop should have been called
+        mock_ralph.loop.assert_called_once()
+        call_args = mock_ralph.loop.call_args
+        assert "Create module" in call_args.kwargs.get("prompt", call_args.args[0] if call_args.args else "")
+        assert call_args.kwargs.get("completion_promise") == "Step 1 complete"
+        
+        # Step should be completed with last response from Ralph
+        assert result.steps[0].status == StepStatus.COMPLETED
+        assert result.steps[0].result == "Step 1 complete"
+
+    @pytest.mark.asyncio
+    async def test_execute_plan_falls_back_to_client_without_ralph(self, mock_client):
+        """Should use client.send when ralph is not provided."""
+        mock_client.send = AsyncMock(return_value=MagicMock(content="Done with step"))
+        
+        plan = Plan(
+            task="Test task",
+            steps=[PlanStep(number=1, description="Do something")],
+        )
+        
+        executor = PlanExecutor(mock_client)
+        result = await executor.execute_plan(plan)
+        
+        # Should have used client.send directly
+        mock_client.send.assert_called_once()
+        assert result.steps[0].status == StepStatus.COMPLETED
+        assert result.steps[0].result == "Done with step"
+
+    @pytest.mark.asyncio
+    async def test_ralph_max_iterations_configurable(self, mock_client, mock_ralph):
+        """Should pass max_iterations to Ralph loop."""
+        plan = Plan(
+            task="Test",
+            steps=[PlanStep(number=1, description="Step 1")],
+        )
+        
+        executor = PlanExecutor(mock_client, ralph=mock_ralph)
+        executor.max_iterations_per_step = 15
+        
+        await executor.execute_plan(plan)
+        
+        call_args = mock_ralph.loop.call_args
+        assert call_args.kwargs.get("max_iterations") == 15
+
+    @pytest.mark.asyncio
+    async def test_ralph_uses_step_number_in_completion_promise(self, mock_client, mock_ralph):
+        """Completion promise should include step number."""
+        from copex.ralph import RalphState
+        
+        # Return different states for each step
+        mock_ralph.loop.side_effect = [
+            RalphState(prompt="", completed=True, history=["Step 1 done"]),
+            RalphState(prompt="", completed=True, history=["Step 2 done"]),
+        ]
+        
+        plan = Plan(
+            task="Multi-step task",
+            steps=[
+                PlanStep(number=1, description="First"),
+                PlanStep(number=2, description="Second"),
+            ],
+        )
+        
+        executor = PlanExecutor(mock_client, ralph=mock_ralph)
+        await executor.execute_plan(plan)
+        
+        calls = mock_ralph.loop.call_args_list
+        assert calls[0].kwargs.get("completion_promise") == "Step 1 complete"
+        assert calls[1].kwargs.get("completion_promise") == "Step 2 complete"
+
+    @pytest.mark.asyncio
+    async def test_ralph_empty_history_uses_fallback_result(self, mock_client, mock_ralph):
+        """Should use fallback result if Ralph history is empty."""
+        from copex.ralph import RalphState
+        
+        mock_ralph.loop.return_value = RalphState(
+            prompt="test",
+            completed=True,
+            history=[],  # Empty history
+        )
+        
+        plan = Plan(
+            task="Test",
+            steps=[PlanStep(number=1, description="Step 1")],
+        )
+        
+        executor = PlanExecutor(mock_client, ralph=mock_ralph)
+        result = await executor.execute_plan(plan)
+        
+        assert result.steps[0].result == "Step completed"
+
+    @pytest.mark.asyncio
+    async def test_ralph_error_marks_step_failed(self, mock_client, mock_ralph):
+        """Should mark step as failed if Ralph loop raises."""
+        mock_ralph.loop.side_effect = Exception("Ralph failed")
+        
+        plan = Plan(
+            task="Test",
+            steps=[PlanStep(number=1, description="Step 1")],
+        )
+        
+        executor = PlanExecutor(mock_client, ralph=mock_ralph)
+        result = await executor.execute_plan(plan)
+        
+        assert result.steps[0].status == StepStatus.FAILED
+        assert "Ralph failed" in result.steps[0].error

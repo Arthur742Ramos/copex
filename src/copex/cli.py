@@ -932,6 +932,9 @@ def plan_command(
     load_plan: Annotated[
         Optional[Path], typer.Option("--load", "-l", help="Load plan from file instead of generating")
     ] = None,
+    max_iterations: Annotated[
+        int, typer.Option("--max-iterations", "-n", help="Max iterations per step (Ralph loop)")
+    ] = 10,
     model: Annotated[
         str | None, typer.Option("--model", "-m", help="Model to use")
     ] = None,
@@ -966,6 +969,7 @@ def plan_command(
         output=output,
         from_step=from_step,
         load_plan=load_plan,
+        max_iterations=max_iterations,
     ))
 
 
@@ -977,13 +981,17 @@ async def _run_plan(
     output: Path | None,
     from_step: int,
     load_plan: Path | None,
+    max_iterations: int = 10,
 ) -> None:
     """Run plan generation and optional execution."""
     client = Copex(config)
     await client.start()
 
     try:
-        executor = PlanExecutor(client)
+        # Create Ralph instance for iterative step execution
+        ralph = RalphWiggum(client)
+        executor = PlanExecutor(client, ralph=ralph)
+        executor.max_iterations_per_step = max_iterations
         
         # Load or generate plan
         if load_plan:
