@@ -1,6 +1,6 @@
 [package]
 name = "copex"
-version = "1.0.0"
+version = "1.0.3"
 edition = "2024"
 description = "Copilot Extended - AI assistant CLI with chat, plan, and ralph modes"
 authors = ["Arthur Ramos <arthur742ramos@gmail.com>"]
