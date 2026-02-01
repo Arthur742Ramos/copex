@@ -23,6 +23,7 @@ from copex.models import Model, ReasoningEffort
 
 # Effective default: last used model or claude-opus-4.5
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
+from copex.plan import Plan, PlanExecutor, PlanStep, StepStatus
 from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
     ActivityType,
@@ -913,12 +914,193 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
+@app.command("plan")
+def plan_command(
+    task: Annotated[str, typer.Argument(help="Task to plan")],
+    execute: Annotated[
+        bool, typer.Option("--execute", "-e", help="Execute the plan after generating")
+    ] = False,
+    review: Annotated[
+        bool, typer.Option("--review", "-R", help="Show plan and confirm before executing")
+    ] = False,
+    output: Annotated[
+        Optional[Path], typer.Option("--output", "-o", help="Save plan to file")
+    ] = None,
+    from_step: Annotated[
+        int, typer.Option("--from-step", "-f", help="Resume execution from step number")
+    ] = 1,
+    load_plan: Annotated[
+        Optional[Path], typer.Option("--load", "-l", help="Load plan from file instead of generating")
+    ] = None,
+    model: Annotated[
+        str | None, typer.Option("--model", "-m", help="Model to use")
+    ] = None,
+    reasoning: Annotated[
+        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.XHIGH.value,
+) -> None:
+    """
+    Generate and optionally execute a step-by-step plan.
+
+    Examples:
+        copex plan "Build a REST API"              # Generate plan only
+        copex plan "Build a REST API" --execute    # Generate and execute
+        copex plan "Build a REST API" --review     # Generate, review, then execute
+        copex plan "Continue" --load plan.json -f3 # Resume from step 3
+    """
+    effective_model = model or _DEFAULT_MODEL.value
+    try:
+        config = CopexConfig(
+            model=Model(effective_model),
+            reasoning_effort=ReasoningEffort(reasoning),
+        )
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    asyncio.run(_run_plan(
+        config=config,
+        task=task,
+        execute=execute or review,
+        review=review,
+        output=output,
+        from_step=from_step,
+        load_plan=load_plan,
+    ))
+
+
+async def _run_plan(
+    config: CopexConfig,
+    task: str,
+    execute: bool,
+    review: bool,
+    output: Path | None,
+    from_step: int,
+    load_plan: Path | None,
+) -> None:
+    """Run plan generation and optional execution."""
+    client = Copex(config)
+    await client.start()
+
+    try:
+        executor = PlanExecutor(client)
+        
+        # Load or generate plan
+        if load_plan:
+            if not load_plan.exists():
+                console.print(f"[red]Plan file not found: {load_plan}[/red]")
+                raise typer.Exit(1)
+            plan = Plan.load(load_plan)
+            console.print(f"[green]✓ Loaded plan from {load_plan}[/green]\n")
+        else:
+            console.print(Panel(
+                f"[bold]Generating plan for:[/bold]\n{task}",
+                title="📋 Plan Mode",
+                border_style="blue",
+            ))
+            
+            plan = await executor.generate_plan(task)
+            console.print(f"\n[green]✓ Generated {len(plan.steps)} steps[/green]\n")
+        
+        # Display plan
+        _display_plan(plan)
+        
+        # Save plan if requested
+        if output:
+            plan.save(output)
+            console.print(f"\n[green]✓ Saved plan to {output}[/green]")
+        
+        # Execute if requested
+        if execute:
+            if review:
+                if not typer.confirm("\nProceed with execution?"):
+                    console.print("[yellow]Execution cancelled[/yellow]")
+                    return
+            
+            console.print(f"\n[bold blue]Executing from step {from_step}...[/bold blue]\n")
+            
+            def on_step_start(step: PlanStep) -> None:
+                console.print(f"[blue]▶ Step {step.number}:[/blue] {step.description}")
+            
+            def on_step_complete(step: PlanStep) -> None:
+                preview = (step.result or "")[:150]
+                if len(step.result or "") > 150:
+                    preview += "..."
+                console.print(f"[green]✓ Step {step.number} complete[/green]")
+                if preview:
+                    console.print(f"  [dim]{preview}[/dim]")
+                console.print()
+            
+            def on_error(step: PlanStep, error: Exception) -> bool:
+                console.print(f"[red]✗ Step {step.number} failed: {error}[/red]")
+                return typer.confirm("Continue with next step?", default=False)
+            
+            await executor.execute_plan(
+                plan,
+                from_step=from_step,
+                on_step_start=on_step_start,
+                on_step_complete=on_step_complete,
+                on_error=on_error,
+            )
+            
+            # Show summary
+            _display_plan_summary(plan)
+            
+            # Save updated plan
+            if output:
+                plan.save(output)
+                console.print(f"\n[green]✓ Updated plan saved to {output}[/green]")
+    
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Cancelled[/yellow]")
+    except Exception as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+    finally:
+        await client.stop()
+
+
+def _display_plan(plan: Plan) -> None:
+    """Display plan steps."""
+    for step in plan.steps:
+        status_icon = {
+            StepStatus.PENDING: "⬜",
+            StepStatus.RUNNING: "🔄",
+            StepStatus.COMPLETED: "✅",
+            StepStatus.FAILED: "❌",
+            StepStatus.SKIPPED: "⏭️",
+        }.get(step.status, "⬜")
+        console.print(f"{status_icon} [bold]Step {step.number}:[/bold] {step.description}")
+
+
+def _display_plan_summary(plan: Plan) -> None:
+    """Display plan execution summary."""
+    completed = plan.completed_count
+    failed = plan.failed_count
+    total = len(plan.steps)
+    
+    if plan.is_complete and failed == 0:
+        console.print(Panel(
+            f"[green]All {total} steps completed successfully![/green]",
+            title="✅ Plan Complete",
+            border_style="green",
+        ))
+    elif failed > 0:
+        console.print(Panel(
+            f"Completed: {completed}/{total}\nFailed: {failed}",
+            title="⚠️ Plan Incomplete",
+            border_style="yellow",
+        ))
+    else:
+        console.print(Panel(
+            f"Completed: {completed}/{total}",
+            title="📋 Progress",
+            border_style="blue",
+        ))
+
+
 __version__ = "0.8.2"
 
 
 if __name__ == "__main__":
     app()
-    if ui_theme:
-        config.ui_theme = ui_theme
-    if ui_density:
-        config.ui_density = ui_density

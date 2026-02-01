@@ -6,7 +6,8 @@ from unittest.mock import MagicMock
 
 import pytest
 
-from copex.cli import SlashCompleter
+from copex.cli import SlashCompleter, _display_plan, _display_plan_summary
+from copex.plan import Plan, PlanStep, StepStatus
 
 
 class TestSlashCompleter:
@@ -102,3 +103,55 @@ class TestSlashCompleter:
         completions = list(completer.get_completions(document, None))
 
         assert completions == []
+
+
+class TestPlanDisplay:
+    """Tests for plan display functions."""
+
+    def test_display_plan_shows_all_steps(self, capsys):
+        """Should display all steps with status icons."""
+        plan = Plan(
+            task="Test task",
+            steps=[
+                PlanStep(number=1, description="First step", status=StepStatus.COMPLETED),
+                PlanStep(number=2, description="Second step", status=StepStatus.PENDING),
+            ],
+        )
+        
+        _display_plan(plan)
+        captured = capsys.readouterr()
+        
+        assert "Step 1" in captured.out
+        assert "First step" in captured.out
+        assert "Step 2" in captured.out
+        assert "Second step" in captured.out
+
+    def test_display_plan_summary_complete(self, capsys):
+        """Should show complete message when all steps done."""
+        plan = Plan(
+            task="Test",
+            steps=[
+                PlanStep(number=1, description="Step 1", status=StepStatus.COMPLETED),
+                PlanStep(number=2, description="Step 2", status=StepStatus.COMPLETED),
+            ],
+        )
+        
+        _display_plan_summary(plan)
+        captured = capsys.readouterr()
+        
+        assert "2 steps completed" in captured.out or "Plan Complete" in captured.out
+
+    def test_display_plan_summary_with_failures(self, capsys):
+        """Should show failure count when steps failed."""
+        plan = Plan(
+            task="Test",
+            steps=[
+                PlanStep(number=1, description="Step 1", status=StepStatus.COMPLETED),
+                PlanStep(number=2, description="Step 2", status=StepStatus.FAILED),
+            ],
+        )
+        
+        _display_plan_summary(plan)
+        captured = capsys.readouterr()
+        
+        assert "Failed" in captured.out or "Incomplete" in captured.out
