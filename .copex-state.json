@@ -1,0 +1,27 @@
+{
+  "task": "Test",
+  "plan": {
+    "task": "Test",
+    "steps": [
+      {
+        "number": 1,
+        "description": "Step 1",
+        "status": "failed",
+        "result": null,
+        "error": "Ralph failed",
+        "started_at": "2026-02-01T14:48:07.530020",
+        "completed_at": "2026-02-01T14:48:07.530224",
+        "tokens_used": 0
+      }
+    ],
+    "created_at": "2026-02-01T14:48:07.529858",
+    "completed_at": null,
+    "total_tokens": 0
+  },
+  "completed": [],
+  "current_step": 1,
+  "step_results": {},
+  "started_at": "2026-02-01T14:48:07.529863",
+  "last_updated": "2026-02-01T14:48:07.530241",
+  "total_tokens": 0
+}

@@ -352,6 +352,12 @@ class CopexConfig(BaseModel):
         default=True,
         description="Refresh auth on unauthorized/expired errors",
     )
+    auth_max_refresh_attempts: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description="Max auth refresh attempts before failing",
+    )
 
     # Skills and capabilities
     skills: list[str] = Field(

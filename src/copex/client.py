@@ -69,6 +69,9 @@ class _SendState:
     token_usage: TokenUsage | None = None
 
 
+MAX_AUTH_REFRESH_ATTEMPTS = 2
+
+
 class Copex:
     """Copilot Extended - Resilient wrapper with automatic retry and stuck detection."""
 
@@ -78,6 +81,8 @@ class Copex:
         self._session: Any = None
         self._started = False
         self._last_auth_refresh = 0.0
+        self._auth_refresh_attempts = 0
+        self._auth_refresh_lock = asyncio.Lock()
 
     async def start(self) -> None:
         """Start the Copilot client."""
@@ -655,6 +660,7 @@ class Copex:
                 )
                 result.retries = retries
                 result.auto_continues = auto_continues
+                self._auth_refresh_attempts = 0  # Reset on successful request
                 collector.complete_request(
                     request.request_id,
                     success=True,
@@ -690,16 +696,36 @@ class Copex:
                 )
 
                 if self.config.auth_refresh_on_error and self._is_auth_error(e):
-                    logger.warning(
-                        "auth.refresh",
-                        extra={
-                            "request_id": request.request_id,
-                            "error": error_str,
-                        },
-                    )
-                    context = await self._get_session_context(self._session) if self._session else None
-                    await self._refresh_auth(on_chunk)
-                    session, prompt = await self._build_recovery_session(context, on_chunk)
+                    max_attempts = self.config.auth_max_refresh_attempts
+                    if self._auth_refresh_attempts >= max_attempts:
+                        logger.error(
+                            "auth.refresh.max_attempts",
+                            extra={
+                                "request_id": request.request_id,
+                                "error": error_str,
+                                "attempts": self._auth_refresh_attempts,
+                            },
+                        )
+                        collector.complete_request(
+                            request.request_id,
+                            success=False,
+                            error=error_str,
+                            retries=retries,
+                        )
+                        raise
+                    async with self._auth_refresh_lock:
+                        self._auth_refresh_attempts += 1
+                        logger.warning(
+                            "auth.refresh",
+                            extra={
+                                "request_id": request.request_id,
+                                "error": error_str,
+                                "attempt": self._auth_refresh_attempts,
+                            },
+                        )
+                        context = await self._get_session_context(self._session) if self._session else None
+                        await self._refresh_auth(on_chunk)
+                        session, prompt = await self._build_recovery_session(context, on_chunk)
                     retries = 0
                     continue
 
