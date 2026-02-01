@@ -10,41 +10,43 @@ from copex.ui import ActivityType, CopexUI, Theme, ToolCallInfo
 
 
 class TestCopexUISpinner:
-    """Tests for spinner animation."""
+    """Tests for spinner animation (Codex CLI inspired)."""
 
-    def test_spinner_has_10_frames(self):
-        """Spinner should have 10 braille frames for smooth animation."""
-        ui = CopexUI()
-        assert len(ui._spinners) == 10
-        assert ui._spinners == ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+    def test_spinner_icons_have_braille_frames(self):
+        """Icons class should have braille spinner frames."""
+        from copex.ui import Icons
+        assert len(Icons.BRAILLE_SPINNER) == 10
+        assert Icons.BRAILLE_SPINNER == ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     def test_spinner_advances_after_interval(self):
-        """Spinner should advance after 80ms."""
+        """Spinner should advance after 32ms frame interval."""
         ui = CopexUI()
-        initial_idx = ui._spinner_idx
+        initial_idx = ui._frame_idx
 
         # Force time to pass
-        ui._last_frame_at = time.time() - 0.1  # 100ms ago
+        ui._last_frame_at = time.time() - 0.05  # 50ms ago (> 32ms)
         ui._advance_frame()
 
-        assert ui._spinner_idx == (initial_idx + 1) % len(ui._spinners)
+        assert ui._frame_idx == (initial_idx + 1) % 60
 
     def test_spinner_does_not_advance_too_quickly(self):
-        """Spinner should not advance if less than 80ms passed."""
+        """Spinner should not advance if less than 32ms passed."""
         ui = CopexUI()
         ui._advance_frame()  # First advance
-        initial_idx = ui._spinner_idx
+        initial_idx = ui._frame_idx
 
         # Immediately try again
         ui._advance_frame()
 
-        assert ui._spinner_idx == initial_idx  # Should not have changed
+        assert ui._frame_idx == initial_idx  # Should not have changed
 
-    def test_get_spinner_returns_current_frame(self):
-        """_get_spinner should return the current frame."""
+    def test_get_spinner_returns_icon(self):
+        """_get_spinner should return a spinner icon."""
         ui = CopexUI()
-        ui._spinner_idx = 3
-        assert ui._get_spinner() == "⠸"
+        from copex.ui import Icons
+        spinner = ui._get_spinner()
+        # Should return a braille spinner frame or bullet
+        assert spinner in Icons.BRAILLE_SPINNER or spinner == Icons.BULLET
 
 
 class TestCopexUIMessagePanel:

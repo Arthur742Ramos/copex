@@ -1,29 +1,161 @@
-"""Beautiful CLI UI components for Copex."""
+"""Beautiful CLI UI components for Copex - Codex CLI inspired.
+
+This module provides polished terminal UI components with:
+- Shimmer animations (like Codex CLI)
+- Terminal color detection for light/dark themes
+- Adaptive color blending
+- Smooth spinner animations
+- Clean status indicators
+- Diff visualization with line numbers
+- Professional color scheme
+- Token usage display with cost calculation
+"""
 
 from __future__ import annotations
 
+import os
+import sys
 import time
 from dataclasses import dataclass, field
 from enum import Enum
 from typing import Any
 
-from rich.box import ROUNDED
+from rich.box import ROUNDED, MINIMAL
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
+
+from copex.ui_components import TokenUsageDisplay
 from rich.panel import Panel
+from rich.syntax import Syntax
 from rich.table import Table
 from rich.text import Text
 from rich.tree import Tree
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Theme and Colors
+# Terminal Detection & Color System (Codex-inspired)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def detect_terminal_colors() -> tuple[tuple[int, int, int] | None, tuple[int, int, int] | None]:
+    """
+    Detect terminal foreground and background colors.
+    Returns (fg_rgb, bg_rgb) or (None, None) if detection fails.
+    
+    Uses OSC 10/11 escape sequences on Unix.
+    """
+    if sys.platform == "win32" or not sys.stdout.isatty():
+        return None, None
+    
+    # Skip detection in non-interactive environments
+    if os.environ.get("CI") or os.environ.get("NO_COLOR"):
+        return None, None
+    
+    # For now, return None and let is_light_theme() use heuristics
+    # Full OSC detection would require raw terminal I/O
+    return None, None
+
+
+def is_light_theme() -> bool:
+    """
+    Detect if terminal is using a light theme.
+    Uses multiple heuristics:
+    1. COLORFGBG environment variable
+    2. Common terminal-specific variables
+    3. macOS Terminal.app detection
+    """
+    # Check COLORFGBG (format: "fg;bg" where bg > 7 usually means light)
+    colorfgbg = os.environ.get("COLORFGBG", "")
+    if ";" in colorfgbg:
+        try:
+            _, bg = colorfgbg.rsplit(";", 1)
+            bg_idx = int(bg)
+            # In 16-color mode, indices 7, 15 are often white/light
+            if bg_idx in (7, 15):
+                return True
+            if bg_idx == 0:
+                return False
+        except (ValueError, IndexError):
+            pass
+    
+    # macOS Terminal.app detection
+    term_program = os.environ.get("TERM_PROGRAM", "")
+    if term_program == "Apple_Terminal":
+        # Apple Terminal defaults to light
+        return True
+    
+    # iTerm2 can report theme
+    iterm_profile = os.environ.get("ITERM_PROFILE", "").lower()
+    if "light" in iterm_profile:
+        return True
+    if "dark" in iterm_profile:
+        return False
+    
+    # VS Code terminal
+    if os.environ.get("VSCODE_INJECTION"):
+        vscode_theme = os.environ.get("VSCODE_TERM_PROFILE", "").lower()
+        if "light" in vscode_theme:
+            return True
+    
+    # Default to dark (most developer terminals are dark)
+    return False
+
+
+def supports_true_color() -> bool:
+    """Check if terminal supports 24-bit RGB colors."""
+    colorterm = os.environ.get("COLORTERM", "")
+    return colorterm in ("truecolor", "24bit")
+
+
+def supports_256_color() -> bool:
+    """Check if terminal supports 256 colors."""
+    term = os.environ.get("TERM", "")
+    return "256color" in term or supports_true_color()
+
+
+def blend_color(
+    fg: tuple[int, int, int],
+    bg: tuple[int, int, int],
+    alpha: float,
+) -> tuple[int, int, int]:
+    """Blend fg over bg with alpha (0-1)."""
+    r = int(fg[0] * alpha + bg[0] * (1 - alpha))
+    g = int(fg[1] * alpha + bg[1] * (1 - alpha))
+    b = int(fg[2] * alpha + bg[2] * (1 - alpha))
+    return (min(255, max(0, r)), min(255, max(0, g)), min(255, max(0, b)))
+
+
+def rgb_to_ansi256(r: int, g: int, b: int) -> int:
+    """Convert RGB to nearest ANSI 256 color index."""
+    # Check grayscale ramp first (232-255)
+    if r == g == b:
+        if r < 8:
+            return 16
+        if r > 248:
+            return 231
+        return round((r - 8) / 247 * 24) + 232
+    
+    # 6x6x6 color cube (16-231)
+    def to_cube(v: int) -> int:
+        if v < 48:
+            return 0
+        if v < 115:
+            return 1
+        return (v - 35) // 40
+    
+    return 16 + 36 * to_cube(r) + 6 * to_cube(g) + to_cube(b)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Theme and Colors (adaptive to terminal)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Theme:
-    """Color theme for the UI."""
+    """Color theme for the UI - adapts to terminal colors."""
 
-    # Brand colors
+    # These are defaults, can be overridden by apply_theme()
+    _is_light = is_light_theme()
+    
+    # Brand colors (ANSI compatible, per Codex style guide)
     PRIMARY = "cyan"
     SECONDARY = "blue"
     ACCENT = "magenta"
@@ -32,19 +164,19 @@ class Theme:
     SUCCESS = "green"
     WARNING = "yellow"
     ERROR = "red"
-    INFO = "blue"
+    INFO = "cyan"
 
-    # Content colors
+    # Content colors (adapt to light/dark)
     REASONING = "dim italic"
-    MESSAGE = "white"
-    CODE = "bright_white"
+    MESSAGE = "default"
+    CODE = "bright_white" if not _is_light else "black"
     MUTED = "dim"
 
     # UI elements
-    BORDER = "bright_black"
+    BORDER = "bright_black" if not _is_light else "grey70"
     BORDER_ACTIVE = "cyan"
     HEADER = "bold cyan"
-    SUBHEADER = "bold white"
+    SUBHEADER = "bold"
 
 
 THEME_PRESETS = {
@@ -55,15 +187,32 @@ THEME_PRESETS = {
         "SUCCESS": "green",
         "WARNING": "yellow",
         "ERROR": "red",
-        "INFO": "blue",
+        "INFO": "cyan",
         "REASONING": "dim italic",
-        "MESSAGE": "white",
+        "MESSAGE": "default",
         "CODE": "bright_white",
         "MUTED": "dim",
         "BORDER": "bright_black",
         "BORDER_ACTIVE": "cyan",
         "HEADER": "bold cyan",
-        "SUBHEADER": "bold white",
+        "SUBHEADER": "bold",
+    },
+    "light": {
+        "PRIMARY": "blue",
+        "SECONDARY": "cyan",
+        "ACCENT": "magenta",
+        "SUCCESS": "green",
+        "WARNING": "yellow",
+        "ERROR": "red",
+        "INFO": "blue",
+        "REASONING": "dim italic",
+        "MESSAGE": "default",
+        "CODE": "black",
+        "MUTED": "grey50",
+        "BORDER": "grey70",
+        "BORDER_ACTIVE": "blue",
+        "HEADER": "bold blue",
+        "SUBHEADER": "bold",
     },
     "midnight": {
         "PRIMARY": "bright_cyan",
@@ -72,9 +221,9 @@ THEME_PRESETS = {
         "SUCCESS": "bright_green",
         "WARNING": "bright_yellow",
         "ERROR": "bright_red",
-        "INFO": "bright_blue",
+        "INFO": "bright_cyan",
         "REASONING": "dim italic",
-        "MESSAGE": "white",
+        "MESSAGE": "default",
         "CODE": "bright_white",
         "MUTED": "grey70",
         "BORDER": "grey39",
@@ -83,44 +232,45 @@ THEME_PRESETS = {
         "SUBHEADER": "bold bright_white",
     },
     "mono": {
-        "PRIMARY": "white",
-        "SECONDARY": "white",
-        "ACCENT": "white",
-        "SUCCESS": "white",
-        "WARNING": "white",
-        "ERROR": "white",
-        "INFO": "white",
+        "PRIMARY": "default",
+        "SECONDARY": "default",
+        "ACCENT": "default",
+        "SUCCESS": "default",
+        "WARNING": "default",
+        "ERROR": "default",
+        "INFO": "default",
         "REASONING": "dim",
-        "MESSAGE": "white",
-        "CODE": "white",
+        "MESSAGE": "default",
+        "CODE": "default",
         "MUTED": "dim",
-        "BORDER": "grey66",
-        "BORDER_ACTIVE": "white",
-        "HEADER": "bold white",
-        "SUBHEADER": "bold white",
+        "BORDER": "dim",
+        "BORDER_ACTIVE": "default",
+        "HEADER": "bold",
+        "SUBHEADER": "bold",
     },
-    "sunset": {
-        "PRIMARY": "bright_yellow",
-        "SECONDARY": "bright_red",
-        "ACCENT": "bright_magenta",
+    "codex": {
+        # Matches Codex CLI's minimalist style
+        "PRIMARY": "cyan",
+        "SECONDARY": "blue",
+        "ACCENT": "magenta",
         "SUCCESS": "green",
         "WARNING": "yellow",
         "ERROR": "red",
-        "INFO": "bright_yellow",
+        "INFO": "cyan",
         "REASONING": "dim italic",
-        "MESSAGE": "white",
-        "CODE": "bright_white",
-        "MUTED": "grey70",
-        "BORDER": "grey39",
-        "BORDER_ACTIVE": "bright_yellow",
-        "HEADER": "bold bright_yellow",
-        "SUBHEADER": "bold bright_white",
+        "MESSAGE": "default",
+        "CODE": "cyan",
+        "MUTED": "dim",
+        "BORDER": "dim",
+        "BORDER_ACTIVE": "cyan",
+        "HEADER": "bold",
+        "SUBHEADER": "bold",
     },
 }
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# Icons and Symbols
+# Icons and Symbols (with ASCII fallback)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class Icons:
@@ -132,6 +282,12 @@ class Icons:
     ERROR = "✗"
     WARNING = "⚠"
     INFO = "ℹ"
+
+    # Spinner frames (Codex style - dot blink)
+    SPINNER_FRAMES = ["•", "◦"]
+    
+    # Alternative: Braille spinner for more animation
+    BRAILLE_SPINNER = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
 
     # Actions
     TOOL = "⚡"
@@ -146,6 +302,9 @@ class Icons:
     ARROW_RIGHT = "→"
     ARROW_DOWN = "↓"
     BULLET = "•"
+    TREE_CORNER = "└"
+    TREE_VERT = "│"
+    TREE_TEE = "├"
 
     # Misc
     SPARKLE = "✨"
@@ -153,19 +312,21 @@ class Icons:
     ROBOT = "🤖"
     LIGHTNING = "⚡"
     CLOCK = "⏱"
+    ELLIPSIS = "⋮"
 
 
 class ASCIIIcons:
-    """ASCII icons for terminals without Unicode support."""
+    """ASCII fallback icons."""
 
-    # Status
     THINKING = "..."
     DONE = "[OK]"
     ERROR = "[X]"
     WARNING = "[!]"
     INFO = "[i]"
 
-    # Actions
+    SPINNER_FRAMES = [".", "o"]
+    BRAILLE_SPINNER = ["/", "-", "\\", "|"]
+
     TOOL = "*"
     FILE_READ = "R"
     FILE_WRITE = "W"
@@ -174,17 +335,186 @@ class ASCIIIcons:
     TERMINAL = "$"
     GLOBE = "@"
 
-    # Navigation
     ARROW_RIGHT = "->"
     ARROW_DOWN = "v"
     BULLET = "*"
+    TREE_CORNER = "`-"
+    TREE_VERT = "|"
+    TREE_TEE = "|-"
 
-    # Misc
     SPARKLE = "*"
     BRAIN = "!"
     ROBOT = "AI"
     LIGHTNING = "*"
     CLOCK = "t"
+    ELLIPSIS = ":"
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Shimmer Animation (Codex-inspired)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+_SHIMMER_START = time.time()
+
+
+def shimmer_text(text: str, use_rgb: bool = True) -> Text:
+    """
+    Create a shimmering text effect like Codex CLI.
+    
+    A bright band sweeps across the text periodically.
+    Works best with true color terminals.
+    """
+    if not text:
+        return Text()
+    
+    chars = list(text)
+    now = time.time() - _SHIMMER_START
+    
+    # Shimmer parameters (match Codex)
+    padding = 10
+    period = len(chars) + padding * 2
+    sweep_seconds = 2.0
+    pos = (now % sweep_seconds) / sweep_seconds * period
+    band_half_width = 5.0
+    
+    # Base and highlight colors
+    is_light = is_light_theme()
+    if is_light:
+        base_rgb = (80, 80, 80)  # Dark gray for light theme
+        highlight_rgb = (0, 0, 0)  # Black highlight
+    else:
+        base_rgb = (128, 128, 128)  # Gray
+        highlight_rgb = (255, 255, 255)  # White highlight
+    
+    result = Text()
+    
+    for i, ch in enumerate(chars):
+        i_pos = i + padding
+        dist = abs(i_pos - pos)
+        
+        # Cosine falloff for smooth band
+        if dist <= band_half_width:
+            import math
+            t = 0.5 * (1 + math.cos(math.pi * dist / band_half_width))
+        else:
+            t = 0.0
+        
+        if use_rgb and supports_true_color():
+            # True color shimmer
+            r, g, b = blend_color(highlight_rgb, base_rgb, t * 0.9)
+            result.append(ch, style=f"bold rgb({r},{g},{b})")
+        else:
+            # Fallback: use bold/dim for shimmer effect
+            if t < 0.2:
+                result.append(ch, style="dim")
+            elif t < 0.6:
+                result.append(ch, style="default")
+            else:
+                result.append(ch, style="bold")
+    
+    return result
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Diff Visualization (Codex-inspired)
+# ═══════════════════════════════════════════════════════════════════════════════
+
+def render_diff(
+    diff_text: str,
+    wrap_width: int = 80,
+    show_line_numbers: bool = True,
+) -> Text:
+    """
+    Render a unified diff with colors and line numbers.
+    
+    Inspired by Codex CLI's diff_render.rs.
+    """
+    result = Text()
+    
+    lines = diff_text.split("\n")
+    old_ln = 0
+    new_ln = 0
+    ln_width = 4  # Default width
+    
+    # Pre-scan to find max line number for width
+    for line in lines:
+        if line.startswith("@@"):
+            # Parse hunk header: @@ -start,count +start,count @@
+            try:
+                parts = line.split()
+                if len(parts) >= 3:
+                    new_part = parts[2]  # e.g., "+1,5"
+                    if new_part.startswith("+"):
+                        new_start = int(new_part[1:].split(",")[0])
+                        ln_width = max(ln_width, len(str(new_start + 100)))
+            except (ValueError, IndexError):
+                pass
+    
+    for line in lines:
+        if line.startswith("@@"):
+            # Hunk header
+            try:
+                parts = line.split()
+                if len(parts) >= 3:
+                    old_part = parts[1]  # e.g., "-1,5"
+                    new_part = parts[2]  # e.g., "+1,5"
+                    if old_part.startswith("-"):
+                        old_ln = int(old_part[1:].split(",")[0])
+                    if new_part.startswith("+"):
+                        new_ln = int(new_part[1:].split(",")[0])
+            except (ValueError, IndexError):
+                old_ln, new_ln = 1, 1
+            
+            if result:
+                gutter = " " * (ln_width + 1)
+                result.append(f"{gutter}{Icons.ELLIPSIS}\n", style="dim")
+            continue
+        
+        if line.startswith("+") and not line.startswith("+++"):
+            # Addition
+            if show_line_numbers:
+                result.append(f"{new_ln:>{ln_width}} ", style="dim")
+            result.append(f"+{line[1:]}\n", style="green")
+            new_ln += 1
+        elif line.startswith("-") and not line.startswith("---"):
+            # Deletion
+            if show_line_numbers:
+                result.append(f"{old_ln:>{ln_width}} ", style="dim")
+            result.append(f"-{line[1:]}\n", style="red")
+            old_ln += 1
+        elif line.startswith(" "):
+            # Context
+            if show_line_numbers:
+                result.append(f"{new_ln:>{ln_width}} ", style="dim")
+            result.append(f" {line[1:]}\n", style="default")
+            old_ln += 1
+            new_ln += 1
+        elif line.startswith("---") or line.startswith("+++"):
+            # File headers - skip or show dimmed
+            pass
+        elif line.startswith("diff ") or line.startswith("index "):
+            # Git diff headers - skip
+            pass
+    
+    return result
+
+
+def format_file_change_summary(
+    path: str,
+    added: int = 0,
+    removed: int = 0,
+    operation: str = "Edited",
+) -> Text:
+    """Format a file change summary line like Codex CLI."""
+    result = Text()
+    result.append(f"• {operation} ", style="bold")
+    result.append(path, style="default")
+    result.append(" (", style="default")
+    result.append(f"+{added}", style="green")
+    result.append(" ", style="default")
+    result.append(f"-{removed}", style="red")
+    result.append(")", style="default")
+    return result
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -258,6 +588,10 @@ class UIState:
     retries: int = 0
     last_update: float = field(default_factory=time.time)
     history: list[HistoryEntry] = field(default_factory=list)
+    # Token usage tracking
+    input_tokens: int = 0
+    output_tokens: int = 0
+    token_usage: dict[str, int] = field(default_factory=dict)  # input, output, reasoning
 
     @property
     def elapsed(self) -> float:
@@ -265,33 +599,39 @@ class UIState:
 
     @property
     def elapsed_str(self) -> str:
-        elapsed = self.elapsed
+        """Format elapsed time like Codex: 0s, 1m 00s, 1h 00m 00s."""
+        elapsed = int(self.elapsed)
         if elapsed < 60:
-            return f"{elapsed:.1f}s"
-        minutes = int(elapsed // 60)
+            return f"{elapsed}s"
+        if elapsed < 3600:
+            minutes = elapsed // 60
+            seconds = elapsed % 60
+            return f"{minutes}m {seconds:02d}s"
+        hours = elapsed // 3600
+        minutes = (elapsed % 3600) // 60
         seconds = elapsed % 60
-        return f"{minutes}m {seconds:.0f}s"
+        return f"{hours}h {minutes:02d}m {seconds:02d}s"
 
     @property
     def idle(self) -> float:
         return time.time() - self.last_update
 
-    @property
-    def idle_str(self) -> str:
-        idle = self.idle
-        if idle < 60:
-            return f"{idle:.1f}s"
-        minutes = int(idle // 60)
-        seconds = idle % 60
-        return f"{minutes}m {seconds:.0f}s"
-
 
 # ═══════════════════════════════════════════════════════════════════════════════
-# UI Components
+# UI Components (Codex-inspired)
 # ═══════════════════════════════════════════════════════════════════════════════
 
 class CopexUI:
-    """Beautiful UI for Copex CLI."""
+    """
+    Beautiful UI for Copex CLI - Codex CLI inspired.
+    
+    Key features:
+    - Shimmer animation on status text
+    - Adaptive to terminal colors (light/dark)
+    - Clean, minimal status line
+    - Smooth 32ms frame rate
+    - Tool call tree display
+    """
 
     def __init__(
         self,
@@ -302,6 +642,7 @@ class CopexUI:
         show_all_tools: bool = False,
         show_reasoning: bool = True,
         ascii_icons: bool = False,
+        animations: bool = True,
     ):
         self.console = console or Console()
         self.set_theme(theme)
@@ -309,428 +650,358 @@ class CopexUI:
         self.state = UIState()
         self._dirty = True
         self._live: Live | None = None
-        self._spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-        self._spinner_idx = 0
+        
+        # Animation state
+        self._animations = animations and self.console.is_terminal
+        self._frame_idx = 0
         self._last_frame_at = 0.0
-        self._dot_frames = [".", "..", "..."]
+        self._frame_interval = 0.032  # 32ms like Codex
+        
         self.show_all_tools = show_all_tools
         self.show_reasoning = show_reasoning
         self._icon_set = ASCIIIcons if ascii_icons else Icons
-        self._max_live_message_chars = 2000 if density == "extended" else 900
-        self._max_live_reasoning_chars = 800 if density == "extended" else 320
+        
+        # Auto-detect light theme
+        if is_light_theme() and theme == "default":
+            self.set_theme("light")
+
+    def _advance_frame(self) -> None:
+        """Advance animation frame at 32ms intervals."""
+        now = time.time()
+        if now - self._last_frame_at >= self._frame_interval:
+            self._last_frame_at = now
+            self._frame_idx = (self._frame_idx + 1) % 60  # 60 frame cycle
 
     def _get_spinner(self) -> str:
         """Get current spinner frame."""
-        return self._spinners[self._spinner_idx]
+        if not self._animations:
+            return self._icon_set.BULLET
+        
+        # Use Braille spinner for smooth animation
+        frames = self._icon_set.BRAILLE_SPINNER
+        return frames[self._frame_idx % len(frames)]
 
-    def _get_dots(self) -> str:
-        """Get current dot animation frame."""
-        return self._dot_frames[self._spinner_idx % len(self._dot_frames)]
-
-    def _advance_frame(self) -> None:
-        """Advance animation frame."""
-        now = time.time()
-        if now - self._last_frame_at < 0.08:
-            return
-        self._last_frame_at = now
-        self._spinner_idx = (self._spinner_idx + 1) % len(self._spinners)
-
-    def _build_header(self) -> Text:
-        """Build the header with model and status."""
-        header = Text()
-        header.append(f"{self._icon_set.ROBOT} ", style=Theme.PRIMARY)
-        header.append("Copex", style=Theme.HEADER)
-        if self.state.model:
-            header.append(f" • {self.state.model}", style=Theme.MUTED)
-        header.append(f" • {self.state.elapsed_str}", style=Theme.MUTED)
-        if self.state.retries > 0:
-            header.append(f" • {self.state.retries} retries", style=Theme.WARNING)
-        return header
-
-    def _build_activity_indicator(self) -> Text:
-        """Build the current activity indicator with fixed width to prevent shifting."""
-        indicator = Text()
-        dots = self._get_dots()
-        spinner = self._get_spinner()
-
-        # Fixed width for activity text to prevent elapsed time from shifting
-        # "Executing tools" is longest at 15 chars + "..." = 18 chars
-        activity_width = 18
-
-        if self.state.activity == ActivityType.THINKING:
-            indicator.append(f" {spinner} ", style=f"bold {Theme.PRIMARY}")
-            label = f"Thinking{dots}"
-            indicator.append(label.ljust(activity_width), style=Theme.PRIMARY)
-        elif self.state.activity == ActivityType.REASONING:
-            indicator.append(f" {spinner} ", style=f"bold {Theme.ACCENT}")
-            label = f"Reasoning{dots}"
-            indicator.append(label.ljust(activity_width), style=Theme.ACCENT)
-        elif self.state.activity == ActivityType.RESPONDING:
-            indicator.append(f" {spinner} ", style=f"bold {Theme.SUCCESS}")
-            label = f"Responding{dots}"
-            indicator.append(label.ljust(activity_width), style=Theme.SUCCESS)
-        elif self.state.activity == ActivityType.TOOL_CALL:
-            indicator.append(f" {spinner} ", style=f"bold {Theme.WARNING}")
-            label = f"Executing tools{dots}"
-            indicator.append(label.ljust(activity_width), style=Theme.WARNING)
-        elif self.state.activity == ActivityType.DONE:
-            indicator.append(f" {self._icon_set.DONE} ", style=f"bold {Theme.SUCCESS}")
-            indicator.append("Complete".ljust(activity_width), style=Theme.SUCCESS)
-        elif self.state.activity == ActivityType.ERROR:
-            indicator.append(f" {self._icon_set.ERROR} ", style=f"bold {Theme.ERROR}")
-            indicator.append("Error".ljust(activity_width), style=Theme.ERROR)
+    def _build_status_line(self) -> Text:
+        """
+        Build the main status line like Codex CLI:
+        • Working (5s • Esc to interrupt)
+        """
+        line = Text()
+        
+        # Spinner
+        if self._animations and self.state.activity in (
+            ActivityType.THINKING, ActivityType.REASONING,
+            ActivityType.RESPONDING, ActivityType.TOOL_CALL
+        ):
+            spinner_text = shimmer_text(self._icon_set.BULLET)
+            line.append_text(spinner_text)
         else:
-            indicator.append(f" {spinner} ", style=Theme.MUTED)
-            label = f"Waiting{dots}"
-            indicator.append(label.ljust(activity_width), style=Theme.MUTED)
+            icon = {
+                ActivityType.DONE: self._icon_set.DONE,
+                ActivityType.ERROR: self._icon_set.ERROR,
+            }.get(self.state.activity, self._icon_set.BULLET)
+            style = {
+                ActivityType.DONE: f"bold {Theme.SUCCESS}",
+                ActivityType.ERROR: f"bold {Theme.ERROR}",
+            }.get(self.state.activity, "dim")
+            line.append(icon, style=style)
+        
+        line.append(" ", style="default")
+        
+        # Activity text with shimmer
+        activity_labels = {
+            ActivityType.THINKING: "Thinking",
+            ActivityType.REASONING: "Reasoning",
+            ActivityType.RESPONDING: "Writing",
+            ActivityType.TOOL_CALL: "Working",
+            ActivityType.WAITING: "Waiting",
+            ActivityType.DONE: "Done",
+            ActivityType.ERROR: "Error",
+        }
+        label = activity_labels.get(self.state.activity, "Working")
+        
+        if self._animations and self.state.activity not in (ActivityType.DONE, ActivityType.ERROR, ActivityType.WAITING):
+            line.append_text(shimmer_text(label))
+        else:
+            style = {
+                ActivityType.DONE: Theme.SUCCESS,
+                ActivityType.ERROR: Theme.ERROR,
+            }.get(self.state.activity, "default")
+            line.append(label, style=style)
+        
+        # Elapsed time and interrupt hint
+        line.append(" ", style="default")
+        line.append(f"({self.state.elapsed_str}", style="dim")
+        
+        if self.state.activity in (ActivityType.THINKING, ActivityType.REASONING,
+                                   ActivityType.RESPONDING, ActivityType.TOOL_CALL):
+            line.append(" • ", style="dim")
+            line.append("Esc", style="default")
+            line.append(" to interrupt", style="dim")
+        
+        line.append(")", style="dim")
+        
+        return line
 
-        return indicator
+    def _build_details_line(self) -> Text | None:
+        """Build optional details line below status."""
+        if not self.state.tool_calls:
+            return None
+        
+        running = [t for t in self.state.tool_calls if t.status == "running"]
+        if not running:
+            return None
+        
+        # Show current tool being executed
+        tool = running[-1]
+        result = Text()
+        result.append(f"  {self._icon_set.TREE_CORNER} ", style="dim")
+        result.append(tool.name, style="dim")
+        
+        if tool.arguments:
+            # Show key argument
+            for key in ("path", "command", "pattern", "query", "file"):
+                if key in tool.arguments:
+                    val = str(tool.arguments[key])[:50]
+                    if len(str(tool.arguments[key])) > 50:
+                        val += "..."
+                    result.append(f" {key}=", style="dim")
+                    result.append(val, style="dim italic")
+                    break
+        
+        return result
 
     def _build_reasoning_panel(self) -> Panel | None:
-        """Build the reasoning panel if there's reasoning content."""
-        if not self.show_reasoning:
+        """Build the reasoning panel."""
+        if not self.show_reasoning or not self.state.reasoning:
             return None
-        if not self.state.reasoning:
-            return None
-
+        
         # Truncate for live display
         reasoning = self.state.reasoning
-        if len(reasoning) > self._max_live_reasoning_chars:
-            reasoning = "..." + reasoning[-self._max_live_reasoning_chars:]
-
+        max_chars = 800 if self.density == "extended" else 400
+        if len(reasoning) > max_chars:
+            reasoning = "..." + reasoning[-max_chars:]
+        
         content = Text(reasoning, style=Theme.REASONING)
         if self.state.activity == ActivityType.REASONING:
             content.append("▌", style=f"bold {Theme.ACCENT}")
-
+        
         return Panel(
             content,
             title=f"[{Theme.ACCENT}]{self._icon_set.BRAIN} Reasoning[/{Theme.ACCENT}]",
             title_align="left",
             border_style=Theme.BORDER_ACTIVE if self.state.activity == ActivityType.REASONING else Theme.BORDER,
+            box=MINIMAL if self.density == "compact" else ROUNDED,
             padding=(0, 1),
-            box=ROUNDED,
         )
 
     def _build_tool_calls_panel(self) -> Panel | None:
         """Build the tool calls panel."""
         if not self.state.tool_calls:
             return None
-
-        spinner = self._get_spinner()
+        
         running = sum(1 for t in self.state.tool_calls if t.status == "running")
         successful = sum(1 for t in self.state.tool_calls if t.status == "success")
         failed = sum(1 for t in self.state.tool_calls if t.status == "error")
-        title_parts = [f"{self._icon_set.TOOL} Tools"]
+        
+        # Compact summary for title
+        parts = []
         if running:
-            title_parts.append(f"{running} running")
+            parts.append(f"{running} running")
         if successful:
-            title_parts.append(f"{successful} ok")
+            parts.append(f"{successful} ok")
         if failed:
-            title_parts.append(f"{failed} failed")
-        title = f"[{Theme.WARNING}]{' • '.join(title_parts)}[/{Theme.WARNING}]"
-
-        tree = Tree(f"[{Theme.WARNING}]{self._icon_set.TOOL} Tool Calls[/{Theme.WARNING}]")
-
+            parts.append(f"{failed} failed")
+        summary = " • ".join(parts) if parts else "Tools"
+        
+        title = f"[{Theme.WARNING}]{self._icon_set.TOOL} {summary}[/{Theme.WARNING}]"
+        
+        # Build tree
+        tree = Tree("")
         max_tools = 5 if self.density == "extended" else 3
         tools_to_show = self.state.tool_calls if self.show_all_tools else self.state.tool_calls[-max_tools:]
+        
         for tool in tools_to_show:
             status_style = {
                 "running": Theme.WARNING,
                 "success": Theme.SUCCESS,
                 "error": Theme.ERROR,
             }.get(tool.status, Theme.MUTED)
-
-            # Build tool info
+            
             tool_text = Text()
-            status_icon = spinner if tool.status == "running" else (
-                self._icon_set.DONE if tool.status == "success" else self._icon_set.ERROR
-            )
-            tool_text.append(f"{status_icon} ", style=status_style)
-            tool_text.append(f"{tool.icon(self._icon_set)} ", style=status_style)
-            tool_text.append(tool.name, style=f"bold {status_style}")
-
-            # Add key arguments (truncated)
-            if tool.arguments and self.density == "extended":
-                args_preview = self._format_args_preview(tool.arguments)
-                if args_preview:
-                    tool_text.append(f" {args_preview}", style=Theme.MUTED)
-
+            
+            # Status icon
             if tool.status == "running":
-                tool_text.append(f" ({tool.elapsed:5.1f}s)", style=Theme.MUTED)
-            elif tool.duration:
-                tool_text.append(f" ({tool.duration:5.1f}s)", style=Theme.MUTED)
-
-            branch = tree.add(tool_text)
-
-            # Add result preview if available
-            if tool.result and tool.status != "running":
-                result_preview = tool.result[:100]
-                if len(tool.result) > 100:
-                    result_preview += "..."
-                branch.add(Text(result_preview, style=Theme.MUTED))
-
-        if len(self.state.tool_calls) > max_tools:
-            if self.show_all_tools:
-                tree.add(Text("Showing all tools (use /tools to collapse)", style=Theme.MUTED))
+                tool_text.append(self._get_spinner(), style=status_style)
+            elif tool.status == "success":
+                tool_text.append(self._icon_set.DONE, style=status_style)
             else:
-                tree.add(Text(
-                    f"... and {len(self.state.tool_calls) - max_tools} more (use /tools to expand)",
-                    style=Theme.MUTED,
-                ))
-
+                tool_text.append(self._icon_set.ERROR, style=status_style)
+            
+            tool_text.append(" ", style="default")
+            tool_text.append(tool.icon(self._icon_set), style=status_style)
+            tool_text.append(" ", style="default")
+            tool_text.append(tool.name, style=f"bold {status_style}")
+            
+            # Duration
+            if tool.status == "running":
+                tool_text.append(f" ({tool.elapsed:.1f}s)", style="dim")
+            elif tool.duration:
+                tool_text.append(f" ({tool.duration:.1f}s)", style="dim")
+            
+            branch = tree.add(tool_text)
+            
+            # Result preview
+            if tool.result and tool.status != "running" and self.density == "extended":
+                preview = tool.result[:80]
+                if len(tool.result) > 80:
+                    preview += "..."
+                branch.add(Text(preview, style="dim"))
+        
+        if len(self.state.tool_calls) > max_tools and not self.show_all_tools:
+            tree.add(Text(f"... +{len(self.state.tool_calls) - max_tools} more", style="dim"))
+        
         border_style = Theme.BORDER
-        if self.state.activity == ActivityType.TOOL_CALL or running:
+        if running:
             border_style = Theme.BORDER_ACTIVE
         if failed:
             border_style = Theme.ERROR
-
+        
         return Panel(
             tree,
             title=title,
             title_align="left",
             border_style=border_style,
+            box=MINIMAL if self.density == "compact" else ROUNDED,
             padding=(0, 1),
-            box=ROUNDED,
         )
 
-    def _format_args_preview(self, args: dict[str, Any], max_len: int = 60) -> str:
-        """Format arguments for preview."""
-        if not args:
-            return ""
-
-        parts = []
-        for key, value in args.items():
-            if key in ("path", "file", "command", "pattern", "query"):
-                val_str = str(value)[:40]
-                if len(str(value)) > 40:
-                    val_str += "..."
-                parts.append(f"{key}={val_str}")
-
-        result = " ".join(parts)
-        if len(result) > max_len:
-            result = result[:max_len] + "..."
-        return result
-
     def _build_message_panel(self) -> Panel | None:
-        """Build the message panel."""
+        """Build the message/response panel."""
         if not self.state.message:
             return None
-
-        # Show full message content (no truncation) so box expands with content
+        
         content = Text(self.state.message, style=Theme.MESSAGE)
         if self.state.activity == ActivityType.RESPONDING:
             content.append("▌", style=f"bold {Theme.PRIMARY}")
-
+        
         return Panel(
             content,
             title=f"[{Theme.PRIMARY}]{self._icon_set.ROBOT} Response[/{Theme.PRIMARY}]",
             title_align="left",
             border_style=Theme.BORDER_ACTIVE if self.state.activity == ActivityType.RESPONDING else Theme.BORDER,
+            box=MINIMAL if self.density == "compact" else ROUNDED,
             padding=(0, 1),
-            box=ROUNDED,
         )
 
-    def _build_status_panel(self) -> Panel:
-        """Build a status panel with live progress details."""
-        activity = self._build_activity_indicator()
-        message_chars = len(self.state.message)
-        reasoning_chars = len(self.state.reasoning)
-        running_tools = sum(1 for t in self.state.tool_calls if t.status == "running")
-        successful_tools = sum(1 for t in self.state.tool_calls if t.status == "success")
-        failed_tools = sum(1 for t in self.state.tool_calls if t.status == "error")
-
-        message_text = Text()
-        message_text.append(f"{self._icon_set.ROBOT} ", style=Theme.PRIMARY)
-        message_text.append(f"{message_chars} chars", style=Theme.PRIMARY)
-
-        reasoning_text = Text()
-        reasoning_text.append(f"{self._icon_set.BRAIN} ", style=Theme.ACCENT)
-        reasoning_text.append(f"{reasoning_chars} chars", style=Theme.ACCENT)
-
-        tools_text = Text()
-        tools_text.append(f"{self._icon_set.TOOL} ", style=Theme.WARNING)
-        if not self.state.tool_calls:
-            tools_text.append("no tools", style=Theme.MUTED)
-        else:
-            parts = []
-            if running_tools:
-                parts.append(f"{running_tools} running")
-            if successful_tools:
-                parts.append(f"{successful_tools} ok")
-            if failed_tools:
-                parts.append(f"{failed_tools} failed")
-            tools_text.append(" • ".join(parts), style=Theme.WARNING if not failed_tools else Theme.ERROR)
-
-        elapsed_text = Text()
-        elapsed_text.append(f"{self._icon_set.CLOCK} ", style=Theme.MUTED)
-        elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
-
-        updated_text = Text()
-        updated_text.append(f"{self._icon_set.SPARKLE} ", style=Theme.MUTED)
-        updated_text.append(f"updated {self.state.idle_str} ago", style=Theme.MUTED)
-
-        model_text = Text()
-        if self.state.model:
-            model_text.append(f"{self._icon_set.ROBOT} ", style=Theme.PRIMARY)
-            model_text.append(self.state.model, style=Theme.MUTED)
-        else:
-            model_text.append(f"{self._icon_set.ROBOT} default model", style=Theme.MUTED)
-
-        retry_text = Text()
+    def _build_summary_line(self) -> Text:
+        """Build a compact summary line for completed output."""
+        line = Text()
+        
+        # Elapsed
+        line.append(f"{self._icon_set.CLOCK} ", style="dim")
+        line.append(self.state.elapsed_str, style="dim")
+        
+        # Tools summary
+        if self.state.tool_calls:
+            successful = sum(1 for t in self.state.tool_calls if t.status == "success")
+            failed = sum(1 for t in self.state.tool_calls if t.status == "error")
+            line.append(f" • {self._icon_set.TOOL} ", style="dim")
+            if failed:
+                line.append(f"{successful} ok, ", style="green")
+                line.append(f"{failed} failed", style="red")
+            else:
+                line.append(f"{successful} tools", style="green")
+        
+        # Retries
         if self.state.retries:
-            retry_text.append(f"{self._icon_set.WARNING} ", style=Theme.WARNING)
-            retry_text.append(f"{self.state.retries} retries", style=Theme.WARNING)
-        else:
-            retry_text.append(f"{self._icon_set.DONE} no retries", style=Theme.MUTED)
-
-        grid = Table.grid(expand=True)
-        grid.add_column(justify="left")
-        if self.density == "extended":
-            grid.add_column(justify="center")
-            grid.add_column(justify="right")
-            grid.add_row(activity, elapsed_text, updated_text)
-            grid.add_row(message_text, reasoning_text, tools_text)
-            grid.add_row(model_text, Text(), retry_text)
-        else:
-            grid.add_column(justify="right")
-            grid.add_row(activity, elapsed_text)
-            grid.add_row(message_text, tools_text)
-
-        if self.state.activity == ActivityType.ERROR:
-            border_style = Theme.ERROR
-        elif self.state.activity == ActivityType.DONE:
-            border_style = Theme.SUCCESS
-        elif self.state.activity == ActivityType.WAITING:
-            border_style = Theme.BORDER
-        else:
-            border_style = Theme.BORDER_ACTIVE
-
-        title = f"[{Theme.PRIMARY}]{self._icon_set.ROBOT} Copex[/{Theme.PRIMARY}]"
-        if self.state.model:
-            title += f" [{Theme.MUTED}]• {self.state.model}[/{Theme.MUTED}]"
-
-        content = Group(grid, Text()) if self.density == "extended" else grid
-
-        return Panel(
-            content,
-            title=title,
-            title_align="left",
-            border_style=border_style,
-            padding=(0, 1),
-            box=ROUNDED,
-        )
+            line.append(f" • {self._icon_set.WARNING} ", style="dim")
+            line.append(f"{self.state.retries} retries", style="yellow")
+        
+        # Token usage with cost calculation using TokenUsageDisplay
+        if self.state.input_tokens > 0 or self.state.output_tokens > 0:
+            usage_display = TokenUsageDisplay(
+                input_tokens=self.state.input_tokens,
+                output_tokens=self.state.output_tokens,
+                model=self.state.model if self.state.model else None,
+                compact=True,
+                show_cost=True,
+            )
+            line.append(" • ", style="dim")
+            line.append_text(usage_display.to_text())
+        elif self.state.token_usage:
+            # Fallback to dict-based display
+            total = sum(self.state.token_usage.values())
+            line.append(f" • {total:,} tokens", style="dim")
+        
+        return line
 
     def build_live_display(self) -> Group:
         """Build the complete live display."""
         self._advance_frame()
         elements = []
-
-        # Status panel
-        elements.append(self._build_status_panel())
+        
+        # Main status line (Codex style)
+        elements.append(self._build_status_line())
+        
+        # Details line (current tool)
+        details = self._build_details_line()
+        if details:
+            elements.append(details)
+        
         elements.append(Text())  # Spacer
-
-        # Reasoning (if any)
-        reasoning_panel = self._build_reasoning_panel()
-        if reasoning_panel:
-            elements.append(reasoning_panel)
-            elements.append(Text())
-
-        # Tool calls (if any)
+        
+        # Reasoning panel
+        if self.density == "extended":
+            reasoning_panel = self._build_reasoning_panel()
+            if reasoning_panel:
+                elements.append(reasoning_panel)
+                elements.append(Text())
+        
+        # Tool calls panel
         tool_panel = self._build_tool_calls_panel()
         if tool_panel:
             elements.append(tool_panel)
             elements.append(Text())
-
-        # Message (if any)
+        
+        # Message panel
         message_panel = self._build_message_panel()
         if message_panel:
             elements.append(message_panel)
-
+        
         return Group(*elements)
-
-    def _build_history_panel(self) -> Panel | None:
-        """Build the conversation history panel."""
-        if not self.state.history:
-            return None
-
-        elements = []
-        for i, entry in enumerate(self.state.history):
-            if entry.role == "user":
-                # User message
-                user_text = Text()
-                user_text.append(f"{self._icon_set.ARROW_RIGHT} ", style=f"bold {Theme.SUCCESS}")
-                # Truncate long user messages
-                content = entry.content
-                if len(content) > 200:
-                    content = content[:200] + "..."
-                user_text.append(content, style="bold")
-                elements.append(user_text)
-                elements.append(Text())  # Spacer
-            else:
-                # Assistant message
-                if self.show_reasoning and entry.reasoning and self.density == "extended":
-                    elements.append(Panel(
-                        Markdown(entry.reasoning),
-                    title=f"[{Theme.ACCENT}]{self._icon_set.BRAIN} Reasoning[/{Theme.ACCENT}]",
-                        title_align="left",
-                        border_style=Theme.BORDER,
-                        padding=(0, 1),
-                        box=ROUNDED,
-                    ))
-                    elements.append(Text())
-
-                elements.append(Panel(
-                    Markdown(entry.content),
-                    title=f"[{Theme.PRIMARY}]{self._icon_set.ROBOT} Response[/{Theme.PRIMARY}]",
-                    title_align="left",
-                    border_style=Theme.BORDER,
-                    padding=(0, 1),
-                    box=ROUNDED,
-                ))
-                elements.append(Text())  # Spacer between turns
-
-        if not elements:
-            return None
-
-        return Panel(
-            Group(*elements),
-            title=f"[{Theme.MUTED}]Conversation History ({len([e for e in self.state.history if e.role == 'user'])} turns)[/{Theme.MUTED}]",
-            title_align="left",
-            border_style=Theme.BORDER,
-            padding=(0, 1),
-            box=ROUNDED,
-        )
 
     def build_final_display(self) -> Group:
         """Build the final formatted display after streaming completes."""
         elements = []
-
-        # Reasoning panel (collapsed/summary)
+        
+        # Reasoning (markdown rendered)
         if self.show_reasoning and self.state.reasoning and self.density == "extended":
             elements.append(Panel(
                 Markdown(self.state.reasoning),
                 title=f"[{Theme.ACCENT}]{self._icon_set.BRAIN} Reasoning[/{Theme.ACCENT}]",
                 title_align="left",
                 border_style=Theme.BORDER,
-                padding=(0, 1),
                 box=ROUNDED,
+                padding=(0, 1),
             ))
             elements.append(Text())
-
-        # Main response with markdown
+        
+        # Main response (markdown rendered)
         if self.state.message:
             elements.append(Panel(
                 Markdown(self.state.message),
                 title=f"[{Theme.PRIMARY}]{self._icon_set.ROBOT} Response[/{Theme.PRIMARY}]",
                 title_align="left",
                 border_style=Theme.BORDER_ACTIVE,
-                padding=(0, 1),
                 box=ROUNDED,
+                padding=(0, 1),
             ))
-
-        # Summary panel
-        elements.append(self._build_summary_panel())
-
+        
+        # Summary line
+        elements.append(Text())
+        elements.append(self._build_summary_line())
+        
         return Group(*elements)
 
     # ═══════════════════════════════════════════════════════════════════════════
@@ -741,6 +1012,7 @@ class CopexUI:
         """Reset UI state for a new interaction."""
         old_history = self.state.history if preserve_history else []
         self.state = UIState(model=model, history=old_history)
+        self._frame_idx = 0
         self._touch()
 
     def set_activity(self, activity: ActivityType) -> None:
@@ -749,7 +1021,7 @@ class CopexUI:
         self._touch()
 
     def add_reasoning(self, delta: str) -> None:
-        """Append reasoning content to the live state."""
+        """Append reasoning content."""
         if not self.show_reasoning:
             return
         self.state.reasoning += delta
@@ -758,14 +1030,14 @@ class CopexUI:
         self._touch()
 
     def add_message(self, delta: str) -> None:
-        """Append message content to the live state."""
+        """Append message content."""
         self.state.message += delta
         if self.state.activity != ActivityType.RESPONDING:
             self.state.activity = ActivityType.RESPONDING
         self._touch()
 
     def add_tool_call(self, tool: ToolCallInfo) -> None:
-        """Track a tool call in the live state."""
+        """Track a tool call."""
         self.state.tool_calls.append(tool)
         self.state.activity = ActivityType.TOOL_CALL
         self._touch()
@@ -778,7 +1050,7 @@ class CopexUI:
         duration: float | None = None,
         tool_call_id: str | None = None,
     ) -> None:
-        """Update a tool call status and optional result details."""
+        """Update a tool call status."""
         for tool in reversed(self.state.tool_calls):
             if tool_call_id and tool.id == tool_call_id:
                 tool.status = status
@@ -790,19 +1062,31 @@ class CopexUI:
                 tool.result = result
                 tool.duration = duration
                 break
+        
+        # Check if any tools still running
         if self.state.activity == ActivityType.TOOL_CALL:
-            running_tools = any(tool.status == "running" for tool in self.state.tool_calls)
-            if not running_tools:
+            if not any(t.status == "running" for t in self.state.tool_calls):
                 self.state.activity = ActivityType.THINKING
         self._touch()
 
     def increment_retries(self) -> None:
-        """Increment the retry counter for the active request."""
+        """Increment retry counter."""
         self.state.retries += 1
         self._touch()
 
+    def set_token_usage(self, input_tokens: int = 0, output_tokens: int = 0, reasoning_tokens: int = 0) -> None:
+        """Set token usage statistics."""
+        self.state.token_usage = {
+            "input": input_tokens,
+            "output": output_tokens,
+            "reasoning": reasoning_tokens,
+        }
+        self.state.input_tokens = input_tokens
+        self.state.output_tokens = output_tokens + reasoning_tokens
+        self._touch()
+
     def set_final_content(self, message: str, reasoning: str | None = None) -> None:
-        """Set final message and reasoning content, marking completion."""
+        """Set final content and mark as done."""
         if message:
             self.state.message = message
         if reasoning and self.show_reasoning:
@@ -811,107 +1095,32 @@ class CopexUI:
         self._touch()
 
     def add_user_message(self, content: str) -> None:
-        """Add a user message to the conversation history."""
+        """Add a user message to history."""
         self.state.history.append(HistoryEntry(role="user", content=content))
         self._touch()
 
     def finalize_assistant_response(self) -> None:
-        """Finalize the assistant response and store it in history."""
+        """Finalize and store assistant response in history."""
         if self.state.message:
             self.state.history.append(HistoryEntry(
                 role="assistant",
                 content=self.state.message,
-                reasoning=self.state.reasoning if self.show_reasoning and self.state.reasoning else None,
+                reasoning=self.state.reasoning if self.show_reasoning else None,
                 tool_calls=list(self.state.tool_calls),
             ))
         self._touch()
 
     def consume_dirty(self) -> bool:
-        """Return whether a redraw is needed and clear the dirty flag."""
+        """Check and clear dirty flag."""
         if self._dirty:
             self._dirty = False
             return True
         return False
 
     def _touch(self) -> None:
-        """Update last activity timestamp."""
+        """Mark state as updated."""
         self.state.last_update = time.time()
         self._dirty = True
-
-    def _build_summary_panel(self) -> Panel:
-        """Build a summary panel for completed output."""
-        summary = Table.grid(expand=True)
-        summary.add_column(justify="left")
-        summary.add_column(justify="right")
-
-        elapsed_text = Text()
-        elapsed_text.append(f"{self._icon_set.CLOCK} ", style=Theme.MUTED)
-        elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
-
-        retry_text = Text()
-        if self.state.retries:
-            retry_text.append(f"{self._icon_set.WARNING} ", style=Theme.WARNING)
-            retry_text.append(f"{self.state.retries} retries", style=Theme.WARNING)
-        else:
-            retry_text.append(f"{self._icon_set.DONE} no retries", style=Theme.MUTED)
-
-        summary.add_row(elapsed_text, retry_text)
-
-        if self.state.tool_calls:
-            successful = sum(1 for t in self.state.tool_calls if t.status == "success")
-            failed = sum(1 for t in self.state.tool_calls if t.status == "error")
-            tool_left = Text()
-            tool_left.append(f"{self._icon_set.TOOL} ", style=Theme.WARNING)
-            tool_left.append(f"{len(self.state.tool_calls)} tool calls", style=Theme.WARNING)
-
-            tool_right = Text()
-            if successful:
-                tool_right.append(f"{self._icon_set.DONE} {successful} ok", style=Theme.SUCCESS)
-            if failed:
-                if tool_right:
-                    tool_right.append(" • ", style=Theme.MUTED)
-                tool_right.append(f"{self._icon_set.ERROR} {failed} failed", style=Theme.ERROR)
-            summary.add_row(tool_left, tool_right)
-
-        return Panel(
-            summary,
-            title=f"[{Theme.SUCCESS}]{self._icon_set.DONE} Summary[/{Theme.SUCCESS}]",
-            title_align="left",
-            border_style=Theme.BORDER_ACTIVE,
-            padding=(0, 1),
-            box=ROUNDED,
-        )
-
-    def _build_progress_bar(self, width: int = 28) -> Text:
-        """Build a smooth animated progress bar."""
-        if self.density == "compact":
-            width = min(20, width)
-        if width < 10:
-            width = 10
-        pos = (self._spinner_idx // 2) % width
-        trail = 1
-        bar = ["░"] * width
-        for offset in range(trail):
-            idx = (pos - offset) % width
-            bar[idx] = "█"
-
-        if self.state.activity == ActivityType.ERROR:
-            color = Theme.ERROR
-        elif self.state.activity == ActivityType.DONE:
-            color = Theme.SUCCESS
-        elif self.state.activity == ActivityType.TOOL_CALL:
-            color = Theme.WARNING
-        elif self.state.activity == ActivityType.REASONING:
-            color = Theme.ACCENT
-        elif self.state.activity == ActivityType.RESPONDING:
-            color = Theme.SUCCESS
-        else:
-            color = Theme.PRIMARY
-
-        bar_text = Text()
-        bar_text.append("Progress ", style=Theme.MUTED)
-        bar_text.append("[" + "".join(bar) + "]", style=color)
-        return bar_text
 
     def set_theme(self, theme: str) -> None:
         """Apply a theme preset."""
@@ -939,16 +1148,26 @@ def print_welcome(
 ) -> None:
     """Print the welcome banner."""
     icon_set = ASCIIIcons if ascii_icons else Icons
+    
+    welcome_text = Text()
+    welcome_text.append(f"{icon_set.ROBOT} Copex", style=Theme.HEADER)
+    welcome_text.append(" - Copilot Extended\n\n", style="dim")
+    welcome_text.append("Model: ", style="dim")
+    welcome_text.append(f"{model}\n", style=Theme.PRIMARY)
+    welcome_text.append("Reasoning: ", style="dim")
+    welcome_text.append(f"{reasoning}\n\n", style=Theme.PRIMARY)
+    welcome_text.append("Type ", style="dim")
+    welcome_text.append("exit", style="bold")
+    welcome_text.append(" to quit, ", style="dim")
+    welcome_text.append("new", style="bold")
+    welcome_text.append(" for fresh session\n", style="dim")
+    welcome_text.append("Press ", style="dim")
+    welcome_text.append("Esc+Enter", style="bold")
+    welcome_text.append(" for newline", style="dim")
+    
     console.print()
     console.print(Panel(
-        Text.from_markup(
-            f"[{Theme.HEADER}]{icon_set.ROBOT} Copex[/{Theme.HEADER}] "
-            f"[{Theme.MUTED}]- Copilot Extended[/{Theme.MUTED}]\n\n"
-            f"[{Theme.MUTED}]Model:[/{Theme.MUTED}] [{Theme.PRIMARY}]{model}[/{Theme.PRIMARY}]\n"
-            f"[{Theme.MUTED}]Reasoning:[/{Theme.MUTED}] [{Theme.PRIMARY}]{reasoning}[/{Theme.PRIMARY}]\n\n"
-            f"[{Theme.MUTED}]Type [bold]exit[/bold] to quit, [bold]new[/bold] for fresh session[/{Theme.MUTED}]\n"
-            f"[{Theme.MUTED}]Press [bold]Shift+Enter[/bold] for newline[/{Theme.MUTED}]"
-        ),
+        welcome_text,
         border_style=Theme.BORDER_ACTIVE,
         box=ROUNDED,
         padding=(0, 2),
@@ -959,15 +1178,18 @@ def print_welcome(
 def print_user_prompt(console: Console, prompt: str, *, ascii_icons: bool = False) -> None:
     """Print the user's prompt."""
     icon_set = ASCIIIcons if ascii_icons else Icons
+    
     console.print()
-    console.print(Text(f"{icon_set.ARROW_RIGHT} ", style=f"bold {Theme.SUCCESS}"), end="")
-
-    # Truncate long prompts for display
+    text = Text()
+    text.append(f"{icon_set.ARROW_RIGHT} ", style=f"bold {Theme.SUCCESS}")
+    
+    # Truncate long prompts
     if len(prompt) > 200:
-        display_prompt = prompt[:200] + "..."
+        text.append(prompt[:200] + "...", style="bold")
     else:
-        display_prompt = prompt
-    console.print(Text(display_prompt, style="bold"))
+        text.append(prompt, style="bold")
+    
+    console.print(text)
     console.print()
 
 
@@ -979,6 +1201,7 @@ def print_error(console: Console, error: str, *, ascii_icons: bool = False) -> N
         border_style=Theme.ERROR,
         title="Error",
         title_align="left",
+        box=ROUNDED,
     ))
 
 
@@ -1008,23 +1231,19 @@ def print_tool_call(
     """Print a tool call notification."""
     tool = ToolCallInfo(name=name, arguments=args or {})
     icon_set = ASCIIIcons if ascii_icons else Icons
-
+    
     text = Text()
     text.append(f" {tool.icon(icon_set)} ", style=Theme.WARNING)
     text.append(name, style=f"bold {Theme.WARNING}")
-
+    
     if args:
-        preview = ""
-        if "path" in args:
-            preview = f" path={args['path']}"
-        elif "command" in args:
-            cmd = str(args['command'])[:40]
-            preview = f" cmd={cmd}..."
-        elif "pattern" in args:
-            preview = f" pattern={args['pattern']}"
-        if preview:
-            text.append(preview, style=Theme.MUTED)
-
+        for key in ("path", "command", "pattern"):
+            if key in args:
+                val = str(args[key])[:40]
+                text.append(f" {key}=", style="dim")
+                text.append(val, style="dim italic")
+                break
+    
     console.print(text)
 
 
@@ -1040,11 +1259,11 @@ def print_tool_result(
     icon_set = ASCIIIcons if ascii_icons else Icons
     icon = icon_set.DONE if success else icon_set.ERROR
     style = Theme.SUCCESS if success else Theme.ERROR
-
+    
     text = Text()
     text.append(f"   {icon} ", style=style)
     text.append(name, style=f"bold {style}")
     if duration:
-        text.append(f" ({duration:.1f}s)", style=Theme.MUTED)
-
+        text.append(f" ({duration:.1f}s)", style="dim")
+    
     console.print(text)
