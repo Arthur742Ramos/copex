@@ -935,6 +935,15 @@ def plan_command(
     max_iterations: Annotated[
         int, typer.Option("--max-iterations", "-n", help="Max iterations per step (Ralph loop)")
     ] = 10,
+    parallel: Annotated[
+        bool, typer.Option("--parallel", "-P", help="Execute independent steps in parallel")
+    ] = False,
+    max_concurrent: Annotated[
+        int, typer.Option("--max-concurrent", "-c", help="Max concurrent steps for parallel execution")
+    ] = 3,
+    smart_plan: Annotated[
+        bool, typer.Option("--smart", "-S", help="Use v2 planning with dependency detection")
+    ] = False,
     model: Annotated[
         str | None, typer.Option("--model", "-m", help="Model to use")
     ] = None,
@@ -950,6 +959,8 @@ def plan_command(
         copex plan "Build a REST API" --execute    # Generate and execute
         copex plan "Build a REST API" --review     # Generate, review, then execute
         copex plan "Continue" --load plan.json -f3 # Resume from step 3
+        copex plan "Build API" -e --parallel -c 2  # Execute with parallel steps
+        copex plan "Complex task" -e --smart       # Use v2 planning with dependencies
     """
     effective_model = model or _DEFAULT_MODEL.value
     try:
@@ -970,6 +981,9 @@ def plan_command(
         from_step=from_step,
         load_plan=load_plan,
         max_iterations=max_iterations,
+        parallel=parallel,
+        max_concurrent=max_concurrent,
+        smart_plan=smart_plan,
     ))
 
 
@@ -982,6 +996,9 @@ async def _run_plan(
     from_step: int,
     load_plan: Path | None,
     max_iterations: int = 10,
+    parallel: bool = False,
+    max_concurrent: int = 3,
+    smart_plan: bool = False,
 ) -> None:
     """Run plan generation and optional execution."""
     client = Copex(config)
@@ -1003,11 +1020,14 @@ async def _run_plan(
         else:
             console.print(Panel(
                 f"[bold]Generating plan for:[/bold]\n{task}",
-                title="📋 Plan Mode",
+                title="📋 Plan Mode" + (" (smart)" if smart_plan else ""),
                 border_style="blue",
             ))
             
-            plan = await executor.generate_plan(task)
+            if smart_plan:
+                plan = await executor.generate_plan_v2(task)
+            else:
+                plan = await executor.generate_plan(task)
             console.print(f"\n[green]✓ Generated {len(plan.steps)} steps[/green]\n")
         
         # Display plan
@@ -1025,7 +1045,8 @@ async def _run_plan(
                     console.print("[yellow]Execution cancelled[/yellow]")
                     return
             
-            console.print(f"\n[bold blue]Executing from step {from_step}...[/bold blue]\n")
+            mode_str = "parallel" if parallel else "sequential"
+            console.print(f"\n[bold blue]Executing from step {from_step} ({mode_str})...[/bold blue]\n")
             
             def on_step_start(step: PlanStep) -> None:
                 console.print(f"[blue]▶ Step {step.number}:[/blue] {step.description}")
@@ -1043,13 +1064,23 @@ async def _run_plan(
                 console.print(f"[red]✗ Step {step.number} failed: {error}[/red]")
                 return typer.confirm("Continue with next step?", default=False)
             
-            await executor.execute_plan(
-                plan,
-                from_step=from_step,
-                on_step_start=on_step_start,
-                on_step_complete=on_step_complete,
-                on_error=on_error,
-            )
+            if parallel:
+                await executor.execute_plan_parallel(
+                    plan,
+                    max_concurrent=max_concurrent,
+                    from_step=from_step,
+                    on_step_start=on_step_start,
+                    on_step_complete=on_step_complete,
+                    on_error=on_error,
+                )
+            else:
+                await executor.execute_plan(
+                    plan,
+                    from_step=from_step,
+                    on_step_start=on_step_start,
+                    on_step_complete=on_step_complete,
+                    on_error=on_error,
+                )
             
             # Show summary
             _display_plan_summary(plan)
@@ -1107,7 +1138,7 @@ def _display_plan_summary(plan: Plan) -> None:
         ))
 
 
-__version__ = "0.8.2"
+__version__ = "0.8.5"
 
 
 if __name__ == "__main__":
