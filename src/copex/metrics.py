@@ -272,7 +272,9 @@ class MetricsCollector:
         if tokens:
             metrics.prompt_tokens = tokens.get("prompt", metrics.prompt_tokens)
             metrics.completion_tokens = tokens.get("completion")
-            metrics.total_tokens = (metrics.prompt_tokens or 0) + (metrics.completion_tokens or 0)
+            metrics.total_tokens = tokens.get("total")
+            if metrics.total_tokens is None:
+                metrics.total_tokens = (metrics.prompt_tokens or 0) + (metrics.completion_tokens or 0)
         elif response:
             metrics.completion_tokens = estimate_tokens(response)
             metrics.total_tokens = (metrics.prompt_tokens or 0) + metrics.completion_tokens

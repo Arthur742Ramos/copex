@@ -91,7 +91,11 @@ def test_send_uses_message_delta_and_final_content():
     events = [
         build_event(EventType.ASSISTANT_MESSAGE_DELTA.value, delta_content="Hello "),
         build_event(EventType.ASSISTANT_MESSAGE_DELTA.value, delta_content="world"),
-        build_event(EventType.ASSISTANT_MESSAGE.value, content="Hello world"),
+        build_event(
+            EventType.ASSISTANT_MESSAGE.value,
+            content="Hello world",
+            usage={"prompt_tokens": 3, "completion_tokens": 5, "total_tokens": 8},
+        ),
         build_event(EventType.SESSION_IDLE.value),
     ]
     session = FakeSession(events)
@@ -104,12 +108,19 @@ def test_send_uses_message_delta_and_final_content():
     response = run(client.send("prompt", on_chunk=chunks.append))
 
     assert response.content == "Hello world"
+    assert response.token_usage is not None
+    assert response.token_usage.total == 8
     assert "".join(c.delta for c in chunks if c.type == "message") == "Hello world"
 
 
 def test_send_uses_transformed_content_when_content_missing():
     events = [
-        build_event(EventType.ASSISTANT_MESSAGE.value, content="", transformed_content="Fallback"),
+        build_event(
+            EventType.ASSISTANT_MESSAGE.value,
+            content="",
+            transformed_content="Fallback",
+            usage={"prompt": 2, "completion": 4},
+        ),
         build_event(EventType.SESSION_IDLE.value),
     ]
     session = FakeSession(events)
@@ -121,6 +132,8 @@ def test_send_uses_transformed_content_when_content_missing():
     response = run(client.send("prompt"))
 
     assert response.content == "Fallback"
+    assert response.token_usage is not None
+    assert response.token_usage.total == 6
 
 
 def test_send_sets_tool_result_chunks():

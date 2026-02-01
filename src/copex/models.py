@@ -1,6 +1,8 @@
 """Model and configuration enums."""
 
+from dataclasses import dataclass
 from enum import Enum
+from typing import Any
 
 
 class Model(str, Enum):
@@ -48,3 +50,30 @@ class EventType(str, Enum):
     TOOL_EXECUTION_START = "tool.execution_start"
     TOOL_EXECUTION_PARTIAL_RESULT = "tool.execution_partial_result"
     TOOL_EXECUTION_COMPLETE = "tool.execution_complete"
+
+
+@dataclass(frozen=True)
+class TokenUsage:
+    """Token usage info from SDK events."""
+
+    prompt: int | None = None
+    completion: int | None = None
+    total: int | None = None
+
+    def to_dict(self) -> dict[str, int]:
+        payload: dict[str, int] = {}
+        if self.prompt is not None:
+            payload["prompt"] = self.prompt
+        if self.completion is not None:
+            payload["completion"] = self.completion
+        if self.total is not None:
+            payload["total"] = self.total
+        return payload
+
+    @classmethod
+    def from_raw(cls, payload: dict[str, Any]) -> "TokenUsage":
+        return cls(
+            prompt=payload.get("prompt"),
+            completion=payload.get("completion"),
+            total=payload.get("total"),
+        )

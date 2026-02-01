@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass
+from importlib import metadata
 from typing import Any, Awaitable, Callable
 
 
@@ -62,6 +63,29 @@ class ToolRegistry:
         self.config = config or ParallelToolConfig()
         self._tools: dict[str, Callable[..., Awaitable[Any]]] = {}
         self._descriptions: dict[str, str] = {}
+        self._load_entry_points()
+
+    def _load_entry_points(self) -> None:
+        """Load tools from entry points."""
+        try:
+            entry_points = metadata.entry_points()
+            if hasattr(entry_points, "select"):
+                group = entry_points.select(group="copex.tools")
+            else:
+                group = entry_points.get("copex.tools", [])
+        except Exception:
+            return
+        for entry in group:
+            try:
+                tool_callable = entry.load()
+            except Exception:
+                continue
+            if not callable(tool_callable):
+                continue
+            name = entry.name
+            if name in self._tools:
+                continue
+            self.add_tool(name, tool_callable, description=getattr(tool_callable, "__doc__", "") or "")
 
     def register(
         self,

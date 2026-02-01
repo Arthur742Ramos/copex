@@ -32,6 +32,7 @@ class RalphState:
     completed: bool = False
     completion_reason: str | None = None
     history: list[str] = field(default_factory=list)
+    total_tokens: int = 0
 
 
 @dataclass
@@ -145,6 +146,10 @@ class RalphWiggum:
                     response = await self.client.send(iteration_prompt)
                     content = response.content
                     self._state.history.append(content)
+                    if response.token_usage and response.token_usage.total is not None:
+                        tokens_total = response.token_usage.total
+                        if isinstance(tokens_total, int):
+                            self._state.total_tokens += tokens_total
                     consecutive_errors = 0
 
                     # Check for completion promise
@@ -244,4 +249,3 @@ async def ralph_loop(
         completion_promise=completion_promise,
         on_iteration=on_iteration,
     )
-

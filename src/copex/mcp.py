@@ -13,10 +13,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import random
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+from urllib import error as urllib_error
+from urllib import request as urllib_request
+from urllib.parse import urljoin
 
 
 @dataclass
@@ -44,7 +48,7 @@ class MCPServerConfig:
     """Configuration for an MCP server connection."""
 
     name: str
-    command: str | list[str]  # Command to launch server
+    command: str | list[str] | None = None  # Command to launch server
     args: list[str] = field(default_factory=list)
     env: dict[str, str] = field(default_factory=dict)
     cwd: str | None = None
@@ -56,6 +60,13 @@ class MCPServerConfig:
     # Behavior
     auto_start: bool = True
     restart_on_crash: bool = True
+
+    # HTTP transport settings
+    http_timeout: float = 10.0
+    http_max_retries: int = 3
+    http_retry_base_delay: float = 0.5
+    http_retry_max_delay: float = 5.0
+    health_check_path: str | None = None
 
 
 class MCPTransport(ABC):
@@ -97,6 +108,8 @@ class StdioTransport(MCPTransport):
     async def connect(self) -> None:
         """Start the MCP server process."""
         cmd = self.config.command
+        if not cmd:
+            raise RuntimeError("MCP stdio transport requires a command")
         if isinstance(cmd, str):
             cmd = [cmd] + self.config.args
         else:
@@ -258,6 +271,124 @@ class StdioTransport(MCPTransport):
             self._process = None
 
 
+class HttpTransport(MCPTransport):
+    """MCP transport over HTTP."""
+
+    def __init__(self, config: MCPServerConfig):
+        self.config = config
+        self._request_id = 0
+
+    async def connect(self) -> None:
+        """HTTP transport uses stateless requests."""
+        if not self.config.url:
+            raise ValueError("HTTP transport requires config.url")
+        await self._health_check()
+
+    async def disconnect(self) -> None:
+        """No persistent connection to close."""
+        return None
+
+    async def send(self, message: dict[str, Any]) -> dict[str, Any]:
+        """Send a JSON-RPC message via HTTP POST."""
+        if not self.config.url:
+            raise RuntimeError("HTTP transport missing URL")
+        self._request_id += 1
+        message = {**message, "id": self._request_id}
+        return await self._request_with_retry(message)
+
+    async def receive(self) -> dict[str, Any]:
+        """HTTP transport does not support receive."""
+        raise NotImplementedError("HTTP transport is request/response only")
+
+    async def _health_check(self) -> None:
+        if not self.config.health_check_path:
+            return
+        url = urljoin(self.config.url, self.config.health_check_path)
+        await self._get_with_retry(url)
+
+    async def _request_with_retry(
+        self,
+        message: dict[str, Any],
+        url_override: str | None = None,
+    ) -> dict[str, Any]:
+        attempt = 0
+        while True:
+            try:
+                return await self._post_json(message, url_override=url_override)
+            except Exception:
+                attempt += 1
+                if attempt > self.config.http_max_retries:
+                    raise
+                delay = min(
+                    self.config.http_retry_base_delay * (2 ** (attempt - 1)),
+                    self.config.http_retry_max_delay,
+                )
+                delay += random.random() * delay * 0.1
+                await asyncio.sleep(delay)
+
+    async def _get_with_retry(self, url: str) -> None:
+        attempt = 0
+        while True:
+            try:
+                await self._get(url)
+                return
+            except Exception:
+                attempt += 1
+                if attempt > self.config.http_max_retries:
+                    raise
+                delay = min(
+                    self.config.http_retry_base_delay * (2 ** (attempt - 1)),
+                    self.config.http_retry_max_delay,
+                )
+                delay += random.random() * delay * 0.1
+                await asyncio.sleep(delay)
+
+    async def _get(self, url: str) -> None:
+        def do_request() -> None:
+            req = urllib_request.Request(url, method="GET")
+            with urllib_request.urlopen(req, timeout=self.config.http_timeout) as response:
+                response.read()
+
+        try:
+            await asyncio.to_thread(do_request)
+        except urllib_error.HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"HTTP request failed: {exc.reason}") from exc
+
+    async def _post_json(
+        self,
+        message: dict[str, Any],
+        *,
+        url_override: str | None = None,
+    ) -> dict[str, Any]:
+        url = url_override or self.config.url
+        if not url:
+            raise RuntimeError("HTTP transport missing URL")
+        data = json.dumps(message).encode("utf-8")
+        headers = {
+            "Content-Type": "application/json",
+            "Accept": "application/json",
+        }
+
+        def do_request() -> dict[str, Any]:
+            req = urllib_request.Request(url, data=data, headers=headers, method="POST")
+            with urllib_request.urlopen(req, timeout=self.config.http_timeout) as response:
+                payload = response.read().decode("utf-8")
+                return json.loads(payload)
+
+        try:
+            response = await asyncio.to_thread(do_request)
+        except urllib_error.HTTPError as exc:
+            raise RuntimeError(f"HTTP {exc.code}: {exc.reason}") from exc
+        except urllib_error.URLError as exc:
+            raise RuntimeError(f"HTTP request failed: {exc.reason}") from exc
+
+        if "error" in response:
+            raise RuntimeError(response["error"].get("message", "Unknown error"))
+        return response.get("result", response)
+
+
 class MCPClient:
     """
     Client for connecting to MCP servers.
@@ -296,6 +427,8 @@ class MCPClient:
         """Connect to the MCP server."""
         if self.config.transport == "stdio":
             self._transport = StdioTransport(self.config)
+        elif self.config.transport == "http":
+            self._transport = HttpTransport(self.config)
         else:
             raise ValueError(f"Unsupported transport: {self.config.transport}")
 
@@ -588,6 +721,11 @@ def load_mcp_config(path: Path | str | None = None) -> list[MCPServerConfig]:
             url=config.get("url"),
             auto_start=config.get("auto_start", True),
             restart_on_crash=config.get("restart_on_crash", True),
+            http_timeout=config.get("http_timeout", 10.0),
+            http_max_retries=config.get("http_max_retries", 3),
+            http_retry_base_delay=config.get("http_retry_base_delay", 0.5),
+            http_retry_max_delay=config.get("http_retry_max_delay", 5.0),
+            health_check_path=config.get("health_check_path"),
         ))
 
     return servers

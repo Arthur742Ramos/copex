@@ -550,9 +550,15 @@ class PlanExecutor:
                     )
                     # Use last response from Ralph loop as the result
                     step.result = ralph_state.history[-1] if ralph_state.history else "Step completed"
+                    if isinstance(ralph_state.total_tokens, int):
+                        step.tokens_used = ralph_state.total_tokens
                 else:
                     response = await self.client.send(prompt)
                     step.result = response.content
+                    if response.token_usage and response.token_usage.total is not None:
+                        tokens_total = response.token_usage.total
+                        if isinstance(tokens_total, int):
+                            step.tokens_used = tokens_total
                     
                 step.status = StepStatus.COMPLETED
                 step.completed_at = datetime.now()

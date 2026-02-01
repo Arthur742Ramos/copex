@@ -132,7 +132,7 @@ class ProgressReporter:
         total: int = 0,
         *,
         output: TextIO | None = None,
-        format: str = "terminal",  # "terminal", "json", "quiet"
+        format: str = "terminal",  # "terminal", "rich", "json", "quiet"
         on_update: Callable[[ProgressState], None] | None = None,
         title: str = "Progress",
     ):
@@ -142,7 +142,7 @@ class ProgressReporter:
         Args:
             total: Total number of items
             output: Output stream (default: stderr)
-            format: Output format ("terminal", "json", "quiet")
+            format: Output format ("terminal", "rich", "json", "quiet")
             on_update: Callback on each state change
             title: Title for the progress display
         """
@@ -256,6 +256,8 @@ class ProgressReporter:
             self._render_terminal()
         elif self.format == "json":
             self._render_json()
+        elif self.format == "rich":
+            self._render_rich()
         # "quiet" format: no output
 
     def _render_terminal(self) -> None:
@@ -280,6 +282,17 @@ class ProgressReporter:
         status = status.ljust(120)
 
         self.output.write(status)
+        self.output.flush()
+
+    def _render_rich(self) -> None:
+        """Render a Rich-compatible progress line."""
+        status = (
+            f"{self.title}: {self.state.completed}/{self.state.total} "
+            f"({self.state.percent:.0f}%)"
+        )
+        if self.state.message:
+            status += f" | {self.state.message}"
+        self.output.write(f"{status}\n")
         self.output.flush()
 
     def _render_json(self) -> None:

@@ -1,10 +1,13 @@
 """Configuration management for Copex."""
 
+import json
+import logging
 import os
 import shutil
 import sys
+from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterable
 
 from pydantic import BaseModel, Field, field_validator
 
@@ -12,6 +15,36 @@ from copex.models import Model, ReasoningEffort
 
 _UNSET = object()
 _COPILOT_CLI_CACHE: str | None | object = _UNSET
+_LOG_LEVELS = {
+    "critical": logging.CRITICAL,
+    "error": logging.ERROR,
+    "warning": logging.WARNING,
+    "warn": logging.WARNING,
+    "info": logging.INFO,
+    "debug": logging.DEBUG,
+}
+_LOG_RECORD_KEYS = {
+    "name",
+    "msg",
+    "args",
+    "levelname",
+    "levelno",
+    "pathname",
+    "filename",
+    "module",
+    "exc_info",
+    "exc_text",
+    "stack_info",
+    "lineno",
+    "funcName",
+    "created",
+    "msecs",
+    "relativeCreated",
+    "thread",
+    "threadName",
+    "processName",
+    "process",
+}
 
 
 def find_copilot_cli() -> str | None:
@@ -92,6 +125,78 @@ def find_copilot_cli() -> str | None:
 
     _COPILOT_CLI_CACHE = None
     return None
+
+
+def _parse_log_level(level: str) -> int:
+    normalized = level.strip().lower()
+    if normalized in _LOG_LEVELS:
+        return _LOG_LEVELS[normalized]
+    valid = ", ".join(sorted({k for k in _LOG_LEVELS if k != "warn"}))
+    raise ValueError(f"Invalid log level: {level}. Valid: {valid}")
+
+
+def _coerce_log_levels(levels: dict[str, str]) -> dict[str, str]:
+    normalized: dict[str, str] = {}
+    for name, level in levels.items():
+        _parse_log_level(level)
+        normalized[name] = level.strip().lower()
+    return normalized
+
+
+def _iter_log_levels(
+    default_level: str,
+    per_component: dict[str, str],
+) -> Iterable[int]:
+    yield _parse_log_level(default_level)
+    for level in per_component.values():
+        yield _parse_log_level(level)
+
+
+class _StructuredFormatter(logging.Formatter):
+    def format(self, record: logging.LogRecord) -> str:
+        payload = {
+            "timestamp": datetime.fromtimestamp(record.created, tz=timezone.utc).isoformat(),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "message": record.getMessage(),
+        }
+        extras = {
+            key: value
+            for key, value in record.__dict__.items()
+            if key not in _LOG_RECORD_KEYS
+        }
+        for key, value in extras.items():
+            if isinstance(value, (str, int, float, bool)) or value is None:
+                payload[key] = value
+            else:
+                payload[key] = str(value)
+        if record.exc_info:
+            payload["exc_info"] = self.formatException(record.exc_info)
+        if record.stack_info:
+            payload["stack_info"] = record.stack_info
+        return json.dumps(payload, ensure_ascii=False)
+
+
+def configure_logging(config: "CopexConfig") -> None:
+    """Configure structured logging for CLI usage."""
+    root_logger = logging.getLogger()
+    for handler in list(root_logger.handlers):
+        root_logger.removeHandler(handler)
+
+    handler: logging.Handler
+    if config.log_file:
+        handler = logging.FileHandler(config.log_file)
+    else:
+        handler = logging.StreamHandler()
+    handler.setLevel(logging.NOTSET)
+    handler.setFormatter(_StructuredFormatter())
+    root_logger.addHandler(handler)
+
+    min_level = min(_iter_log_levels(config.log_level, config.log_levels))
+    root_logger.setLevel(min_level)
+
+    for name, level in config.log_levels.items():
+        logging.getLogger(name).setLevel(_parse_log_level(level))
 
 
 UI_THEMES = {"default", "midnight", "mono", "sunset"}
@@ -211,6 +316,14 @@ class CopexConfig(BaseModel):
     auto_start: bool = Field(default=True, description="Auto-start CLI server")
     auto_restart: bool = Field(default=True, description="Auto-restart on crash")
     log_level: str = Field(default="warning", description="Log level")
+    log_levels: dict[str, str] = Field(
+        default_factory=dict,
+        description="Per-component log levels (e.g., {'copex.client': 'debug'})",
+    )
+    log_file: str | None = Field(
+        default=None,
+        description="Optional log file path (structured JSON)",
+    )
 
     # Session options
     timeout: float = Field(default=300.0, ge=10.0, description="Inactivity timeout (seconds) - resets on each event")
@@ -219,6 +332,25 @@ class CopexConfig(BaseModel):
     )
     continue_prompt: str = Field(
         default="Keep going", description="Prompt to send on auto-continue"
+    )
+    recovery_prompt_max_chars: int = Field(
+        default=8000,
+        ge=100,
+        description="Max chars for recovery prompt context",
+    )
+    auth_refresh_interval: float = Field(
+        default=3300.0,
+        ge=0.0,
+        description="Seconds between auth refreshes (0 disables)",
+    )
+    auth_refresh_buffer: float = Field(
+        default=300.0,
+        ge=0.0,
+        description="Seconds before interval to refresh auth",
+    )
+    auth_refresh_on_error: bool = Field(
+        default=True,
+        description="Refresh auth on unauthorized/expired errors",
     )
 
     # Skills and capabilities
@@ -243,6 +375,31 @@ class CopexConfig(BaseModel):
     mcp_config_file: str | None = Field(
         default=None,
         description="Path to MCP config JSON file"
+    )
+    mcp_http_timeout: float = Field(
+        default=10.0,
+        ge=1.0,
+        description="HTTP MCP timeout in seconds",
+    )
+    mcp_http_max_retries: int = Field(
+        default=3,
+        ge=0,
+        le=10,
+        description="Max HTTP MCP retries",
+    )
+    mcp_http_retry_base_delay: float = Field(
+        default=0.5,
+        ge=0.1,
+        description="Base delay for HTTP MCP retries",
+    )
+    mcp_http_retry_max_delay: float = Field(
+        default=5.0,
+        ge=0.1,
+        description="Max delay for HTTP MCP retries",
+    )
+    mcp_health_check_path: str | None = Field(
+        default=None,
+        description="Optional HTTP MCP health check path",
     )
 
     # Tool filtering
@@ -269,6 +426,17 @@ class CopexConfig(BaseModel):
         description="Use ASCII icons instead of Unicode"
     )
 
+    # Streaming/backpressure
+    stream_queue_max_size: int = Field(
+        default=1000,
+        ge=10,
+        description="Max items in streaming queue before dropping",
+    )
+    stream_drop_mode: str = Field(
+        default="drop_oldest",
+        description="Streaming queue overflow strategy (drop_oldest, drop_newest)",
+    )
+
     @field_validator("ui_theme")
     @classmethod
     def _validate_ui_theme(cls, value: str) -> str:
@@ -284,6 +452,25 @@ class CopexConfig(BaseModel):
             valid = ", ".join(sorted(UI_DENSITIES))
             raise ValueError(f"Invalid ui_density. Valid: {valid}")
         return value
+
+    @field_validator("log_level")
+    @classmethod
+    def _validate_log_level(cls, value: str) -> str:
+        _parse_log_level(value)
+        return value.strip().lower()
+
+    @field_validator("log_levels")
+    @classmethod
+    def _validate_log_levels(cls, value: dict[str, str]) -> dict[str, str]:
+        return _coerce_log_levels(value)
+
+    @field_validator("stream_drop_mode")
+    @classmethod
+    def _validate_stream_drop_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in {"drop_oldest", "drop_newest"}:
+            raise ValueError("stream_drop_mode must be drop_oldest or drop_newest")
+        return normalized
 
     @classmethod
     def from_file(cls, path: str | Path) -> "CopexConfig":
@@ -347,7 +534,7 @@ class CopexConfig(BaseModel):
 
         # MCP servers
         if self.mcp_servers:
-            opts["mcp_servers"] = self.mcp_servers
+            opts["mcp_servers"] = self._apply_mcp_defaults(self.mcp_servers)
         elif self.mcp_config_file:
             config_path = Path(self.mcp_config_file)
             if not config_path.exists():
@@ -356,7 +543,9 @@ class CopexConfig(BaseModel):
             with open(config_path, "r", encoding="utf-8") as f:
                 mcp_data = json.load(f)
                 if "servers" in mcp_data:
-                    opts["mcp_servers"] = list(mcp_data["servers"].values())
+                    opts["mcp_servers"] = self._apply_mcp_defaults(
+                        list(mcp_data["servers"].values())
+                    )
 
         # Tool filtering
         if self.available_tools is not None:
@@ -365,3 +554,16 @@ class CopexConfig(BaseModel):
             opts["excluded_tools"] = self.excluded_tools
 
         return opts
+
+    def _apply_mcp_defaults(self, servers: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        enriched: list[dict[str, Any]] = []
+        for server in servers:
+            payload = dict(server)
+            payload.setdefault("http_timeout", self.mcp_http_timeout)
+            payload.setdefault("http_max_retries", self.mcp_http_max_retries)
+            payload.setdefault("http_retry_base_delay", self.mcp_http_retry_base_delay)
+            payload.setdefault("http_retry_max_delay", self.mcp_http_retry_max_delay)
+            if self.mcp_health_check_path and "health_check_path" not in payload:
+                payload["health_check_path"] = self.mcp_health_check_path
+            enriched.append(payload)
+        return enriched

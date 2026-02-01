@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import sys
 import time
 from pathlib import Path
@@ -93,6 +94,12 @@ def main(
     version: Annotated[
         bool, typer.Option("--version", "-V", callback=version_callback, is_eager=True, help="Show version and exit")
     ] = False,
+    log_level: Annotated[
+        Optional[str], typer.Option("--log-level", help="Log level (debug, info, warning, error)")
+    ] = None,
+    log_file: Annotated[
+        Optional[Path], typer.Option("--log-file", help="Write structured logs to file")
+    ] = None,
     model: Annotated[
         str | None, typer.Option("--model", "-m", help="Model to use")
     ] = None,
@@ -104,7 +111,12 @@ def main(
     if ctx.invoked_subcommand is None:
         # No command provided - launch interactive mode
         effective_model = model or _DEFAULT_MODEL.value
-        interactive(model=effective_model, reasoning=reasoning)
+        interactive(
+            model=effective_model,
+            reasoning=reasoning,
+            log_level=log_level,
+            log_file=log_file,
+        )
 
 
 class SlashCompleter(Completer):
@@ -296,6 +308,12 @@ def chat(
     raw: Annotated[
         bool, typer.Option("--raw", help="Output raw text without formatting")
     ] = False,
+    log_level: Annotated[
+        Optional[str], typer.Option("--log-level", help="Log level (debug, info, warning, error)")
+    ] = None,
+    log_file: Annotated[
+        Optional[Path], typer.Option("--log-file", help="Write structured logs to file")
+    ] = None,
     ui_theme: Annotated[
         Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
     ] = None,
@@ -328,10 +346,17 @@ def chat(
 
     config.retry.max_retries = max_retries
     config.streaming = not no_stream
+    if log_level:
+        config.log_level = log_level
+    if log_file:
+        config.log_file = str(log_file)
     if ui_theme:
         config.ui_theme = ui_theme
     if ui_density:
         config.ui_density = ui_density
+
+    from copex.config import configure_logging
+    configure_logging(config)
 
     # Get prompt from stdin if not provided
     if prompt is None:
@@ -350,9 +375,18 @@ async def _run_chat(
 ) -> None:
     """Run the chat command."""
     client = Copex(config)
+    logger = logging.getLogger(__name__)
 
     try:
         await client.start()
+        logger.info(
+            "chat.start",
+            extra={
+                "model": config.model.value,
+                "reasoning_effort": config.reasoning_effort.value,
+                "streaming": config.streaming,
+            },
+        )
 
         if config.streaming and not raw:
             await _stream_response(client, prompt, show_reasoning)
@@ -380,6 +414,7 @@ async def _run_chat(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
     finally:
+        logger.info("chat.stop")
         await client.stop()
 
 
@@ -465,6 +500,10 @@ def init(
         "timeout": 300.0,
         "auto_continue": True,
         "continue_prompt": "Keep going",
+        "recovery_prompt_max_chars": 8000,
+        "auth_refresh_interval": 3300.0,
+        "auth_refresh_buffer": 300.0,
+        "auth_refresh_on_error": True,
         "retry": {
             "max_retries": 5,
             "base_delay": 1.0,
@@ -472,6 +511,10 @@ def init(
             "exponential_base": 2.0,
             "retry_on_errors": ["500", "502", "503", "504", "Internal Server Error", "rate limit"],
         },
+        "log_level": "warning",
+        "log_levels": {},
+        "stream_queue_max_size": 1000,
+        "stream_drop_mode": "drop_oldest",
         "ui_theme": "default",
         "ui_density": "extended",
         "ui_ascii_icons": False,
@@ -497,6 +540,12 @@ def interactive(
     ui_density: Annotated[
         Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
     ] = None,
+    log_level: Annotated[
+        Optional[str], typer.Option("--log-level", help="Log level (debug, info, warning, error)")
+    ] = None,
+    log_file: Annotated[
+        Optional[Path], typer.Option("--log-file", help="Write structured logs to file")
+    ] = None,
 ) -> None:
     """Start an interactive chat session."""
     effective_model = model or _DEFAULT_MODEL.value
@@ -517,6 +566,12 @@ def interactive(
         density=config.ui_density,
         ascii_icons=config.ui_ascii_icons,
     )
+    if log_level:
+        config.log_level = log_level
+    if log_file:
+        config.log_file = str(log_file)
+    from copex.config import configure_logging
+    configure_logging(config)
     save_last_reasoning_effort(config.reasoning_effort)
     asyncio.run(_interactive_loop(config))
 
@@ -798,6 +853,12 @@ def ralph_command(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = _DEFAULT_REASONING.value,
+    log_level: Annotated[
+        Optional[str], typer.Option("--log-level", help="Log level (debug, info, warning, error)")
+    ] = None,
+    log_file: Annotated[
+        Optional[Path], typer.Option("--log-file", help="Write structured logs to file")
+    ] = None,
 ) -> None:
     """
     Start a Ralph Wiggum loop - iterative AI development.
@@ -836,6 +897,12 @@ def ralph_command(
         )
 
     save_last_reasoning_effort(config.reasoning_effort)
+    if log_level:
+        config.log_level = log_level
+    if log_file:
+        config.log_file = str(log_file)
+    from copex.config import configure_logging
+    configure_logging(config)
     asyncio.run(_run_ralph(config, prompt, max_iterations, completion_promise))
 
 
@@ -848,6 +915,16 @@ async def _run_ralph(
     """Run Ralph loop."""
     client = Copex(config)
     await client.start()
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "ralph.start",
+        extra={
+            "model": config.model.value,
+            "reasoning_effort": config.reasoning_effort.value,
+            "max_iterations": max_iterations,
+            "has_promise": bool(completion_promise),
+        },
+    )
 
     def on_iteration(iteration: int, response: str) -> None:
         preview = response[:200] + "..." if len(response) > 200 else response
@@ -880,6 +957,7 @@ async def _run_ralph(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
     finally:
+        logger.info("ralph.stop")
         await client.stop()
 
 
@@ -982,6 +1060,45 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
+@app.command("session")
+def session_command(
+    export: Annotated[
+        Optional[str], typer.Option("--export", help="Export a session by ID")
+    ] = None,
+    format: Annotated[
+        str, typer.Option("--format", help="Export format (json, md)")
+    ] = "json",
+    output: Annotated[
+        Optional[Path], typer.Option("--output", "-o", help="Write export to file")
+    ] = None,
+) -> None:
+    """Export saved sessions to JSON or Markdown."""
+    if not export:
+        console.print("[red]Provide --export <session-id>[/red]")
+        raise typer.Exit(1)
+
+    fmt = format.lower()
+    if fmt not in {"json", "md"}:
+        console.print("[red]Invalid format. Use json or md.[/red]")
+        raise typer.Exit(1)
+
+    from copex.persistence import SessionStore
+
+    store = SessionStore()
+    export_format = "markdown" if fmt == "md" else "json"
+    try:
+        content = store.export(export, format=export_format)
+    except Exception as e:
+        console.print(f"[red]Error exporting session: {e}[/red]")
+        raise typer.Exit(1)
+
+    if output:
+        output.write_text(content, encoding="utf-8")
+        console.print(f"[green]Exported session to {output}[/green]")
+    else:
+        console.print(content)
+
+
 @app.command("plan")
 def plan_command(
     task: Annotated[Optional[str], typer.Argument(help="Task to plan (optional with --resume)")] = None,
@@ -1012,6 +1129,15 @@ def plan_command(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = _DEFAULT_REASONING.value,
+    progress: Annotated[
+        str, typer.Option("--progress", help="Progress output format (terminal, rich, json, quiet)")
+    ] = "terminal",
+    log_level: Annotated[
+        Optional[str], typer.Option("--log-level", help="Log level (debug, info, warning, error)")
+    ] = None,
+    log_file: Annotated[
+        Optional[Path], typer.Option("--log-file", help="Write structured logs to file")
+    ] = None,
 ) -> None:
     """
     Generate and optionally execute a step-by-step plan.
@@ -1039,6 +1165,12 @@ def plan_command(
         raise typer.Exit(1)
 
     save_last_reasoning_effort(config.reasoning_effort)
+    if log_level:
+        config.log_level = log_level
+    if log_file:
+        config.log_file = str(log_file)
+    from copex.config import configure_logging
+    configure_logging(config)
     asyncio.run(_run_plan(
         config=config,
         task=task or "",
@@ -1049,6 +1181,7 @@ def plan_command(
         from_step=from_step,
         load_plan=load_plan,
         max_iterations=max_iterations,
+        progress=progress,
     ))
 
 
@@ -1075,10 +1208,23 @@ async def _run_plan(
     from_step: int,
     load_plan: Path | None,
     max_iterations: int = 10,
+    progress: str = "terminal",
 ) -> None:
     """Run plan generation and optional execution."""
     client = Copex(config)
     await client.start()
+    logger = logging.getLogger(__name__)
+    logger.info(
+        "plan.start",
+        extra={
+            "model": config.model.value,
+            "reasoning_effort": config.reasoning_effort.value,
+            "execute": execute,
+            "review": review,
+            "resume": resume,
+            "from_step": from_step,
+        },
+    )
 
     try:
         # Create Ralph instance for iterative step execution
@@ -1184,14 +1330,25 @@ async def _run_plan(
                 console.print(f"[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
                 return typer.confirm("Continue with next step?", default=False)
             
+            from copex.progress import PlanProgressReporter
+            if progress not in {"terminal", "rich", "json", "quiet"}:
+                console.print("[red]Invalid progress format. Use terminal, rich, json, or quiet.[/red]")
+                raise typer.Exit(1)
+
+            use_reporter = progress not in {"terminal", "quiet"}
+            reporter = PlanProgressReporter(plan, format=progress) if use_reporter else None
+
             await executor.execute_plan(
                 plan,
                 from_step=from_step,
-                on_step_start=on_step_start,
-                on_step_complete=on_step_complete,
-                on_error=on_error,
+                on_step_start=reporter.on_step_start if use_reporter else on_step_start,
+                on_step_complete=reporter.on_step_complete if use_reporter else on_step_complete,
+                on_error=reporter.on_error if use_reporter else on_error,
                 save_checkpoints=True,
             )
+
+            if reporter and progress != "quiet":
+                reporter.finish()
             
             # Calculate total time
             total_time = time.time() - plan_start_time
@@ -1212,6 +1369,7 @@ async def _run_plan(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
     finally:
+        logger.info("plan.stop")
         await client.stop()
 
 

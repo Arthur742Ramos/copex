@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import time
 from types import SimpleNamespace
 import threading
 
@@ -67,12 +68,17 @@ class MockClient:
     def __init__(self, session_factory):
         self.session_factory = session_factory
         self.sessions_created = 0
+        self.start_calls = 0
+        self.stop_calls = 0
         self._client = MockRpcClient(self, session_factory)
         self._sessions_lock = threading.Lock()
         self._sessions = {}
 
     async def start(self):
-        pass
+        self.start_calls += 1
+
+    async def stop(self):
+        self.stop_calls += 1
 
     async def create_session(self, options):
         self.sessions_created += 1
@@ -126,7 +132,11 @@ class TestBasicRetry:
     def test_success_on_first_try(self):
         """No retries needed when first call succeeds."""
         session = ScriptedSession([
-            [build_event(EventType.ASSISTANT_MESSAGE.value, content="Hello!"),
+            [build_event(
+                EventType.ASSISTANT_MESSAGE.value,
+                content="Hello!",
+                usage={"prompt_tokens": 1, "completion_tokens": 2, "total_tokens": 3},
+            ),
              build_event(EventType.SESSION_IDLE.value)],
         ])
         config = CopexConfig(retry=RetryConfig(max_retries=3, base_delay=0.1))
@@ -139,6 +149,8 @@ class TestBasicRetry:
 
         assert result.content == "Hello!"
         assert result.retries == 0
+        assert result.token_usage is not None
+        assert result.token_usage.total == 3
         assert result.auto_continues == 0
         assert session.send_count == 1
 
@@ -518,6 +530,62 @@ class TestErrorClassification:
 
         assert result.content == "OK"
         assert result.retries == 1
+
+
+# =============================================================================
+# Auth Refresh Tests
+# =============================================================================
+
+
+class TestAuthRefresh:
+    """Tests for auth refresh behavior."""
+
+    def test_proactive_refresh_recreates_client(self):
+        session = ScriptedSession([
+            [build_event(EventType.ASSISTANT_MESSAGE.value, content="OK"),
+             build_event(EventType.SESSION_IDLE.value)],
+        ])
+        config = CopexConfig(auth_refresh_interval=1.0, auth_refresh_buffer=0.0)
+        client = Copex(config)
+        client._started = True
+        client._client = MockClient(lambda: session)
+        client._session = session
+        client._last_auth_refresh = time.monotonic() - 2.0
+
+        result = run(client.send("Hi"))
+
+        assert result.content == "OK"
+        assert client._client.start_calls == 1
+        assert client._client.stop_calls == 1
+
+    def test_auth_error_triggers_refresh(self):
+        sessions = []
+
+        def create_session():
+            if not sessions:
+                s = ScriptedSession([
+                    [build_event(EventType.SESSION_ERROR.value, message="401 Unauthorized")],
+                ])
+            else:
+                s = ScriptedSession([
+                    [build_event(EventType.ASSISTANT_MESSAGE.value, content="Recovered"),
+                     build_event(EventType.SESSION_IDLE.value)],
+                ])
+            sessions.append(s)
+            return s
+
+        mock_client = MockClient(create_session)
+        config = CopexConfig(auth_refresh_on_error=True)
+        client = Copex(config)
+        client._started = True
+        client._client = mock_client
+        client._session = create_session()
+
+        result = run(client.send("Hi"))
+
+        assert result.content == "Recovered"
+        assert mock_client.start_calls == 1
+        assert mock_client.stop_calls == 1
 
     def test_retries_on_rate_limit(self):
         """Rate limit errors trigger retry."""

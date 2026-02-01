@@ -40,6 +40,8 @@ dev = ["pytest", "pytest-asyncio", "ruff"]
 [project.scripts]
 copex = "copex.cli:app"
 
+[project.entry-points."copex.tools"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/copex"]
 
@@ -53,4 +55,3 @@ target-version = "py310"
 [tool.ruff.lint]
 select = ["E", "F", "I", "W"]
 ignore = ["E501"]
-

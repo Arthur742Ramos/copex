@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -15,7 +16,7 @@ from copilot.session import CopilotSession
 
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
-from copex.models import EventType, Model, ReasoningEffort
+from copex.models import EventType, Model, ReasoningEffort, TokenUsage
 
 logger = logging.getLogger(__name__)
 
@@ -29,6 +30,7 @@ class Response:
     raw_events: list[dict[str, Any]] = field(default_factory=list)
     retries: int = 0
     auto_continues: int = 0
+    token_usage: TokenUsage | None = None
 
 
 @dataclass
@@ -64,6 +66,7 @@ class _SendState:
     pending_tools: int = 0
     awaiting_post_tool_response: bool = False
     tool_execution_seen: bool = False
+    token_usage: TokenUsage | None = None
 
 
 class Copex:
@@ -74,6 +77,7 @@ class Copex:
         self._client: CopilotClient | None = None
         self._session: Any = None
         self._started = False
+        self._last_auth_refresh = 0.0
 
     async def start(self) -> None:
         """Start the Copilot client."""
@@ -82,6 +86,7 @@ class Copex:
         self._client = CopilotClient(self.config.to_client_options())
         await self._client.start()
         self._started = True
+        self._last_auth_refresh = time.monotonic()
 
     async def stop(self) -> None:
         """Stop the Copilot client."""
@@ -116,6 +121,51 @@ class Copex:
         """Detect tool-state mismatch errors that require session recovery."""
         error_str = str(error).lower()
         return "tool_use_id" in error_str and "tool_result" in error_str
+
+    def _is_auth_error(self, error: str | Exception) -> bool:
+        error_str = str(error).lower()
+        return any(
+            token in error_str
+            for token in (
+                "unauthorized",
+                "forbidden",
+                "token expired",
+                "expired token",
+                "invalid token",
+                "401",
+                "403",
+            )
+        )
+
+    def _auth_refresh_due(self) -> bool:
+        interval = self.config.auth_refresh_interval
+        if interval <= 0 or self._last_auth_refresh <= 0:
+            return False
+        buffer_seconds = max(self.config.auth_refresh_buffer, 0.0)
+        return (time.monotonic() - self._last_auth_refresh) >= max(interval - buffer_seconds, 0.0)
+
+    async def _refresh_auth(self, on_chunk: Callable[[StreamChunk], None] | None) -> None:
+        if not self._client:
+            return
+        if not hasattr(self._client, "stop") or not hasattr(self._client, "start"):
+            raise RuntimeError("Copilot client missing stop/start for auth refresh")
+        logger.info("auth.refresh.start")
+        if on_chunk:
+            on_chunk(StreamChunk(
+                type="system",
+                delta="\n[Refreshing Copilot authentication]\n",
+            ))
+        if self._session:
+            try:
+                await self._session.destroy()
+            except Exception:
+                logger.warning("Failed to destroy session during auth refresh", exc_info=True)
+            self._session = None
+        await self._client.stop()
+        await self._client.start()
+        self._started = True
+        self._last_auth_refresh = time.monotonic()
+        logger.info("auth.refresh.complete")
 
     def _calculate_delay(self, attempt: int) -> float:
         """Calculate delay with exponential backoff and jitter."""
@@ -174,6 +224,7 @@ class Copex:
                 is_final=True,
                 content=state.final_content,
             ))
+        self._capture_token_usage(event, state)
 
     def _handle_reasoning(
         self,
@@ -189,6 +240,70 @@ class Copex:
                 is_final=True,
                 content=state.final_reasoning,
             ))
+        self._capture_token_usage(event, state)
+
+    def _capture_token_usage(self, event: Any, state: _SendState) -> None:
+        usage = self._extract_token_usage(event)
+        if usage is None:
+            return
+        if state.token_usage is None:
+            state.token_usage = usage
+            return
+        merged_prompt = usage.prompt if usage.prompt is not None else state.token_usage.prompt
+        merged_completion = (
+            usage.completion if usage.completion is not None else state.token_usage.completion
+        )
+        merged_total = usage.total if usage.total is not None else state.token_usage.total
+        state.token_usage = TokenUsage(
+            prompt=merged_prompt,
+            completion=merged_completion,
+            total=merged_total,
+        )
+
+    def _extract_token_usage(self, event: Any) -> TokenUsage | None:
+        if not hasattr(event, "data"):
+            return None
+        data = event.data
+        candidates = []
+        for key in ("usage", "token_usage", "tokenUsage", "tokens"):
+            payload = getattr(data, key, None)
+            if isinstance(payload, dict):
+                candidates.append(payload)
+            elif payload is not None:
+                candidates.append(payload)
+        if not candidates and isinstance(data, dict):
+            for key in ("usage", "token_usage", "tokenUsage", "tokens"):
+                payload = data.get(key)
+                if payload is not None:
+                    candidates.append(payload)
+        if not candidates:
+            return None
+        payload = candidates[0]
+        if isinstance(payload, TokenUsage):
+            return payload
+        if not isinstance(payload, dict):
+            try:
+                payload = payload.__dict__
+            except Exception:
+                return None
+        usage = TokenUsage(
+            prompt=payload.get("prompt_tokens")
+            or payload.get("prompt")
+            or payload.get("input")
+            or payload.get("input_tokens"),
+            completion=payload.get("completion_tokens")
+            or payload.get("completion")
+            or payload.get("output")
+            or payload.get("output_tokens"),
+            total=payload.get("total_tokens") or payload.get("total"),
+        )
+        if usage.total is None and usage.prompt is not None and usage.completion is not None:
+            usage = TokenUsage(
+                prompt=usage.prompt,
+                completion=usage.completion,
+                total=usage.prompt + usage.completion,
+            )
+        return usage
 
     def _handle_tool_execution_start(
         self,
@@ -373,6 +488,16 @@ class Copex:
                 payload["systemMessage"]["content"] = f"{existing}\n\n{opts['instructions']}" if existing else opts["instructions"]
         
         # Call the JSON-RPC directly, bypassing the SDK's create_session
+        logger.debug(
+            "session.create",
+            extra={
+                "model": payload.get("model"),
+                "streaming": payload.get("streaming"),
+                "reasoning_effort": payload.get("modelReasoningEffort"),
+                "skills_count": len(payload.get("skills") or []),
+                "mcp_server_count": len(payload.get("mcpServers") or []),
+            },
+        )
         response = await self._client._client.request("session.create", payload)
         
         session_id = response["sessionId"]
@@ -431,10 +556,15 @@ class Copex:
                 logger.warning("Failed to destroy session during recovery", exc_info=True)
             self._session = None
 
-        # Create fresh session
+        return await self._build_recovery_session(context, on_chunk)
+
+    async def _build_recovery_session(
+        self,
+        context: str | None,
+        on_chunk: Callable[[StreamChunk], None] | None,
+    ) -> tuple[Any, str]:
         session = await self._ensure_session()
 
-        # Build recovery prompt with context
         if context:
             recovery_prompt = (
                 f"[Session recovered. Previous conversation context:]\n\n"
@@ -444,6 +574,8 @@ class Copex:
         else:
             recovery_prompt = self.config.continue_prompt
 
+        recovery_prompt = self._truncate_recovery_prompt(recovery_prompt)
+
         if on_chunk:
             on_chunk(StreamChunk(
                 type="system",
@@ -451,6 +583,22 @@ class Copex:
             ))
 
         return session, recovery_prompt
+
+    def _truncate_recovery_prompt(self, prompt: str) -> str:
+        max_chars = self.config.recovery_prompt_max_chars
+        if max_chars <= 0 or len(prompt) <= max_chars:
+            return prompt
+        marker = f"[End of context. {self.config.continue_prompt}]"
+        if marker in prompt:
+            head, tail = prompt.split(marker, 1)
+            suffix = marker + tail
+        else:
+            head, suffix = prompt, ""
+        allowance = max_chars - len(suffix) - 3
+        if allowance <= 0:
+            return (suffix or prompt)[-max_chars:]
+        trimmed = head[-allowance:]
+        return f"...{trimmed}{suffix}"
 
     async def send(
         self,
@@ -471,7 +619,12 @@ class Copex:
         Returns:
             Response object with content and metadata
         """
-        session = await self._ensure_session()
+        if self._auth_refresh_due():
+            context = await self._get_session_context(self._session) if self._session else None
+            await self._refresh_auth(on_chunk)
+            session, prompt = await self._build_recovery_session(context, on_chunk)
+        else:
+            session = await self._ensure_session()
         retries = 0
         auto_continues = 0
         last_error: Exception | None = None
@@ -481,10 +634,25 @@ class Copex:
             reasoning_effort=self.config.reasoning_effort.value,
             prompt=prompt,
         )
+        logger.debug(
+            "request.start",
+            extra={
+                "request_id": request.request_id,
+                "model": self.config.model.value,
+                "reasoning_effort": self.config.reasoning_effort.value,
+                "prompt_length": len(prompt),
+            },
+        )
 
         while True:
             try:
-                result = await self._send_once(session, prompt, tools, on_chunk)
+                result = await self._send_once(
+                    session,
+                    prompt,
+                    tools,
+                    on_chunk,
+                    request_id=request.request_id,
+                )
                 result.retries = retries
                 result.auto_continues = auto_continues
                 collector.complete_request(
@@ -492,12 +660,48 @@ class Copex:
                     success=True,
                     response=result.content,
                     retries=retries,
+                    tokens=result.token_usage.to_dict() if result.token_usage else None,
+                )
+                logger.info(
+                    "request.complete",
+                    extra={
+                        "request_id": request.request_id,
+                        "retries": retries,
+                        "auto_continues": auto_continues,
+                        "response_length": len(result.content or ""),
+                        "tokens_prompt": result.token_usage.prompt if result.token_usage else None,
+                        "tokens_completion": result.token_usage.completion if result.token_usage else None,
+                        "tokens_total": result.token_usage.total if result.token_usage else None,
+                    },
                 )
                 return result
 
             except Exception as e:
                 last_error = e
                 error_str = str(e)
+                logger.warning(
+                    "request.error",
+                    extra={
+                        "request_id": request.request_id,
+                        "error": error_str,
+                        "retries": retries,
+                        "auto_continues": auto_continues,
+                    },
+                )
+
+                if self.config.auth_refresh_on_error and self._is_auth_error(e):
+                    logger.warning(
+                        "auth.refresh",
+                        extra={
+                            "request_id": request.request_id,
+                            "error": error_str,
+                        },
+                    )
+                    context = await self._get_session_context(self._session) if self._session else None
+                    await self._refresh_auth(on_chunk)
+                    session, prompt = await self._build_recovery_session(context, on_chunk)
+                    retries = 0
+                    continue
 
                 if self._is_tool_state_error(e) and self.config.auto_continue:
                     auto_continues += 1
@@ -508,8 +712,25 @@ class Copex:
                             error=str(last_error),
                             retries=retries,
                         )
+                        logger.error(
+                            "request.failed",
+                            extra={
+                                "request_id": request.request_id,
+                                "error": error_str,
+                                "retries": retries,
+                                "auto_continues": auto_continues,
+                            },
+                        )
                         raise last_error
                     retries = 0
+                    logger.warning(
+                        "session.recover",
+                        extra={
+                            "request_id": request.request_id,
+                            "reason": "tool_state_mismatch",
+                            "auto_continues": auto_continues,
+                        },
+                    )
                     session, prompt = await self._recover_session(on_chunk)
                     if on_chunk:
                         on_chunk(StreamChunk(
@@ -527,6 +748,15 @@ class Copex:
                         error=error_str,
                         retries=retries,
                     )
+                    logger.error(
+                        "request.failed",
+                        extra={
+                            "request_id": request.request_id,
+                            "error": error_str,
+                            "retries": retries,
+                            "auto_continues": auto_continues,
+                        },
+                    )
                     raise
 
                 retries += 1
@@ -538,12 +768,28 @@ class Copex:
                             type="system",
                             delta=f"\n[Retry {retries}/{self.config.retry.max_retries} after error: {error_str[:50]}...]\n",
                         ))
+                    logger.info(
+                        "request.retry",
+                        extra={
+                            "request_id": request.request_id,
+                            "retry": retries,
+                            "error": error_str,
+                        },
+                    )
                     await asyncio.sleep(delay)
                 elif self.config.auto_continue and auto_continues < self.config.retry.max_auto_continues:
                     # Retries exhausted - session may be in bad state
                     # Recover with fresh session, preserving context
                     auto_continues += 1
                     retries = 0
+                    logger.warning(
+                        "session.recover",
+                        extra={
+                            "request_id": request.request_id,
+                            "reason": "retries_exhausted",
+                            "auto_continues": auto_continues,
+                        },
+                    )
                     session, prompt = await self._recover_session(on_chunk)
                     delay = self._calculate_delay(0)
                     if on_chunk:
@@ -559,6 +805,15 @@ class Copex:
                         error=str(last_error) if last_error else "Max retries exceeded",
                         retries=retries,
                     )
+                    logger.error(
+                        "request.failed",
+                        extra={
+                            "request_id": request.request_id,
+                            "error": str(last_error) if last_error else "Max retries exceeded",
+                            "retries": retries,
+                            "auto_continues": auto_continues,
+                        },
+                    )
                     raise last_error or RuntimeError("Max retries exceeded")
 
     async def _send_once(
@@ -567,6 +822,8 @@ class Copex:
         prompt: str,
         tools: list[Any] | None,
         on_chunk: Callable[[StreamChunk], None] | None,
+        *,
+        request_id: str,
     ) -> Response:
         """Send a single prompt and collect the response."""
         state = _SendState(done=asyncio.Event())
@@ -592,27 +849,111 @@ class Copex:
 
                 elif event_type == EventType.TOOL_EXECUTION_START.value:
                     self._handle_tool_execution_start(event, state, on_chunk)
+                    tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
+                    tool_call_id = (
+                        getattr(event.data, "tool_call_id", None)
+                        or getattr(event.data, "toolCallId", None)
+                        or getattr(event.data, "id", None)
+                    )
+                    logger.debug(
+                        "tool.start",
+                        extra={
+                            "request_id": request_id,
+                            "tool_name": tool_name,
+                            "tool_call_id": tool_call_id,
+                        },
+                    )
 
                 elif event_type == EventType.TOOL_EXECUTION_PARTIAL_RESULT.value:
                     self._handle_tool_execution_partial_result(event, state, on_chunk)
+                    tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
+                    tool_call_id = (
+                        getattr(event.data, "tool_call_id", None)
+                        or getattr(event.data, "toolCallId", None)
+                        or getattr(event.data, "id", None)
+                    )
+                    partial = getattr(event.data, "partial_output", None)
+                    logger.debug(
+                        "tool.partial",
+                        extra={
+                            "request_id": request_id,
+                            "tool_name": tool_name,
+                            "tool_call_id": tool_call_id,
+                            "result_length": len(str(partial)) if partial is not None else 0,
+                        },
+                    )
 
                 elif event_type == EventType.TOOL_EXECUTION_COMPLETE.value:
                     self._handle_tool_execution_complete(event, state, on_chunk)
+                    tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
+                    tool_call_id = (
+                        getattr(event.data, "tool_call_id", None)
+                        or getattr(event.data, "toolCallId", None)
+                        or getattr(event.data, "id", None)
+                    )
+                    success = getattr(event.data, "success", None)
+                    duration = getattr(event.data, "duration", None)
+                    logger.debug(
+                        "tool.complete",
+                        extra={
+                            "request_id": request_id,
+                            "tool_name": tool_name,
+                            "tool_call_id": tool_call_id,
+                            "success": success,
+                            "duration": duration,
+                        },
+                    )
 
                 elif event_type == EventType.ERROR.value:
                     self._handle_error_event(event, state)
+                    logger.warning(
+                        "session.error",
+                        extra={
+                            "request_id": request_id,
+                            "error": str(getattr(event.data, "message", event.data)),
+                        },
+                    )
 
                 elif event_type == EventType.SESSION_ERROR.value:
                     self._handle_error_event(event, state)
+                    logger.warning(
+                        "session.error",
+                        extra={
+                            "request_id": request_id,
+                            "error": str(getattr(event.data, "message", event.data)),
+                        },
+                    )
 
                 elif event_type == EventType.TOOL_CALL.value:
                     self._handle_tool_call(event, state, on_chunk)
+                    tool_name = getattr(event.data, "name", None) or getattr(event.data, "tool", None)
+                    tool_call_id = (
+                        getattr(event.data, "tool_call_id", None)
+                        or getattr(event.data, "toolCallId", None)
+                        or getattr(event.data, "id", None)
+                    )
+                    logger.debug(
+                        "tool.call",
+                        extra={
+                            "request_id": request_id,
+                            "tool_name": tool_name,
+                            "tool_call_id": tool_call_id,
+                        },
+                    )
 
                 elif event_type == EventType.ASSISTANT_TURN_END.value:
                     self._handle_assistant_turn_end(state)
+                    logger.debug(
+                        "assistant.turn_end",
+                        extra={"request_id": request_id},
+                    )
 
                 elif event_type == EventType.SESSION_IDLE.value:
                     self._handle_session_idle(state)
+                    logger.debug(
+                        "session.idle",
+                        extra={"request_id": request_id},
+                    )
 
             except Exception as e:
                 state.error_holder.append(e)
@@ -668,6 +1009,7 @@ class Copex:
                 "".join(state.reasoning_parts) if state.reasoning_parts else None
             ),
             raw_events=state.raw_events,
+            token_usage=state.token_usage,
         )
 
     async def stream(
@@ -681,17 +1023,39 @@ class Copex:
 
         Yields StreamChunk objects as they arrive.
         """
-        queue: asyncio.Queue[StreamChunk | None | Exception] = asyncio.Queue()
+        queue: asyncio.Queue[StreamChunk | None | Exception] = asyncio.Queue(
+            maxsize=self.config.stream_queue_max_size
+        )
+        queue_lock = asyncio.Lock()
 
         def on_chunk(chunk: StreamChunk) -> None:
-            queue.put_nowait(chunk)
+            try:
+                loop = asyncio.get_running_loop()
+            except RuntimeError:
+                return
+
+            async def enqueue() -> None:
+                async with queue_lock:
+                    if queue.full():
+                        if self.config.stream_drop_mode == "drop_oldest":
+                            try:
+                                queue.get_nowait()
+                            except asyncio.QueueEmpty:
+                                pass
+                        else:
+                            return
+                    queue.put_nowait(chunk)
+
+            if loop.is_closed():
+                return
+            loop.call_soon_threadsafe(lambda: asyncio.create_task(enqueue()))
 
         async def sender() -> None:
             try:
                 await self.send(prompt, tools=tools, on_chunk=on_chunk)
-                queue.put_nowait(None)  # Signal completion
+                await queue.put(None)  # Signal completion
             except Exception as e:
-                queue.put_nowait(e)
+                await queue.put(e)
 
         task = asyncio.create_task(sender())
 

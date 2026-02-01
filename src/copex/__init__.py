@@ -3,14 +3,14 @@
 # Checkpointing
 from copex.checkpoint import Checkpoint, CheckpointedRalph, CheckpointStore
 from copex.client import Copex
-from copex.config import CopexConfig, find_copilot_cli
+from copex.config import CopexConfig, configure_logging, find_copilot_cli
 
 # MCP integration
 from copex.mcp import MCPClient, MCPManager, MCPServerConfig, MCPTool, load_mcp_config
 
 # Metrics
 from copex.metrics import MetricsCollector, RequestMetrics, SessionMetrics, get_collector
-from copex.models import Model, ReasoningEffort
+from copex.models import Model, ReasoningEffort, TokenUsage
 
 # Persistence
 from copex.persistence import Message, PersistentSession, SessionData, SessionStore
@@ -37,8 +37,10 @@ __all__ = [
     # Core
     "Copex",
     "CopexConfig",
+    "configure_logging",
     "Model",
     "ReasoningEffort",
+    "TokenUsage",
     "find_copilot_cli",
     # Ralph
     "RalphWiggum",
