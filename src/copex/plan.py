@@ -424,9 +424,9 @@ class PlanExecutor:
             if not line:
                 continue
             
-            # Match "STEP N: description" or "N. description" or "N: description"
+            # Match "STEP N - description" or "N) description" variants
             match = re.match(
-                r"^(?:STEP\s*)?(\d+)[.:\)]\s*(.+)$",
+                r"^(?:STEP\s*)?(\d+)\s*[.:\)-]\s*(.+)$",
                 line,
                 re.IGNORECASE,
             )
@@ -437,7 +437,7 @@ class PlanExecutor:
         
         # Fallback: if line parsing failed, try multi-line pattern
         if not steps:
-            pattern = r"(?:STEP\s*)?(\d+)[.:]\s*(.+?)(?=(?:\n\s*)?(?:STEP\s*)?\d+[.:]|\Z)"
+            pattern = r"(?:STEP\s*)?(\d+)\s*[.:\)-]\s*(.+?)(?=(?:\n\s*)?(?:STEP\s*)?\d+\s*[.:\)-]|\Z)"
             matches = re.findall(pattern, content, re.IGNORECASE | re.DOTALL)
             for i, (num, desc) in enumerate(matches, 1):
                 description = " ".join(desc.strip().split())
@@ -451,6 +451,10 @@ class PlanExecutor:
                 clean = re.sub(r"^[-*]\s*", "", clean)
                 if clean:
                     steps.append(PlanStep(number=i, description=clean))
+
+        if not steps:
+            import logging
+            logging.getLogger(__name__).warning("No plan steps parsed from response")
         
         return steps
 

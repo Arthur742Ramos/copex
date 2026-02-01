@@ -91,6 +91,8 @@ class StdioTransport(MCPTransport):
         self._request_id = 0
         self._pending: dict[int, asyncio.Future] = {}
         self._reader_task: asyncio.Task | None = None
+        self._stderr_task: asyncio.Task | None = None
+        self._stderr_lines: list[str] = []
 
     async def connect(self) -> None:
         """Start the MCP server process."""
@@ -111,6 +113,7 @@ class StdioTransport(MCPTransport):
 
         # Start reader task
         self._reader_task = asyncio.create_task(self._reader_loop())
+        self._stderr_task = asyncio.create_task(self._stderr_loop())
 
         # Initialize connection
         await self._initialize()
@@ -176,6 +179,24 @@ class StdioTransport(MCPTransport):
             except Exception:
                 continue
 
+    async def _stderr_loop(self) -> None:
+        """Read stderr from the server."""
+        if not self._process or not self._process.stderr:
+            return
+        while True:
+            try:
+                line = await self._process.stderr.readline()
+                if not line:
+                    break
+                text = line.decode("utf-8", errors="replace").rstrip()
+                if text:
+                    self._stderr_lines.append(text)
+                    self._stderr_lines = self._stderr_lines[-20:]
+            except asyncio.CancelledError:
+                break
+            except Exception:
+                continue
+
     async def _write(self, message: dict[str, Any]) -> None:
         """Write a message to the server."""
         if not self._process or not self._process.stdin:
@@ -203,6 +224,11 @@ class StdioTransport(MCPTransport):
         except asyncio.TimeoutError:
             self._pending.pop(request_id, None)
             raise
+        except Exception as exc:
+            stderr = "\n".join(self._stderr_lines)
+            if stderr:
+                raise RuntimeError(f"{exc}\nMCP stderr:\n{stderr}") from exc
+            raise
 
     async def receive(self) -> dict[str, Any]:
         """Receive is handled by reader loop."""
@@ -214,6 +240,12 @@ class StdioTransport(MCPTransport):
             self._reader_task.cancel()
             try:
                 await self._reader_task
+            except asyncio.CancelledError:
+                pass
+        if self._stderr_task:
+            self._stderr_task.cancel()
+            try:
+                await self._stderr_task
             except asyncio.CancelledError:
                 pass
 

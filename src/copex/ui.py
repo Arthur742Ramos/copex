@@ -155,6 +155,38 @@ class Icons:
     CLOCK = "⏱"
 
 
+class ASCIIIcons:
+    """ASCII icons for terminals without Unicode support."""
+
+    # Status
+    THINKING = "..."
+    DONE = "[OK]"
+    ERROR = "[X]"
+    WARNING = "[!]"
+    INFO = "[i]"
+
+    # Actions
+    TOOL = "*"
+    FILE_READ = "R"
+    FILE_WRITE = "W"
+    FILE_CREATE = "+"
+    SEARCH = "?"
+    TERMINAL = "$"
+    GLOBE = "@"
+
+    # Navigation
+    ARROW_RIGHT = "->"
+    ARROW_DOWN = "v"
+    BULLET = "*"
+
+    # Misc
+    SPARKLE = "*"
+    BRAIN = "!"
+    ROBOT = "AI"
+    LIGHTNING = "*"
+    CLOCK = "t"
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Data Classes
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -174,29 +206,29 @@ class ActivityType(str, Enum):
 class ToolCallInfo:
     """Information about a tool call."""
     name: str
+    id: str | None = None
     arguments: dict[str, Any] = field(default_factory=dict)
     result: str | None = None
     status: str = "running"  # running, success, error
     duration: float | None = None
     started_at: float = field(default_factory=time.time)
 
-    @property
-    def icon(self) -> str:
+    def icon(self, icon_set: type[Icons] | type[ASCIIIcons] = Icons) -> str:
         """Get appropriate icon for the tool."""
         name_lower = self.name.lower()
         if "read" in name_lower or "view" in name_lower:
-            return Icons.FILE_READ
+            return icon_set.FILE_READ
         elif "write" in name_lower or "edit" in name_lower:
-            return Icons.FILE_WRITE
+            return icon_set.FILE_WRITE
         elif "create" in name_lower:
-            return Icons.FILE_CREATE
+            return icon_set.FILE_CREATE
         elif "search" in name_lower or "grep" in name_lower or "glob" in name_lower:
-            return Icons.SEARCH
+            return icon_set.SEARCH
         elif "shell" in name_lower or "bash" in name_lower or "powershell" in name_lower:
-            return Icons.TERMINAL
+            return icon_set.TERMINAL
         elif "web" in name_lower or "fetch" in name_lower:
-            return Icons.GLOBE
-        return Icons.TOOL
+            return icon_set.GLOBE
+        return icon_set.TOOL
 
     @property
     def elapsed(self) -> float:
@@ -268,6 +300,8 @@ class CopexUI:
         theme: str = "default",
         density: str = "extended",
         show_all_tools: bool = False,
+        show_reasoning: bool = True,
+        ascii_icons: bool = False,
     ):
         self.console = console or Console()
         self.set_theme(theme)
@@ -280,6 +314,8 @@ class CopexUI:
         self._last_frame_at = 0.0
         self._dot_frames = [".", "..", "..."]
         self.show_all_tools = show_all_tools
+        self.show_reasoning = show_reasoning
+        self._icon_set = ASCIIIcons if ascii_icons else Icons
         self._max_live_message_chars = 2000 if density == "extended" else 900
         self._max_live_reasoning_chars = 800 if density == "extended" else 320
 
@@ -302,7 +338,7 @@ class CopexUI:
     def _build_header(self) -> Text:
         """Build the header with model and status."""
         header = Text()
-        header.append(f"{Icons.ROBOT} ", style=Theme.PRIMARY)
+        header.append(f"{self._icon_set.ROBOT} ", style=Theme.PRIMARY)
         header.append("Copex", style=Theme.HEADER)
         if self.state.model:
             header.append(f" • {self.state.model}", style=Theme.MUTED)
@@ -338,10 +374,10 @@ class CopexUI:
             label = f"Executing tools{dots}"
             indicator.append(label.ljust(activity_width), style=Theme.WARNING)
         elif self.state.activity == ActivityType.DONE:
-            indicator.append(f" {Icons.DONE} ", style=f"bold {Theme.SUCCESS}")
+            indicator.append(f" {self._icon_set.DONE} ", style=f"bold {Theme.SUCCESS}")
             indicator.append("Complete".ljust(activity_width), style=Theme.SUCCESS)
         elif self.state.activity == ActivityType.ERROR:
-            indicator.append(f" {Icons.ERROR} ", style=f"bold {Theme.ERROR}")
+            indicator.append(f" {self._icon_set.ERROR} ", style=f"bold {Theme.ERROR}")
             indicator.append("Error".ljust(activity_width), style=Theme.ERROR)
         else:
             indicator.append(f" {spinner} ", style=Theme.MUTED)
@@ -352,6 +388,8 @@ class CopexUI:
 
     def _build_reasoning_panel(self) -> Panel | None:
         """Build the reasoning panel if there's reasoning content."""
+        if not self.show_reasoning:
+            return None
         if not self.state.reasoning:
             return None
 
@@ -366,7 +404,7 @@ class CopexUI:
 
         return Panel(
             content,
-            title=f"[{Theme.ACCENT}]{Icons.BRAIN} Reasoning[/{Theme.ACCENT}]",
+            title=f"[{Theme.ACCENT}]{self._icon_set.BRAIN} Reasoning[/{Theme.ACCENT}]",
             title_align="left",
             border_style=Theme.BORDER_ACTIVE if self.state.activity == ActivityType.REASONING else Theme.BORDER,
             padding=(0, 1),
@@ -382,7 +420,7 @@ class CopexUI:
         running = sum(1 for t in self.state.tool_calls if t.status == "running")
         successful = sum(1 for t in self.state.tool_calls if t.status == "success")
         failed = sum(1 for t in self.state.tool_calls if t.status == "error")
-        title_parts = [f"{Icons.TOOL} Tools"]
+        title_parts = [f"{self._icon_set.TOOL} Tools"]
         if running:
             title_parts.append(f"{running} running")
         if successful:
@@ -391,7 +429,7 @@ class CopexUI:
             title_parts.append(f"{failed} failed")
         title = f"[{Theme.WARNING}]{' • '.join(title_parts)}[/{Theme.WARNING}]"
 
-        tree = Tree(f"[{Theme.WARNING}]{Icons.TOOL} Tool Calls[/{Theme.WARNING}]")
+        tree = Tree(f"[{Theme.WARNING}]{self._icon_set.TOOL} Tool Calls[/{Theme.WARNING}]")
 
         max_tools = 5 if self.density == "extended" else 3
         tools_to_show = self.state.tool_calls if self.show_all_tools else self.state.tool_calls[-max_tools:]
@@ -405,10 +443,10 @@ class CopexUI:
             # Build tool info
             tool_text = Text()
             status_icon = spinner if tool.status == "running" else (
-                Icons.DONE if tool.status == "success" else Icons.ERROR
+                self._icon_set.DONE if tool.status == "success" else self._icon_set.ERROR
             )
             tool_text.append(f"{status_icon} ", style=status_style)
-            tool_text.append(f"{tool.icon} ", style=status_style)
+            tool_text.append(f"{tool.icon(self._icon_set)} ", style=status_style)
             tool_text.append(tool.name, style=f"bold {status_style}")
 
             # Add key arguments (truncated)
@@ -485,7 +523,7 @@ class CopexUI:
 
         return Panel(
             content,
-            title=f"[{Theme.PRIMARY}]{Icons.ROBOT} Response[/{Theme.PRIMARY}]",
+            title=f"[{Theme.PRIMARY}]{self._icon_set.ROBOT} Response[/{Theme.PRIMARY}]",
             title_align="left",
             border_style=Theme.BORDER_ACTIVE if self.state.activity == ActivityType.RESPONDING else Theme.BORDER,
             padding=(0, 1),
@@ -502,15 +540,15 @@ class CopexUI:
         failed_tools = sum(1 for t in self.state.tool_calls if t.status == "error")
 
         message_text = Text()
-        message_text.append(f"{Icons.ROBOT} ", style=Theme.PRIMARY)
+        message_text.append(f"{self._icon_set.ROBOT} ", style=Theme.PRIMARY)
         message_text.append(f"{message_chars} chars", style=Theme.PRIMARY)
 
         reasoning_text = Text()
-        reasoning_text.append(f"{Icons.BRAIN} ", style=Theme.ACCENT)
+        reasoning_text.append(f"{self._icon_set.BRAIN} ", style=Theme.ACCENT)
         reasoning_text.append(f"{reasoning_chars} chars", style=Theme.ACCENT)
 
         tools_text = Text()
-        tools_text.append(f"{Icons.TOOL} ", style=Theme.WARNING)
+        tools_text.append(f"{self._icon_set.TOOL} ", style=Theme.WARNING)
         if not self.state.tool_calls:
             tools_text.append("no tools", style=Theme.MUTED)
         else:
@@ -524,26 +562,26 @@ class CopexUI:
             tools_text.append(" • ".join(parts), style=Theme.WARNING if not failed_tools else Theme.ERROR)
 
         elapsed_text = Text()
-        elapsed_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
+        elapsed_text.append(f"{self._icon_set.CLOCK} ", style=Theme.MUTED)
         elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
 
         updated_text = Text()
-        updated_text.append(f"{Icons.SPARKLE} ", style=Theme.MUTED)
+        updated_text.append(f"{self._icon_set.SPARKLE} ", style=Theme.MUTED)
         updated_text.append(f"updated {self.state.idle_str} ago", style=Theme.MUTED)
 
         model_text = Text()
         if self.state.model:
-            model_text.append(f"{Icons.ROBOT} ", style=Theme.PRIMARY)
+            model_text.append(f"{self._icon_set.ROBOT} ", style=Theme.PRIMARY)
             model_text.append(self.state.model, style=Theme.MUTED)
         else:
-            model_text.append(f"{Icons.ROBOT} default model", style=Theme.MUTED)
+            model_text.append(f"{self._icon_set.ROBOT} default model", style=Theme.MUTED)
 
         retry_text = Text()
         if self.state.retries:
-            retry_text.append(f"{Icons.WARNING} ", style=Theme.WARNING)
+            retry_text.append(f"{self._icon_set.WARNING} ", style=Theme.WARNING)
             retry_text.append(f"{self.state.retries} retries", style=Theme.WARNING)
         else:
-            retry_text.append(f"{Icons.DONE} no retries", style=Theme.MUTED)
+            retry_text.append(f"{self._icon_set.DONE} no retries", style=Theme.MUTED)
 
         grid = Table.grid(expand=True)
         grid.add_column(justify="left")
@@ -567,7 +605,7 @@ class CopexUI:
         else:
             border_style = Theme.BORDER_ACTIVE
 
-        title = f"[{Theme.PRIMARY}]{Icons.ROBOT} Copex[/{Theme.PRIMARY}]"
+        title = f"[{Theme.PRIMARY}]{self._icon_set.ROBOT} Copex[/{Theme.PRIMARY}]"
         if self.state.model:
             title += f" [{Theme.MUTED}]• {self.state.model}[/{Theme.MUTED}]"
 
@@ -620,7 +658,7 @@ class CopexUI:
             if entry.role == "user":
                 # User message
                 user_text = Text()
-                user_text.append(f"❯ ", style=f"bold {Theme.SUCCESS}")
+                user_text.append(f"{self._icon_set.ARROW_RIGHT} ", style=f"bold {Theme.SUCCESS}")
                 # Truncate long user messages
                 content = entry.content
                 if len(content) > 200:
@@ -630,10 +668,10 @@ class CopexUI:
                 elements.append(Text())  # Spacer
             else:
                 # Assistant message
-                if entry.reasoning and self.density == "extended":
+                if self.show_reasoning and entry.reasoning and self.density == "extended":
                     elements.append(Panel(
                         Markdown(entry.reasoning),
-                        title=f"[{Theme.ACCENT}]{Icons.BRAIN} Reasoning[/{Theme.ACCENT}]",
+                    title=f"[{Theme.ACCENT}]{self._icon_set.BRAIN} Reasoning[/{Theme.ACCENT}]",
                         title_align="left",
                         border_style=Theme.BORDER,
                         padding=(0, 1),
@@ -643,7 +681,7 @@ class CopexUI:
 
                 elements.append(Panel(
                     Markdown(entry.content),
-                    title=f"[{Theme.PRIMARY}]{Icons.ROBOT} Response[/{Theme.PRIMARY}]",
+                    title=f"[{Theme.PRIMARY}]{self._icon_set.ROBOT} Response[/{Theme.PRIMARY}]",
                     title_align="left",
                     border_style=Theme.BORDER,
                     padding=(0, 1),
@@ -668,10 +706,10 @@ class CopexUI:
         elements = []
 
         # Reasoning panel (collapsed/summary)
-        if self.state.reasoning and self.density == "extended":
+        if self.show_reasoning and self.state.reasoning and self.density == "extended":
             elements.append(Panel(
                 Markdown(self.state.reasoning),
-                title=f"[{Theme.ACCENT}]{Icons.BRAIN} Reasoning[/{Theme.ACCENT}]",
+                title=f"[{Theme.ACCENT}]{self._icon_set.BRAIN} Reasoning[/{Theme.ACCENT}]",
                 title_align="left",
                 border_style=Theme.BORDER,
                 padding=(0, 1),
@@ -683,7 +721,7 @@ class CopexUI:
         if self.state.message:
             elements.append(Panel(
                 Markdown(self.state.message),
-                title=f"[{Theme.PRIMARY}]{Icons.ROBOT} Response[/{Theme.PRIMARY}]",
+                title=f"[{Theme.PRIMARY}]{self._icon_set.ROBOT} Response[/{Theme.PRIMARY}]",
                 title_align="left",
                 border_style=Theme.BORDER_ACTIVE,
                 padding=(0, 1),
@@ -712,6 +750,8 @@ class CopexUI:
 
     def add_reasoning(self, delta: str) -> None:
         """Append reasoning content to the live state."""
+        if not self.show_reasoning:
+            return
         self.state.reasoning += delta
         if self.state.activity != ActivityType.REASONING:
             self.state.activity = ActivityType.REASONING
@@ -730,10 +770,22 @@ class CopexUI:
         self.state.activity = ActivityType.TOOL_CALL
         self._touch()
 
-    def update_tool_call(self, name: str, status: str, result: str | None = None, duration: float | None = None) -> None:
+    def update_tool_call(
+        self,
+        name: str,
+        status: str,
+        result: str | None = None,
+        duration: float | None = None,
+        tool_call_id: str | None = None,
+    ) -> None:
         """Update a tool call status and optional result details."""
         for tool in reversed(self.state.tool_calls):
-            if tool.name == name and tool.status == "running":
+            if tool_call_id and tool.id == tool_call_id:
+                tool.status = status
+                tool.result = result
+                tool.duration = duration
+                break
+            if tool.name == name and tool.status == "running" and tool_call_id is None:
                 tool.status = status
                 tool.result = result
                 tool.duration = duration
@@ -753,7 +805,7 @@ class CopexUI:
         """Set final message and reasoning content, marking completion."""
         if message:
             self.state.message = message
-        if reasoning:
+        if reasoning and self.show_reasoning:
             self.state.reasoning = reasoning
         self.state.activity = ActivityType.DONE
         self._touch()
@@ -769,7 +821,7 @@ class CopexUI:
             self.state.history.append(HistoryEntry(
                 role="assistant",
                 content=self.state.message,
-                reasoning=self.state.reasoning if self.state.reasoning else None,
+                reasoning=self.state.reasoning if self.show_reasoning and self.state.reasoning else None,
                 tool_calls=list(self.state.tool_calls),
             ))
         self._touch()
@@ -793,15 +845,15 @@ class CopexUI:
         summary.add_column(justify="right")
 
         elapsed_text = Text()
-        elapsed_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
+        elapsed_text.append(f"{self._icon_set.CLOCK} ", style=Theme.MUTED)
         elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
 
         retry_text = Text()
         if self.state.retries:
-            retry_text.append(f"{Icons.WARNING} ", style=Theme.WARNING)
+            retry_text.append(f"{self._icon_set.WARNING} ", style=Theme.WARNING)
             retry_text.append(f"{self.state.retries} retries", style=Theme.WARNING)
         else:
-            retry_text.append(f"{Icons.DONE} no retries", style=Theme.MUTED)
+            retry_text.append(f"{self._icon_set.DONE} no retries", style=Theme.MUTED)
 
         summary.add_row(elapsed_text, retry_text)
 
@@ -809,21 +861,21 @@ class CopexUI:
             successful = sum(1 for t in self.state.tool_calls if t.status == "success")
             failed = sum(1 for t in self.state.tool_calls if t.status == "error")
             tool_left = Text()
-            tool_left.append(f"{Icons.TOOL} ", style=Theme.WARNING)
+            tool_left.append(f"{self._icon_set.TOOL} ", style=Theme.WARNING)
             tool_left.append(f"{len(self.state.tool_calls)} tool calls", style=Theme.WARNING)
 
             tool_right = Text()
             if successful:
-                tool_right.append(f"{Icons.DONE} {successful} ok", style=Theme.SUCCESS)
+                tool_right.append(f"{self._icon_set.DONE} {successful} ok", style=Theme.SUCCESS)
             if failed:
                 if tool_right:
                     tool_right.append(" • ", style=Theme.MUTED)
-                tool_right.append(f"{Icons.ERROR} {failed} failed", style=Theme.ERROR)
+                tool_right.append(f"{self._icon_set.ERROR} {failed} failed", style=Theme.ERROR)
             summary.add_row(tool_left, tool_right)
 
         return Panel(
             summary,
-            title=f"[{Theme.SUCCESS}]{Icons.DONE} Summary[/{Theme.SUCCESS}]",
+            title=f"[{Theme.SUCCESS}]{self._icon_set.DONE} Summary[/{Theme.SUCCESS}]",
             title_align="left",
             border_style=Theme.BORDER_ACTIVE,
             padding=(0, 1),
@@ -883,12 +935,14 @@ def print_welcome(
     reasoning: str,
     theme: str | None = None,
     density: str | None = None,
+    ascii_icons: bool = False,
 ) -> None:
     """Print the welcome banner."""
+    icon_set = ASCIIIcons if ascii_icons else Icons
     console.print()
     console.print(Panel(
         Text.from_markup(
-            f"[{Theme.HEADER}]{Icons.ROBOT} Copex[/{Theme.HEADER}] "
+            f"[{Theme.HEADER}]{icon_set.ROBOT} Copex[/{Theme.HEADER}] "
             f"[{Theme.MUTED}]- Copilot Extended[/{Theme.MUTED}]\n\n"
             f"[{Theme.MUTED}]Model:[/{Theme.MUTED}] [{Theme.PRIMARY}]{model}[/{Theme.PRIMARY}]\n"
             f"[{Theme.MUTED}]Reasoning:[/{Theme.MUTED}] [{Theme.PRIMARY}]{reasoning}[/{Theme.PRIMARY}]\n\n"
@@ -902,10 +956,11 @@ def print_welcome(
     console.print()
 
 
-def print_user_prompt(console: Console, prompt: str) -> None:
+def print_user_prompt(console: Console, prompt: str, *, ascii_icons: bool = False) -> None:
     """Print the user's prompt."""
+    icon_set = ASCIIIcons if ascii_icons else Icons
     console.print()
-    console.print(Text("❯ ", style=f"bold {Theme.SUCCESS}"), end="")
+    console.print(Text(f"{icon_set.ARROW_RIGHT} ", style=f"bold {Theme.SUCCESS}"), end="")
 
     # Truncate long prompts for display
     if len(prompt) > 200:
@@ -916,30 +971,46 @@ def print_user_prompt(console: Console, prompt: str) -> None:
     console.print()
 
 
-def print_error(console: Console, error: str) -> None:
+def print_error(console: Console, error: str, *, ascii_icons: bool = False) -> None:
     """Print an error message."""
+    icon_set = ASCIIIcons if ascii_icons else Icons
     console.print(Panel(
-        Text(f"{Icons.ERROR} {error}", style=Theme.ERROR),
+        Text(f"{icon_set.ERROR} {error}", style=Theme.ERROR),
         border_style=Theme.ERROR,
         title="Error",
         title_align="left",
     ))
 
 
-def print_retry(console: Console, attempt: int, max_attempts: int, error: str) -> None:
+def print_retry(
+    console: Console,
+    attempt: int,
+    max_attempts: int,
+    error: str,
+    *,
+    ascii_icons: bool = False,
+) -> None:
     """Print a retry notification."""
+    icon_set = ASCIIIcons if ascii_icons else Icons
     console.print(Text(
-        f" {Icons.WARNING} Retry {attempt}/{max_attempts}: {error[:50]}...",
+        f" {icon_set.WARNING} Retry {attempt}/{max_attempts}: {error[:50]}...",
         style=Theme.WARNING,
     ))
 
 
-def print_tool_call(console: Console, name: str, args: dict[str, Any] | None = None) -> None:
+def print_tool_call(
+    console: Console,
+    name: str,
+    args: dict[str, Any] | None = None,
+    *,
+    ascii_icons: bool = False,
+) -> None:
     """Print a tool call notification."""
     tool = ToolCallInfo(name=name, arguments=args or {})
+    icon_set = ASCIIIcons if ascii_icons else Icons
 
     text = Text()
-    text.append(f" {tool.icon} ", style=Theme.WARNING)
+    text.append(f" {tool.icon(icon_set)} ", style=Theme.WARNING)
     text.append(name, style=f"bold {Theme.WARNING}")
 
     if args:
@@ -957,9 +1028,17 @@ def print_tool_call(console: Console, name: str, args: dict[str, Any] | None = N
     console.print(text)
 
 
-def print_tool_result(console: Console, name: str, success: bool, duration: float | None = None) -> None:
+def print_tool_result(
+    console: Console,
+    name: str,
+    success: bool,
+    duration: float | None = None,
+    *,
+    ascii_icons: bool = False,
+) -> None:
     """Print a tool result notification."""
-    icon = Icons.DONE if success else Icons.ERROR
+    icon_set = ASCIIIcons if ascii_icons else Icons
+    icon = icon_set.DONE if success else icon_set.ERROR
     style = Theme.SUCCESS if success else Theme.ERROR
 
     text = Text()

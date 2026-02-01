@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
@@ -15,6 +16,8 @@ from copilot.session import CopilotSession
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -37,6 +40,7 @@ class StreamChunk:
     is_final: bool = False
     content: str | None = None  # Full content when is_final=True
     # Tool call info
+    tool_call_id: str | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
     tool_result: str | None = None
@@ -85,7 +89,7 @@ class Copex:
             try:
                 await self._session.destroy()
             except Exception:
-                pass
+                logger.warning("Failed to destroy session on stop()", exc_info=True)
             self._session = None
         if self._client:
             await self._client.stop()
@@ -194,12 +198,18 @@ class Copex:
     ) -> None:
         tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
         tool_args = getattr(event.data, "arguments", None)
+        tool_call_id = (
+            getattr(event.data, "tool_call_id", None)
+            or getattr(event.data, "toolCallId", None)
+            or getattr(event.data, "id", None)
+        )
         state.pending_tools += 1
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
         if on_chunk:
             on_chunk(StreamChunk(
                 type="tool_call",
+                tool_call_id=str(tool_call_id) if tool_call_id else None,
                 tool_name=str(tool_name) if tool_name else "unknown",
                 tool_args=tool_args if isinstance(tool_args, dict) else {},
             ))
@@ -212,11 +222,17 @@ class Copex:
     ) -> None:
         tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
         partial = getattr(event.data, "partial_output", None)
+        tool_call_id = (
+            getattr(event.data, "tool_call_id", None)
+            or getattr(event.data, "toolCallId", None)
+            or getattr(event.data, "id", None)
+        )
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
         if on_chunk and partial:
             on_chunk(StreamChunk(
                 type="tool_result",
+                tool_call_id=str(tool_call_id) if tool_call_id else None,
                 tool_name=str(tool_name) if tool_name else "unknown",
                 tool_result=str(partial),
             ))
@@ -229,6 +245,11 @@ class Copex:
     ) -> None:
         tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
         result_obj = getattr(event.data, "result", None)
+        tool_call_id = (
+            getattr(event.data, "tool_call_id", None)
+            or getattr(event.data, "toolCallId", None)
+            or getattr(event.data, "id", None)
+        )
         result_text = ""
         if result_obj is not None:
             result_text = getattr(result_obj, "content", "") or str(result_obj)
@@ -240,6 +261,7 @@ class Copex:
         if on_chunk:
             on_chunk(StreamChunk(
                 type="tool_result",
+                tool_call_id=str(tool_call_id) if tool_call_id else None,
                 tool_name=str(tool_name) if tool_name else "unknown",
                 tool_result=result_text,
                 tool_success=success,
@@ -260,6 +282,11 @@ class Copex:
         data = event.data
         tool_name = getattr(data, "name", None) or getattr(data, "tool", None) or "unknown"
         tool_args = getattr(data, "arguments", None) or getattr(data, "args", {})
+        tool_call_id = (
+            getattr(data, "tool_call_id", None)
+            or getattr(data, "toolCallId", None)
+            or getattr(data, "id", None)
+        )
         state.awaiting_post_tool_response = True
         if isinstance(tool_args, str):
             import json
@@ -270,6 +297,7 @@ class Copex:
         if on_chunk:
             on_chunk(StreamChunk(
                 type="tool_call",
+                tool_call_id=str(tool_call_id) if tool_call_id else None,
                 tool_name=str(tool_name),
                 tool_args=tool_args if isinstance(tool_args, dict) else {},
             ))
@@ -334,6 +362,8 @@ class Copex:
             payload["skillDirectories"] = opts["skill_directories"]
         if opts.get("disabled_skills"):
             payload["disabledSkills"] = opts["disabled_skills"]
+        if opts.get("skills"):
+            payload["skills"] = opts["skills"]
         if opts.get("instructions"):
             # Instructions go into system message
             if "systemMessage" not in payload:
@@ -398,7 +428,7 @@ class Copex:
             try:
                 await self._session.destroy()
             except Exception:
-                pass
+                logger.warning("Failed to destroy session during recovery", exc_info=True)
             self._session = None
 
         # Create fresh session

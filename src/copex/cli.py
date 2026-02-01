@@ -19,16 +19,24 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from copex.client import Copex, StreamChunk
-from copex.config import CopexConfig, load_last_model, save_last_model
+from copex.config import (
+    CopexConfig,
+    load_last_model,
+    load_last_reasoning_effort,
+    save_last_model,
+    save_last_reasoning_effort,
+)
 from copex.models import Model, ReasoningEffort
 
-# Effective default: last used model or claude-opus-4.5
+# Effective default: last used model/reasoning or defaults
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
+_DEFAULT_REASONING = load_last_reasoning_effort() or ReasoningEffort.XHIGH
 from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
     ActivityType,
     CopexUI,
+    ASCIIIcons,
     Icons,
     Theme,
     ToolCallInfo,
@@ -90,7 +98,7 @@ def main(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = _DEFAULT_REASONING.value,
 ) -> None:
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
     if ctx.invoked_subcommand is None:
@@ -272,7 +280,7 @@ def chat(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = _DEFAULT_REASONING.value,
     max_retries: Annotated[
         int, typer.Option("--max-retries", help="Maximum retry attempts")
     ] = 5,
@@ -315,6 +323,8 @@ def chat(
     except ValueError:
         console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
         raise typer.Exit(1)
+
+    save_last_reasoning_effort(config.reasoning_effort)
 
     config.retry.max_retries = max_retries
     config.streaming = not no_stream
@@ -377,7 +387,14 @@ async def _stream_response(
     client: Copex, prompt: str, show_reasoning: bool
 ) -> None:
     """Stream response with beautiful live updates."""
-    ui = CopexUI(console, theme=client.config.ui_theme, density=client.config.ui_density, show_all_tools=True)
+    ui = CopexUI(
+        console,
+        theme=client.config.ui_theme,
+        density=client.config.ui_density,
+        show_all_tools=True,
+        show_reasoning=show_reasoning,
+        ascii_icons=client.config.ui_ascii_icons,
+    )
     ui.reset(model=client.config.model.value)
     ui.set_activity(ActivityType.THINKING)
     await _stream_with_ui(
@@ -457,6 +474,7 @@ def init(
         },
         "ui_theme": "default",
         "ui_density": "extended",
+        "ui_ascii_icons": False,
     }
 
     with open(path, "wb") as f:
@@ -472,7 +490,7 @@ def interactive(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = _DEFAULT_REASONING.value,
     ui_theme: Annotated[
         Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
     ] = None,
@@ -497,7 +515,9 @@ def interactive(
         config.reasoning_effort.value,
         theme=config.ui_theme,
         density=config.ui_density,
+        ascii_icons=config.ui_ascii_icons,
     )
+    save_last_reasoning_effort(config.reasoning_effort)
     asyncio.run(_interactive_loop(config))
 
 
@@ -507,6 +527,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
     await client.start()
     session = _build_prompt_session()
     show_all_tools = False
+    show_reasoning = True
     
     # Create persistent UI for conversation history
     ui = CopexUI(
@@ -514,12 +535,15 @@ async def _interactive_loop(config: CopexConfig) -> None:
         theme=config.ui_theme,
         density=config.ui_density,
         show_all_tools=show_all_tools,
+        show_reasoning=show_reasoning,
+        ascii_icons=config.ui_ascii_icons,
     )
 
     def show_help() -> None:
         console.print(f"\n[{Theme.MUTED}]Commands:[/{Theme.MUTED}]")
         console.print(f"  [{Theme.PRIMARY}]/model <name>[/{Theme.PRIMARY}]     - Change model (e.g., /model gpt-5.1-codex)")
         console.print(f"  [{Theme.PRIMARY}]/reasoning <level>[/{Theme.PRIMARY}] - Change reasoning (low, medium, high, xhigh)")
+        console.print(f"  [{Theme.PRIMARY}]/reasoning[/{Theme.PRIMARY}]        - Toggle reasoning display")
         console.print(f"  [{Theme.PRIMARY}]/models[/{Theme.PRIMARY}]            - List available models")
         console.print(f"  [{Theme.PRIMARY}]/new[/{Theme.PRIMARY}]               - Start new session")
         console.print(f"  [{Theme.PRIMARY}]/status[/{Theme.PRIMARY}]            - Show current settings")
@@ -554,7 +578,8 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 client.new_session()
                 # Clear UI history for new session
                 ui.state.history = []
-                console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Started new session[/{Theme.SUCCESS}]\n")
+                icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                console.print(f"\n[{Theme.SUCCESS}]{icon_set.DONE} Started new session[/{Theme.SUCCESS}]\n")
                 continue
 
             if command in {"help", "/help"}:
@@ -563,6 +588,16 @@ async def _interactive_loop(config: CopexConfig) -> None:
 
             if command in {"status", "/status"}:
                 show_status()
+                continue
+
+            if command in {"reasoning", "/reasoning"}:
+                show_reasoning = not show_reasoning
+                ui.show_reasoning = show_reasoning
+                if not show_reasoning:
+                    ui.state.reasoning = ""
+                mode = "showing reasoning" if show_reasoning else "hiding reasoning"
+                icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                console.print(f"\n[{Theme.SUCCESS}]{icon_set.DONE} Now {mode}[/{Theme.SUCCESS}]\n")
                 continue
 
             if command in {"models", "/models"}:
@@ -575,17 +610,20 @@ async def _interactive_loop(config: CopexConfig) -> None:
                         new_reasoning = await _reasoning_picker(client.config.reasoning_effort)
                         if new_reasoning:
                             client.config.reasoning_effort = new_reasoning
+                            save_last_reasoning_effort(new_reasoning)
                     client.new_session()
                     # Clear UI history for new session
                     ui.state.history = []
-                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {selected.value} (new session started)[/{Theme.SUCCESS}]\n")
+                    icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                    console.print(f"\n[{Theme.SUCCESS}]{icon_set.DONE} Switched to {selected.value} (new session started)[/{Theme.SUCCESS}]\n")
                 continue
  
             if command in {"tools", "/tools"}:
                 show_all_tools = not show_all_tools
                 ui.show_all_tools = show_all_tools
                 mode = "all tools" if show_all_tools else "recent tools"
-                console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Showing {mode}[/{Theme.SUCCESS}]\n")
+                icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                console.print(f"\n[{Theme.SUCCESS}]{icon_set.DONE} Showing {mode}[/{Theme.SUCCESS}]\n")
                 continue
 
             if command.startswith("/model ") or command.startswith("model "):
@@ -598,10 +636,12 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     new_model = Model(model_name)
                     client.config.model = new_model
                     save_last_model(new_model)  # Persist for next run
+                    save_last_reasoning_effort(client.config.reasoning_effort)
                     client.new_session()  # Need new session for model change
                     # Clear UI history for new session
                     ui.state.history = []
-                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_model.value} (new session started)[/{Theme.SUCCESS}]\n")
+                    icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                    console.print(f"\n[{Theme.SUCCESS}]{icon_set.DONE} Switched to {new_model.value} (new session started)[/{Theme.SUCCESS}]\n")
                 except ValueError:
                     console.print(f"[{Theme.ERROR}]Unknown model: {model_name}[/{Theme.ERROR}]")
                     console.print(f"[{Theme.MUTED}]Use /models to see available models[/{Theme.MUTED}]")
@@ -616,23 +656,26 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 try:
                     new_reasoning = ReasoningEffort(level)
                     client.config.reasoning_effort = new_reasoning
+                    save_last_reasoning_effort(new_reasoning)
                     client.new_session()  # Need new session for reasoning change
                     # Clear UI history for new session
                     ui.state.history = []
-                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_reasoning.value} reasoning (new session started)[/{Theme.SUCCESS}]\n")
+                    icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                    console.print(f"\n[{Theme.SUCCESS}]{icon_set.DONE} Switched to {new_reasoning.value} reasoning (new session started)[/{Theme.SUCCESS}]\n")
                 except ValueError:
                     valid = ", ".join(r.value for r in ReasoningEffort)
                     console.print(f"[{Theme.ERROR}]Invalid reasoning level. Valid: {valid}[/{Theme.ERROR}]")
                 continue
 
             try:
-                print_user_prompt(console, prompt)
-                await _stream_response_interactive(client, prompt, ui)
+                print_user_prompt(console, prompt, ascii_icons=config.ui_ascii_icons)
+                await _stream_response_interactive(client, prompt, ui, show_reasoning)
             except Exception as e:
-                print_error(console, str(e))
+                print_error(console, str(e), ascii_icons=config.ui_ascii_icons)
 
     except KeyboardInterrupt:
-        console.print(f"\n[{Theme.WARNING}]{Icons.INFO} Goodbye![/{Theme.WARNING}]")
+        icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+        console.print(f"\n[{Theme.WARNING}]{icon_set.INFO} Goodbye![/{Theme.WARNING}]")
     finally:
         await client.stop()
 
@@ -641,6 +684,7 @@ async def _stream_response_interactive(
     client: Copex,
     prompt: str,
     ui: CopexUI,
+    show_reasoning: bool,
 ) -> None:
     """Stream response with beautiful UI in interactive mode."""
     # Add user message to history
@@ -649,7 +693,7 @@ async def _stream_response_interactive(
     # Reset for new turn but preserve history
     ui.reset(model=client.config.model.value, preserve_history=True)
     ui.set_activity(ActivityType.THINKING)
-    await _stream_with_ui(client, prompt, ui, show_reasoning=True, render_final=False)
+    await _stream_with_ui(client, prompt, ui, show_reasoning=show_reasoning, render_final=False)
 
     ui.finalize_assistant_response()
     console.print(ui.build_final_display())
@@ -683,6 +727,7 @@ async def _stream_with_ui(
                     ui.add_reasoning(chunk.delta)
         elif chunk.type == "tool_call":
             tool = ToolCallInfo(
+                id=chunk.tool_call_id,
                 name=chunk.tool_name or "unknown",
                 arguments=chunk.tool_args or {},
                 status="running",
@@ -695,11 +740,18 @@ async def _stream_with_ui(
                 status,
                 result=chunk.tool_result,
                 duration=chunk.tool_duration,
+                tool_call_id=chunk.tool_call_id,
             )
         elif chunk.type == "system":
             ui.increment_retries()
             if show_retry_notifications:
-                print_retry(console, ui.state.retries, client.config.retry.max_retries, chunk.delta)
+                print_retry(
+                    console,
+                    ui.state.retries,
+                    client.config.retry.max_retries,
+                    chunk.delta,
+                    ascii_icons=client.config.ui_ascii_icons,
+                )
 
         if live_display:
             live_display.update(ui.build_live_display())
@@ -745,7 +797,7 @@ def ralph_command(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = _DEFAULT_REASONING.value,
 ) -> None:
     """
     Start a Ralph Wiggum loop - iterative AI development.
@@ -766,13 +818,14 @@ def ralph_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
+    icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
     console.print(Panel(
         f"[bold]Ralph Wiggum Loop[/bold]\n"
         f"Model: {config.model.value}\n"
         f"Reasoning: {config.reasoning_effort.value}\n"
         f"Max iterations: {max_iterations}\n"
         f"Completion promise: {completion_promise or '(none)'}",
-        title="🔄 Starting Loop",
+        title=f"{icon_set.TOOL} Starting Loop",
         border_style="yellow",
     ))
 
@@ -782,6 +835,7 @@ def ralph_command(
             f"[yellow]<promise>{completion_promise}</promise>[/yellow][/dim]\n"
         )
 
+    save_last_reasoning_effort(config.reasoning_effort)
     asyncio.run(_run_ralph(config, prompt, max_iterations, completion_promise))
 
 
@@ -957,7 +1011,7 @@ def plan_command(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = _DEFAULT_REASONING.value,
 ) -> None:
     """
     Generate and optionally execute a step-by-step plan.
@@ -984,6 +1038,7 @@ def plan_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
+    save_last_reasoning_effort(config.reasoning_effort)
     asyncio.run(_run_plan(
         config=config,
         task=task or "",
@@ -1041,12 +1096,13 @@ async def _run_plan(
             
             plan = state.plan
             from_step = state.current_step
+            icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
             console.print(Panel(
                 f"[bold]Resuming plan:[/bold] {state.task}\n"
                 f"[dim]Started:[/dim] {state.started_at}\n"
                 f"[dim]Completed steps:[/dim] {len(state.completed)}/{len(plan.steps)}\n"
                 f"[dim]Resuming from step:[/dim] {from_step}",
-                title="🔄 Resume from Checkpoint",
+                title=f"{icon_set.TOOL} Resume from Checkpoint",
                 border_style="yellow",
             ))
         elif load_plan:
@@ -1055,25 +1111,29 @@ async def _run_plan(
                 console.print(f"[red]Plan file not found: {load_plan}[/red]")
                 raise typer.Exit(1)
             plan = Plan.load(load_plan)
-            console.print(f"[green]✓ Loaded plan from {load_plan}[/green]\n")
+            icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+            console.print(f"[green]{icon_set.DONE} Loaded plan from {load_plan}[/green]\n")
         else:
             # Generate new plan
+            icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
             console.print(Panel(
                 f"[bold]Generating plan for:[/bold]\n{task}",
-                title="📋 Plan Mode",
+                title=f"{icon_set.TOOL} Plan Mode",
                 border_style="blue",
             ))
             
             plan = await executor.generate_plan(task)
-            console.print(f"\n[green]✓ Generated {len(plan.steps)} steps[/green]\n")
+            icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+            console.print(f"\n[green]{icon_set.DONE} Generated {len(plan.steps)} steps[/green]\n")
         
         # Display plan
-        _display_plan(plan)
+        _display_plan(plan, ascii_icons=config.ui_ascii_icons)
         
         # Save plan if requested
         if output:
             plan.save(output)
-            console.print(f"\n[green]✓ Saved plan to {output}[/green]")
+            icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+            console.print(f"\n[green]{icon_set.DONE} Saved plan to {output}[/green]")
         
         # Execute if requested
         if execute:
@@ -1089,7 +1149,8 @@ async def _run_plan(
             
             def on_step_start(step: PlanStep) -> None:
                 total = len(plan.steps)
-                console.print(f"[blue]⏳ Step {step.number}/{total}:[/blue] {step.description}")
+                icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                console.print(f"[blue]{icon_set.CLOCK} Step {step.number}/{total}:[/blue] {step.description}")
             
             def on_step_complete(step: PlanStep) -> None:
                 # Format duration
@@ -1101,7 +1162,8 @@ async def _run_plan(
                 if len(step.result or "") > 100:
                     preview += "..."
                 
-                console.print(f"[green]✓ Step {step.number} complete ({duration_str})[/green]")
+                icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                console.print(f"[green]{icon_set.DONE} Step {step.number} complete ({duration_str})[/green]")
                 if preview:
                     console.print(f"  [dim]— {preview}[/dim]")
                 
@@ -1117,7 +1179,8 @@ async def _run_plan(
             def on_error(step: PlanStep, error: Exception) -> bool:
                 duration = step.duration_seconds or 0
                 duration_str = _format_duration(duration)
-                console.print(f"[red]✗ Step {step.number} failed ({duration_str}): {error}[/red]")
+                icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                console.print(f"[red]{icon_set.ERROR} Step {step.number} failed ({duration_str}): {error}[/red]")
                 console.print(f"[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
                 return typer.confirm("Continue with next step?", default=False)
             
@@ -1139,7 +1202,8 @@ async def _run_plan(
             # Save updated plan
             if output:
                 plan.save(output)
-                console.print(f"\n[green]✓ Updated plan saved to {output}[/green]")
+                icon_set = ASCIIIcons if config.ui_ascii_icons else Icons
+                console.print(f"\n[green]{icon_set.DONE} Updated plan saved to {output}[/green]")
     
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
@@ -1151,16 +1215,17 @@ async def _run_plan(
         await client.stop()
 
 
-def _display_plan(plan: Plan) -> None:
+def _display_plan(plan: Plan, *, ascii_icons: bool = False) -> None:
     """Display plan steps."""
+    icon_set = ASCIIIcons if ascii_icons else Icons
     for step in plan.steps:
         status_icon = {
-            StepStatus.PENDING: "⬜",
-            StepStatus.RUNNING: "🔄",
-            StepStatus.COMPLETED: "✅",
-            StepStatus.FAILED: "❌",
-            StepStatus.SKIPPED: "⏭️",
-        }.get(step.status, "⬜")
+            StepStatus.PENDING: f"{icon_set.BULLET}",
+            StepStatus.RUNNING: f"{icon_set.TOOL}",
+            StepStatus.COMPLETED: f"{icon_set.DONE}",
+            StepStatus.FAILED: f"{icon_set.ERROR}",
+            StepStatus.SKIPPED: f"{icon_set.ARROW_RIGHT}",
+        }.get(step.status, icon_set.BULLET)
         console.print(f"{status_icon} [bold]Step {step.number}:[/bold] {step.description}")
 
 

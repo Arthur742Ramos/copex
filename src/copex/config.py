@@ -10,6 +10,9 @@ from pydantic import BaseModel, Field, field_validator
 
 from copex.models import Model, ReasoningEffort
 
+_UNSET = object()
+_COPILOT_CLI_CACHE: str | None | object = _UNSET
+
 
 def find_copilot_cli() -> str | None:
     """Auto-detect the Copilot CLI path across platforms.
@@ -21,6 +24,14 @@ def find_copilot_cli() -> str | None:
 
     Returns the path if found, None otherwise.
     """
+    env_override = os.environ.get("COPEX_COPILOT_CLI")
+    if env_override:
+        return env_override
+
+    global _COPILOT_CLI_CACHE
+    if _COPILOT_CLI_CACHE is not _UNSET:
+        return _COPILOT_CLI_CACHE  # type: ignore[return-value]
+
     # First try PATH (works on all platforms)
     cli_path = shutil.which("copilot")
     if cli_path:
@@ -28,7 +39,9 @@ def find_copilot_cli() -> str | None:
         if sys.platform == "win32" and cli_path.endswith(".ps1"):
             cmd_path = cli_path.replace(".ps1", ".cmd")
             if os.path.exists(cmd_path):
+                _COPILOT_CLI_CACHE = cmd_path
                 return cmd_path
+        _COPILOT_CLI_CACHE = cli_path
         return cli_path
 
     # Platform-specific common locations
@@ -62,6 +75,7 @@ def find_copilot_cli() -> str | None:
 
     for candidate in candidates:
         if candidate.exists() and candidate.is_file():
+            _COPILOT_CLI_CACHE = str(candidate)
             return str(candidate)
 
     # Check for NVM installations (macOS/Linux)
@@ -73,8 +87,10 @@ def find_copilot_cli() -> str | None:
             for version in versions:
                 copilot_path = version / "bin" / "copilot"
                 if copilot_path.exists():
+                    _COPILOT_CLI_CACHE = str(copilot_path)
                     return str(copilot_path)
 
+    _COPILOT_CLI_CACHE = None
     return None
 
 
@@ -121,6 +137,23 @@ def load_last_model() -> Model | None:
     return None
 
 
+def load_last_reasoning_effort() -> ReasoningEffort | None:
+    """Load the last used reasoning effort from user state."""
+    state_path = get_user_state_path()
+    if not state_path.exists():
+        return None
+    try:
+        import json
+        with open(state_path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+        value = data.get("last_reasoning_effort")
+        if value:
+            return ReasoningEffort(value)
+    except (ValueError, OSError, json.JSONDecodeError):
+        pass
+    return None
+
+
 def save_last_model(model: Model) -> None:
     """Save the last used model to user state."""
     import json
@@ -138,6 +171,25 @@ def save_last_model(model: Model) -> None:
     
     # Update and save
     data["last_model"] = model.value
+    with open(state_path, "w", encoding="utf-8") as f:
+        json.dump(data, f, indent=2)
+
+
+def save_last_reasoning_effort(reasoning_effort: ReasoningEffort) -> None:
+    """Save the last used reasoning effort to user state."""
+    import json
+    state_path = get_user_state_path()
+    state_path.parent.mkdir(parents=True, exist_ok=True)
+
+    data: dict[str, Any] = {}
+    if state_path.exists():
+        try:
+            with open(state_path, "r", encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError):
+            pass
+
+    data["last_reasoning_effort"] = reasoning_effort.value
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
 
@@ -211,6 +263,10 @@ class CopexConfig(BaseModel):
     ui_density: str = Field(
         default="extended",
         description="UI density (compact or extended)"
+    )
+    ui_ascii_icons: bool = Field(
+        default=False,
+        description="Use ASCII icons instead of Unicode"
     )
 
     @field_validator("ui_theme")

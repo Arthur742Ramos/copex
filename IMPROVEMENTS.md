@@ -1,170 +1,139 @@
-# Copex Improvements - v0.9.0
+# Copex Improvements (Prioritized)
 
-## Summary
+Scoring: Impact/Effort on a 1–5 scale (5 = highest). Ordered within each section by impact ÷ effort.
 
-This document outlines the improvements made to copex and suggestions for future development.
+## Quick Wins (low effort, high impact)
 
-## Implemented Improvements
+1) **Fix ProgressReporter running count decrement** (Impact 4, Effort 1)
+   - **Rationale:** `complete_item`/`fail_item` currently check status after mutation, so running counts never decrement.
+   - **Change:** Decrement running counters based on prior status or track running IDs.
+   - **Verify:** Start + complete an item and confirm running=0, completed=1.
 
-### 1. Parallel Step Execution (`--parallel`, `-P`)
-- **Added**: `execute_plan_parallel()` method in `PlanExecutor`
-- **New CLI flags**:
-  - `--parallel`, `-P`: Execute independent steps in parallel
-  - `--max-concurrent`, `-c`: Limit concurrent step executions (default: 3)
-- Steps with dependencies are still executed in order
-- Independent steps within the same "wave" can run concurrently
+2) **Pass config.skills into session create payload** (Impact 4, Effort 1)
+   - **Rationale:** Skills defined in config are not forwarded in `_create_session_with_reasoning` payload.
+   - **Change:** Map `skills` into JSON-RPC payload when present.
+   - **Verify:** Enable a skill and confirm it appears in session capabilities.
 
-### 2. Smart Planning with Dependencies (`--smart`, `-S`)
-- **Added**: `generate_plan_v2()` method using structured JSON output
-- **New CLI flag**: `--smart`, `-S` for v2 planning
-- AI generates plans with:
-  - `depends_on`: List of step numbers that must complete first
-  - `parallel_group`: Steps with same group can run together
-- Better for complex multi-phase tasks
+3) **Propagate tool_call_id through StreamChunk/UI** (Impact 4, Effort 2)
+   - **Rationale:** Tool updates are keyed only by name; concurrent same-name tools overwrite each other.
+   - **Change:** Include tool_call_id in chunks and UI state; update by id first, name as fallback.
+   - **Verify:** Run two same-name tool calls; both update correctly.
 
-### 3. Progress Reporting (`copex.progress`)
-- **New module**: `copex/progress.py`
-- `ProgressReporter`: Terminal progress bars, JSON output, callbacks
-- `PlanProgressReporter`: Ready-to-use callbacks for plan execution
-- Supports:
-  - Real-time progress bars with ETA
-  - JSON lines output for automation
-  - Custom callbacks for integration
+4) **Log exceptions on stop/recovery paths** (Impact 3, Effort 1)
+   - **Rationale:** Silent failures in `stop()`/`_recover_session()` hide root causes.
+   - **Change:** Add logger warnings with context.
+   - **Verify:** Inject a failure and confirm logs surface it.
 
-### 4. Step Dependencies
-- `PlanStep` now has `depends_on` and `parallel_group` fields
-- `Plan.get_ready_steps()`: Get steps ready to execute (dependencies met)
-- `Plan.get_parallel_groups()`: Group steps for concurrent execution
+5) **Persist last reasoning effort** (Impact 3, Effort 1)
+   - **Rationale:** Model is persisted but reasoning effort resets each run.
+   - **Change:** Store last reasoning in state.json, load on startup.
+   - **Verify:** Restart interactive; last reasoning is default.
 
-### 5. Version Sync
-- Synchronized `__version__` across all files (0.8.5)
+6) **Add /reasoning toggle in interactive UI** (Impact 3, Effort 2)
+   - **Rationale:** Users may want to hide reasoning for privacy or screen space.
+   - **Change:** Toggle to suppress reasoning panels and streaming.
+   - **Verify:** Toggle hides reasoning in live and final views.
 
-## Usage Examples
+7) **Plan step parser: accept “STEP 1 - …” and “1)”** (Impact 3, Effort 1)
+   - **Rationale:** Many LLMs emit alternate numbering formats.
+   - **Change:** Extend regex and add parse warnings when nothing matches.
+   - **Verify:** Parse sample outputs with hyphens/parentheses.
 
-### Parallel Execution
-```bash
-# Execute independent steps in parallel (up to 3 concurrent)
-copex plan "Build API with tests" --execute --parallel
+8) **Surface MCP stderr on failures** (Impact 3, Effort 2)
+   - **Rationale:** Stdio MCP failures are opaque without stderr.
+   - **Change:** Capture stderr lines and include in exceptions.
+   - **Verify:** Run a bad server and see stderr in error output.
 
-# Limit to 2 concurrent steps
-copex plan "Complex task" -e -P -c 2
-```
+9) **Cache find_copilot_cli + env override** (Impact 3, Effort 2)
+   - **Rationale:** Repeated filesystem scans slow startup.
+   - **Change:** Memoize and respect COPEX_COPILOT_CLI.
+   - **Verify:** Repeated calls do not rescan; env override works.
 
-### Smart Planning
-```bash
-# Use v2 planning with dependency detection
-copex plan "Build microservices architecture" --execute --smart
+10) **UI ASCII icon mode** (Impact 2, Effort 1)
+   - **Rationale:** Some terminals render Unicode poorly.
+   - **Change:** Add ASCII fallback icon set.
+   - **Verify:** ASCII mode renders cleanly in non-Unicode terminals.
 
-# Combine smart planning with parallel execution
-copex plan "Build full-stack app" -e -S -P
-```
+## Medium-Term Improvements (moderate effort)
 
-### Progress Reporting (Python API)
-```python
-from copex import Plan, PlanExecutor, Copex
-from copex.progress import PlanProgressReporter
+1) **Structured logging + configurable sink** (Impact 5, Effort 3)
+   - **Files:** client.py, cli.py, config.py
+   - **Rationale:** Debugging retries and tool calls is currently hard.
+   - **Change:** Add structured logger, file output option, and per-component levels.
+   - **Verify:** `--log-level debug` emits event logs with request IDs.
 
-async with Copex() as client:
-    executor = PlanExecutor(client)
-    plan = await executor.generate_plan("Build something")
-    
-    # Create progress reporter
-    reporter = PlanProgressReporter(plan, format="terminal")
-    
-    # Execute with progress callbacks
-    await executor.execute_plan(
-        plan,
-        on_step_start=reporter.on_step_start,
-        on_step_complete=reporter.on_step_complete,
-        on_error=reporter.on_error,
-    )
-    reporter.finish()
-```
+2) **Token usage from SDK events** (Impact 5, Effort 3)
+   - **Files:** client.py, metrics.py, models.py
+   - **Rationale:** Current token counts are estimates only.
+   - **Change:** Extract token usage from session events; fallback to estimates.
+   - **Verify:** Metrics show exact token counts when SDK provides them.
 
-## Suggested Future Improvements
+3) **MCP HTTP transport + retries/backoff** (Impact 5, Effort 3)
+   - **Files:** mcp.py, config.py
+   - **Rationale:** Stdio-only limits MCP adoption.
+   - **Change:** Add HTTP transport with retry policy and health checks.
+   - **Verify:** Connect to HTTP MCP server and execute tool calls successfully.
 
-### High Priority
+4) **Streaming backpressure + bounded queues** (Impact 4, Effort 3)
+   - **Files:** client.py, ui.py
+   - **Rationale:** Unbounded queues can grow on large outputs.
+   - **Change:** Add max queue size and drop/flush strategy.
+   - **Verify:** Stress test large output; memory remains stable.
 
-1. **Streaming Progress in CLI**
-   - Integrate `ProgressReporter` into CLI for visual progress bars
-   - Add `--progress` flag to show/hide progress bar
+5) **Plan execution progress outputs (json/rich/quiet)** (Impact 4, Effort 3)
+   - **Files:** cli.py, plan.py, progress.py
+   - **Rationale:** Plan runs are hard to automate.
+   - **Change:** Add `--progress` format flag and structured updates.
+   - **Verify:** `--progress=json` yields JSON lines for CI.
 
-2. **Plan Visualization**
-   - `copex plan --visualize` to show dependency graph (ASCII or Mermaid)
-   - Show which steps can run in parallel
+6) **Session replay/export command** (Impact 4, Effort 3)
+   - **Files:** cli.py, persistence.py, ui.py
+   - **Rationale:** Easier auditing and debugging of runs.
+   - **Change:** Add `copex session export --format md/json`.
+   - **Verify:** Exported transcripts match persisted data.
 
-3. **Distributed Execution**
-   - Run steps on different machines/containers
-   - Integration with job queues (Redis, RabbitMQ)
+7) **Plugin tool registry (entry points)** (Impact 4, Effort 3)
+   - **Files:** tools.py, __init__.py, pyproject.toml
+   - **Rationale:** Enables ecosystem tools without core changes.
+   - **Change:** Load tools from entry points.
+   - **Verify:** Install dummy plugin; tools are discoverable.
 
-4. **Step Caching**
-   - Cache step results based on input hash
-   - Skip unchanged steps on re-execution
+8) **Auto-continue prompt truncation** (Impact 4, Effort 3)
+   - **Files:** client.py, config.py
+   - **Rationale:** Recovery prompts can exceed model context.
+   - **Change:** Summarize/truncate context to configured limit.
+   - **Verify:** Recovery prompt stays under max size.
 
-### Medium Priority
+## Future Vision Features (high effort)
 
-5. **Conditional Steps**
-   - `if_condition` field for steps that only run when condition is met
-   - Support for "skip if previous step returned X"
+1) **Multi-agent orchestration with shared memory** (Impact 5, Effort 5)
+   - **Scope:** Task router, agent roles, shared session memory, orchestration UI.
+   - **Value:** Enables large multi-step projects with delegation.
 
-6. **Step Templates**
-   - Pre-defined step types (test, build, deploy, review)
-   - Reusable step definitions
+2) **IDE companion daemon + socket API** (Impact 5, Effort 5)
+   - **Scope:** Background service for persistent low-latency sessions.
+   - **Value:** Tight editor integration and fast responses.
 
-7. **Better Error Recovery**
-   - Automatic retry with different approach on failure
-   - AI-driven error analysis and fix suggestions
+3) **Tool sandboxing + policy engine** (Impact 5, Effort 5)
+   - **Scope:** Allow/deny policies, approvals, dry-run, audit logs.
+   - **Value:** Safer enterprise usage and governance.
 
-8. **Metrics Dashboard**
-   - Web UI for viewing metrics over time
-   - Cost tracking and optimization suggestions
+4) **Session timeline + diff viewer UI** (Impact 4, Effort 5)
+   - **Scope:** Replay view, diffs between iterations, event timeline.
+   - **Value:** Debuggability and auditability.
 
-### Lower Priority
+5) **Offline record/replay of Copilot streams** (Impact 4, Effort 5)
+   - **Scope:** Capture/replay SDK streams for deterministic tests.
+   - **Value:** Reliable CI and regression testing.
 
-9. **Plugin System**
-   - Custom step executors
-   - Pre/post hooks for steps
+6) **Model auto-selection and fallback** (Impact 4, Effort 5)
+   - **Scope:** Policy-driven model choice based on cost/latency/quality.
+   - **Value:** Optimize spend and performance automatically.
 
-10. **Git Integration**
-    - Auto-commit after each step
-    - Branch per plan execution
+7) **Project indexer + semantic search tool** (Impact 4, Effort 5)
+   - **Scope:** Background indexing, vector search, tool integration.
+   - **Value:** Faster codebase understanding.
 
-11. **Notification System**
-    - Slack/Discord notifications on completion/failure
-    - Email summaries
-
-12. **AI Model Comparison**
-    - Run same step with multiple models
-    - Compare quality/speed/cost
-
-## Code Quality Improvements
-
-1. **Test Coverage**
-   - Add tests for new parallel execution
-   - Test progress reporter output formats
-
-2. **Documentation**
-   - Update README with new features
-   - Add docstrings to new methods
-   - API documentation generation
-
-3. **Type Hints**
-   - Full mypy compliance
-   - Better generic types for callbacks
-
-4. **Error Messages**
-   - More descriptive error messages
-   - Suggested fixes in error output
-
-## Breaking Changes (if upgrading to 1.0)
-
-1. Make `PlanStep.depends_on` required (empty list instead of optional)
-2. Change default reasoning from `xhigh` to `high` for faster execution
-3. Rename `max_iterations` to `step_iterations` for clarity
-
-## Files Changed
-
-- `src/copex/__init__.py` - Added progress exports, version sync
-- `src/copex/cli.py` - Added parallel/smart flags, version sync
-- `src/copex/plan.py` - Added dependencies, parallel execution, v2 planning
-- `src/copex/progress.py` - **NEW** Progress reporting module
+8) **Collaborative shared sessions** (Impact 4, Effort 5)
+   - **Scope:** Multi-user sessions with roles and permissions.
+   - **Value:** Team workflows and pair programming.
