@@ -16,7 +16,7 @@ from copex.models import Model, ReasoningEffort
 from copex.persistence import Message, PersistentSession, SessionData, SessionStore
 
 # Plan mode
-from copex.plan import Plan, PlanExecutor, PlanStep, StepStatus
+from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 
 # Progress reporting
 from copex.progress import (
@@ -49,6 +49,7 @@ __all__ = [
     "Plan",
     "PlanStep",
     "PlanExecutor",
+    "PlanState",
     "StepStatus",
     # Progress
     "ProgressReporter",
@@ -81,4 +82,4 @@ __all__ = [
     "MCPTool",
     "load_mcp_config",
 ]
-__version__ = "0.8.5"
+__version__ = "0.9.0"
