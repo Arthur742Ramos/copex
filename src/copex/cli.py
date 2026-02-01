@@ -365,72 +365,13 @@ async def _stream_response(
     ui = CopexUI(console, theme=client.config.ui_theme, density=client.config.ui_density, show_all_tools=True)
     ui.reset(model=client.config.model.value)
     ui.set_activity(ActivityType.THINKING)
-
-    live_display: Live | None = None
-    refresh_stop = asyncio.Event()
-
-    def on_chunk(chunk: StreamChunk) -> None:
-        if chunk.type == "message":
-            if chunk.is_final:
-                ui.set_final_content(chunk.content or ui.state.message, ui.state.reasoning)
-            else:
-                ui.add_message(chunk.delta)
-        elif chunk.type == "reasoning":
-            if show_reasoning:
-                if chunk.is_final:
-                    pass  # Already captured incrementally
-                else:
-                    ui.add_reasoning(chunk.delta)
-        elif chunk.type == "tool_call":
-            tool = ToolCallInfo(
-                name=chunk.tool_name or "unknown",
-                arguments=chunk.tool_args or {},
-                status="running",
-            )
-            ui.add_tool_call(tool)
-        elif chunk.type == "tool_result":
-            status = "success" if chunk.tool_success is not False else "error"
-            ui.update_tool_call(
-                chunk.tool_name or "unknown",
-                status,
-                result=chunk.tool_result,
-                duration=chunk.tool_duration,
-            )
-        elif chunk.type == "system":
-            # Retry notification
-            ui.increment_retries()
-            print_retry(console, ui.state.retries, client.config.retry.max_retries, chunk.delta)
-
-        # Update the live display
-        if live_display:
-            live_display.update(ui.build_live_display())
-
-    async def refresh_loop() -> None:
-        while not refresh_stop.is_set():
-            if live_display:
-                live_display.update(ui.build_live_display())
-            await asyncio.sleep(0.1)
-
-    with Live(console=console, refresh_per_second=10, transient=True) as live:
-        live_display = live
-        live.update(ui.build_live_display())
-        refresh_task = asyncio.create_task(refresh_loop())
-        try:
-            response = await client.send(prompt, on_chunk=on_chunk)
-            # Prefer streamed content over response object (which may have stale fallback)
-            final_message = ui.state.message if ui.state.message else response.content
-            final_reasoning = (ui.state.reasoning if ui.state.reasoning else response.reasoning) if show_reasoning else None
-            ui.set_final_content(final_message, final_reasoning)
-            ui.state.retries = response.retries
-        finally:
-            refresh_stop.set()
-            try:
-                await refresh_task
-            except asyncio.CancelledError:
-                pass
-
-    # Print final beautiful output
-    console.print(ui.build_final_display())
+    await _stream_with_ui(
+        client,
+        prompt,
+        ui,
+        show_reasoning=show_reasoning,
+        show_retry_notifications=True,
+    )
 
 
 async def _stream_response_plain(client: Copex, prompt: str) -> None:
@@ -693,7 +634,23 @@ async def _stream_response_interactive(
     # Reset for new turn but preserve history
     ui.reset(model=client.config.model.value, preserve_history=True)
     ui.set_activity(ActivityType.THINKING)
+    await _stream_with_ui(client, prompt, ui, show_reasoning=True, render_final=False)
 
+    ui.finalize_assistant_response()
+    console.print(ui.build_final_display())
+    console.print()
+
+
+async def _stream_with_ui(
+    client: Copex,
+    prompt: str,
+    ui: CopexUI,
+    *,
+    show_reasoning: bool = True,
+    show_retry_notifications: bool = False,
+    render_final: bool = True,
+) -> None:
+    """Stream a response using shared UI logic."""
     live_display: Live | None = None
     refresh_stop = asyncio.Event()
 
@@ -704,10 +661,11 @@ async def _stream_response_interactive(
             else:
                 ui.add_message(chunk.delta)
         elif chunk.type == "reasoning":
-            if chunk.is_final:
-                pass
-            else:
-                ui.add_reasoning(chunk.delta)
+            if show_reasoning:
+                if chunk.is_final:
+                    pass
+                else:
+                    ui.add_reasoning(chunk.delta)
         elif chunk.type == "tool_call":
             tool = ToolCallInfo(
                 name=chunk.tool_name or "unknown",
@@ -725,13 +683,15 @@ async def _stream_response_interactive(
             )
         elif chunk.type == "system":
             ui.increment_retries()
+            if show_retry_notifications:
+                print_retry(console, ui.state.retries, client.config.retry.max_retries, chunk.delta)
 
         if live_display:
             live_display.update(ui.build_live_display())
 
     async def refresh_loop() -> None:
         while not refresh_stop.is_set():
-            if live_display:
+            if live_display and ui.consume_dirty():
                 live_display.update(ui.build_live_display())
             await asyncio.sleep(0.1)
 
@@ -741,9 +701,8 @@ async def _stream_response_interactive(
         refresh_task = asyncio.create_task(refresh_loop())
         try:
             response = await client.send(prompt, on_chunk=on_chunk)
-            # Prefer streamed content over response object (which may have stale fallback)
             final_message = ui.state.message if ui.state.message else response.content
-            final_reasoning = ui.state.reasoning if ui.state.reasoning else response.reasoning
+            final_reasoning = (ui.state.reasoning if ui.state.reasoning else response.reasoning) if show_reasoning else None
             ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
         finally:
@@ -753,11 +712,8 @@ async def _stream_response_interactive(
             except asyncio.CancelledError:
                 pass
 
-    # Finalize the assistant response to history
-    ui.finalize_assistant_response()
-
-    console.print(ui.build_final_display())
-    console.print()  # Extra spacing
+    if render_final:
+        console.print(ui.build_final_display())
 
 
 @app.command("ralph")

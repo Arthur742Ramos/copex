@@ -273,6 +273,7 @@ class CopexUI:
         self.set_theme(theme)
         self.density = density
         self.state = UIState()
+        self._dirty = True
         self._live: Live | None = None
         self._spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
         self._spinner_idx = 0
@@ -699,37 +700,38 @@ class CopexUI:
     # ═══════════════════════════════════════════════════════════════════════════
 
     def reset(self, model: str = "", preserve_history: bool = False) -> None:
-        """Reset state for a new interaction."""
+        """Reset UI state for a new interaction."""
         old_history = self.state.history if preserve_history else []
         self.state = UIState(model=model, history=old_history)
+        self._touch()
 
     def set_activity(self, activity: ActivityType) -> None:
-        """Set the current activity."""
+        """Set the current activity indicator."""
         self.state.activity = activity
         self._touch()
 
     def add_reasoning(self, delta: str) -> None:
-        """Add reasoning content."""
+        """Append reasoning content to the live state."""
         self.state.reasoning += delta
         if self.state.activity != ActivityType.REASONING:
             self.state.activity = ActivityType.REASONING
         self._touch()
 
     def add_message(self, delta: str) -> None:
-        """Add message content."""
+        """Append message content to the live state."""
         self.state.message += delta
         if self.state.activity != ActivityType.RESPONDING:
             self.state.activity = ActivityType.RESPONDING
         self._touch()
 
     def add_tool_call(self, tool: ToolCallInfo) -> None:
-        """Add a tool call."""
+        """Track a tool call in the live state."""
         self.state.tool_calls.append(tool)
         self.state.activity = ActivityType.TOOL_CALL
         self._touch()
 
     def update_tool_call(self, name: str, status: str, result: str | None = None, duration: float | None = None) -> None:
-        """Update a tool call status."""
+        """Update a tool call status and optional result details."""
         for tool in reversed(self.state.tool_calls):
             if tool.name == name and tool.status == "running":
                 tool.status = status
@@ -743,12 +745,12 @@ class CopexUI:
         self._touch()
 
     def increment_retries(self) -> None:
-        """Increment retry count."""
+        """Increment the retry counter for the active request."""
         self.state.retries += 1
         self._touch()
 
     def set_final_content(self, message: str, reasoning: str | None = None) -> None:
-        """Set final content."""
+        """Set final message and reasoning content, marking completion."""
         if message:
             self.state.message = message
         if reasoning:
@@ -757,12 +759,12 @@ class CopexUI:
         self._touch()
 
     def add_user_message(self, content: str) -> None:
-        """Add a user message to history."""
+        """Add a user message to the conversation history."""
         self.state.history.append(HistoryEntry(role="user", content=content))
         self._touch()
 
     def finalize_assistant_response(self) -> None:
-        """Finalize the current assistant response and add to history."""
+        """Finalize the assistant response and store it in history."""
         if self.state.message:
             self.state.history.append(HistoryEntry(
                 role="assistant",
@@ -772,9 +774,17 @@ class CopexUI:
             ))
         self._touch()
 
+    def consume_dirty(self) -> bool:
+        """Return whether a redraw is needed and clear the dirty flag."""
+        if self._dirty:
+            self._dirty = False
+            return True
+        return False
+
     def _touch(self) -> None:
         """Update last activity timestamp."""
         self.state.last_update = time.time()
+        self._dirty = True
 
     def _build_summary_panel(self) -> Panel:
         """Build a summary panel for completed output."""

@@ -12,8 +12,11 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from copex.models import Model, ReasoningEffort
 
@@ -184,6 +187,7 @@ class SessionStore:
                     "message_count": len(data.get("messages", [])),
                 })
             except (json.JSONDecodeError, KeyError):
+                logger.warning("Skipping invalid session file: %s", path, exc_info=True)
                 continue
 
         # Sort by updated_at descending

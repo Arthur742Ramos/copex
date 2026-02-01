@@ -12,8 +12,11 @@ from __future__ import annotations
 import json
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
+import logging
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -231,6 +234,7 @@ class CheckpointStore:
 
                 result.append(Checkpoint.from_dict(data))
             except (json.JSONDecodeError, KeyError):
+                logger.warning("Skipping invalid checkpoint file: %s", path, exc_info=True)
                 continue
 
         # Sort by updated_at descending
@@ -308,6 +312,7 @@ class CheckpointStore:
                     "updated_at": data["updated_at"],
                 })
             except (json.JSONDecodeError, KeyError):
+                logger.warning("Skipping invalid checkpoint file: %s", path, exc_info=True)
                 continue
 
         # Sort by updated_at descending

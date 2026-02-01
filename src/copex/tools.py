@@ -205,24 +205,29 @@ class ToolRegistry:
         pending = set(tasks)
 
         try:
-            for task in asyncio.as_completed(tasks):
-                idx = task_map[task]
-                try:
-                    result = await task
-                except Exception as exc:
-                    result = ToolResult(
-                        name=calls[idx][0],
-                        success=False,
-                        error=str(exc),
-                    )
+            while pending:
+                done, pending = await asyncio.wait(
+                    pending,
+                    return_when=asyncio.FIRST_COMPLETED,
+                )
+                for task in done:
+                    idx = task_map[task]
+                    try:
+                        result = await task
+                    except Exception as exc:
+                        result = ToolResult(
+                            name=calls[idx][0],
+                            success=False,
+                            error=str(exc),
+                        )
 
-                results[idx] = result
-                pending.discard(task)
+                    results[idx] = result
 
-                if self.config.fail_fast and not result.success:
-                    for pending_task in pending:
-                        pending_task.cancel()
-                    break
+                    if self.config.fail_fast and not result.success:
+                        for pending_task in pending:
+                            pending_task.cancel()
+                        pending.clear()
+                        break
         finally:
             if pending:
                 await asyncio.gather(*pending, return_exceptions=True)

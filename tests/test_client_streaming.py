@@ -2,10 +2,12 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+import threading
 
 import pytest
 
 from copex.client import Copex, StreamChunk
+import copex.client as client_module
 from copex.config import CopexConfig
 from copex.models import EventType
 
@@ -36,6 +38,45 @@ class FakeSession:
 class DummyClient:
     async def start(self):
         return None
+
+
+class MockRpcClient:
+    def __init__(self, owner, session_factory):
+        self._owner = owner
+        self._session_factory = session_factory
+        self._sessions = {}
+        self._next_id = 0
+
+    async def request(self, method, _payload):
+        if method != "session.create":
+            raise RuntimeError(f"Unexpected RPC method: {method}")
+        self._next_id += 1
+        session_id = f"session-{self._next_id}"
+        session = self._session_factory()
+        if self._owner is not None:
+            self._owner.sessions_created += 1
+        self._sessions[session_id] = session
+        return {"sessionId": session_id, "workspacePath": None}
+
+
+class FakeCopilotSession:
+    def __init__(self, session_id, rpc_client, _workspace_path=None):
+        self._inner = rpc_client._sessions[session_id]
+
+    def on(self, handler):
+        return self._inner.on(handler)
+
+    async def send(self, options):
+        return await self._inner.send(options)
+
+    async def get_messages(self):
+        return await self._inner.get_messages()
+
+    async def destroy(self):
+        return await self._inner.destroy()
+
+
+client_module.CopilotSession = FakeCopilotSession
 
 
 def build_event(event_type: str, **data):
@@ -236,8 +277,6 @@ def test_auto_continue_after_exhausted_retries():
     """Test that auto-continue triggers with session recovery after retries exhausted."""
     call_count = 0
     prompts_seen = []
-    sessions_created = 0
-
     class CountingSession:
         def __init__(self):
             self._handler = None
@@ -275,12 +314,17 @@ def test_auto_continue_after_exhausted_retries():
             pass
 
     class MockClient:
+        def __init__(self):
+            self._client = MockRpcClient(self, CountingSession)
+            self._sessions_lock = threading.Lock()
+            self._sessions = {}
+            self.sessions_created = 0
+
         async def start(self):
             return None
 
         async def create_session(self, options):
-            nonlocal sessions_created
-            sessions_created += 1
+            self.sessions_created += 1
             return CountingSession()
 
     from copex.config import RetryConfig
@@ -299,6 +343,6 @@ def test_auto_continue_after_exhausted_retries():
     assert result.content == "success!"
     assert result.auto_continues >= 1
     # Session recovery should have created a new session
-    assert sessions_created >= 1
+    assert client._client.sessions_created >= 1
     # Should have seen recovery prompt (contains "Keep going")
     assert any("Keep going" in p for p in prompts_seen if p)

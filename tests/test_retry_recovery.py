@@ -4,10 +4,12 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
+import threading
 
 import pytest
 
 from copex.client import Copex, StreamChunk
+import copex.client as client_module
 from copex.config import CopexConfig, RetryConfig
 from copex.models import EventType
 
@@ -20,12 +22,54 @@ def build_event(event_type: str, **data):
     return SimpleNamespace(type=event_type, data=SimpleNamespace(**data))
 
 
+class MockRpcClient:
+    def __init__(self, owner, session_factory):
+        self._owner = owner
+        self._session_factory = session_factory
+        self._sessions = {}
+        self._next_id = 0
+
+    async def request(self, method, _payload):
+        if method != "session.create":
+            raise RuntimeError(f"Unexpected RPC method: {method}")
+        self._next_id += 1
+        session_id = f"session-{self._next_id}"
+        session = self._session_factory()
+        if self._owner is not None:
+            self._owner.sessions_created += 1
+        self._sessions[session_id] = session
+        return {"sessionId": session_id, "workspacePath": None}
+
+
+class FakeCopilotSession:
+    def __init__(self, session_id, rpc_client, _workspace_path=None):
+        self._inner = rpc_client._sessions[session_id]
+
+    def on(self, handler):
+        return self._inner.on(handler)
+
+    async def send(self, options):
+        return await self._inner.send(options)
+
+    async def get_messages(self):
+        return await self._inner.get_messages()
+
+    async def destroy(self):
+        return await self._inner.destroy()
+
+
+client_module.CopilotSession = FakeCopilotSession
+
+
 class MockClient:
     """Mock CopilotClient that tracks session creation."""
 
     def __init__(self, session_factory):
         self.session_factory = session_factory
         self.sessions_created = 0
+        self._client = MockRpcClient(self, session_factory)
+        self._sessions_lock = threading.Lock()
+        self._sessions = {}
 
     async def start(self):
         pass

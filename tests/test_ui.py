@@ -120,3 +120,12 @@ class TestCopexUIState:
         assert ui.state.reasoning == ""
         assert ui.state.activity == ActivityType.WAITING
         assert ui.state.model == "gpt-4"
+
+
+def test_ui_dirty_flag_consumed():
+    """Dirty flag should toggle when UI state updates."""
+    ui = CopexUI()
+    assert ui.consume_dirty() is True
+    assert ui.consume_dirty() is False
+    ui.add_message("Hi")
+    assert ui.consume_dirty() is True
