@@ -190,17 +190,27 @@ class Plan:
         """Load plan from a file."""
         return cls.from_json(path.read_text())
 
-    def to_markdown(self) -> str:
+    def to_markdown(self, *, ascii_icons: bool = False) -> str:
         """Format plan as markdown."""
-        lines = [f"# Plan: {self.task}", ""]
-        for step in self.steps:
-            status_icon = {
+        if ascii_icons:
+            icons = {
+                StepStatus.PENDING: "-",
+                StepStatus.RUNNING: "*",
+                StepStatus.COMPLETED: "[OK]",
+                StepStatus.FAILED: "[X]",
+                StepStatus.SKIPPED: "->",
+            }
+        else:
+            icons = {
                 StepStatus.PENDING: "⬜",
                 StepStatus.RUNNING: "🔄",
                 StepStatus.COMPLETED: "✅",
                 StepStatus.FAILED: "❌",
                 StepStatus.SKIPPED: "⏭️",
-            }.get(step.status, "⬜")
+            }
+        lines = [f"# Plan: {self.task}", ""]
+        for step in self.steps:
+            status_icon = icons.get(step.status, icons[StepStatus.PENDING])
             lines.append(f"{status_icon} **Step {step.number}:** {step.description}")
             if step.result:
                 lines.append(f"   - Result: {step.result[:100]}...")

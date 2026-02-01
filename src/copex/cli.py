@@ -1197,7 +1197,7 @@ async def _run_plan(
             total_time = time.time() - plan_start_time
             
             # Show enhanced summary
-            _display_plan_summary_enhanced(plan, total_time)
+            _display_plan_summary_enhanced(plan, total_time, ascii_icons=config.ui_ascii_icons)
             
             # Save updated plan
             if output:
@@ -1229,33 +1229,34 @@ def _display_plan(plan: Plan, *, ascii_icons: bool = False) -> None:
         console.print(f"{status_icon} [bold]Step {step.number}:[/bold] {step.description}")
 
 
-def _display_plan_summary(plan: Plan) -> None:
+def _display_plan_summary(plan: Plan, *, ascii_icons: bool = False) -> None:
     """Display plan execution summary."""
     completed = plan.completed_count
     failed = plan.failed_count
     total = len(plan.steps)
     
+    icon_set = ASCIIIcons if ascii_icons else Icons
     if plan.is_complete and failed == 0:
         console.print(Panel(
             f"[green]All {total} steps completed successfully![/green]",
-            title="✅ Plan Complete",
+            title=f"{icon_set.DONE} Plan Complete",
             border_style="green",
         ))
     elif failed > 0:
         console.print(Panel(
             f"Completed: {completed}/{total}\nFailed: {failed}",
-            title="⚠️ Plan Incomplete",
+            title=f"{icon_set.WARNING} Plan Incomplete",
             border_style="yellow",
         ))
     else:
         console.print(Panel(
             f"Completed: {completed}/{total}",
-            title="📋 Progress",
+            title=f"{icon_set.TOOL} Progress",
             border_style="blue",
         ))
 
 
-def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
+def _display_plan_summary_enhanced(plan: Plan, total_time: float, *, ascii_icons: bool = False) -> None:
     """Display enhanced plan execution summary with timing and tokens."""
     completed = plan.completed_count
     failed = plan.failed_count
@@ -1264,12 +1265,13 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
     # Build summary lines
     lines = []
     
+    icon_set = ASCIIIcons if ascii_icons else Icons
     if plan.is_complete and failed == 0:
-        lines.append(f"[green]✅ {completed}/{total} steps completed successfully![/green]")
+        lines.append(f"[green]{icon_set.DONE} {completed}/{total} steps completed successfully![/green]")
     elif failed > 0:
-        lines.append(f"[yellow]⚠️ {completed}/{total} steps completed, {failed} failed[/yellow]")
+        lines.append(f"[yellow]{icon_set.WARNING} {completed}/{total} steps completed, {failed} failed[/yellow]")
     else:
-        lines.append(f"[blue]📋 {completed}/{total} steps completed[/blue]")
+        lines.append(f"[blue]{icon_set.TOOL} {completed}/{total} steps completed[/blue]")
     
     # Timing
     lines.append("")
@@ -1287,13 +1289,13 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
     
     # Determine panel style
     if plan.is_complete and failed == 0:
-        title = "✅ Plan Complete"
+        title = f"{icon_set.DONE} Plan Complete"
         border = "green"
     elif failed > 0:
-        title = "⚠️ Plan Incomplete"
+        title = f"{icon_set.WARNING} Plan Incomplete"
         border = "yellow"
     else:
-        title = "📋 Progress"
+        title = f"{icon_set.TOOL} Progress"
         border = "blue"
     
     console.print(Panel(
