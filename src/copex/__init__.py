@@ -15,6 +15,9 @@ from copex.models import Model, ReasoningEffort
 # Persistence
 from copex.persistence import Message, PersistentSession, SessionData, SessionStore
 
+# Plan mode
+from copex.plan import Plan, PlanExecutor, PlanStep, StepStatus
+
 # Ralph Wiggum loops
 from copex.ralph import RalphConfig, RalphState, RalphWiggum, ralph_loop
 
@@ -33,6 +36,11 @@ __all__ = [
     "RalphConfig",
     "RalphState",
     "ralph_loop",
+    # Plan
+    "Plan",
+    "PlanStep",
+    "PlanExecutor",
+    "StepStatus",
     # Persistence
     "SessionStore",
     "PersistentSession",
