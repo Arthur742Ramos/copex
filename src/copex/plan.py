@@ -3,7 +3,7 @@ Plan Mode - Step-by-step task planning and execution for Copex.
 
 Provides structured planning capabilities:
 - Generate step-by-step plans from task descriptions
-- Execute plans step by step with progress tracking
+- Execute plans step by step with progress tracking (using Ralph loops)
 - Interactive review before execution
 - Resume execution from specific steps
 - Save/load plans to files
@@ -17,7 +17,10 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable
+from typing import TYPE_CHECKING, Any, Callable
+
+if TYPE_CHECKING:
+    from copex.ralph import RalphWiggum
 
 
 class StepStatus(Enum):
@@ -194,10 +197,18 @@ Execute this step now. When done, summarize what you accomplished."""
 class PlanExecutor:
     """Executes plans step by step using a Copex client."""
 
-    def __init__(self, client: Any):
-        """Initialize executor with a Copex client."""
+    def __init__(self, client: Any, ralph: RalphWiggum | None = None):
+        """
+        Initialize executor with a Copex client.
+        
+        Args:
+            client: A Copex client instance
+            ralph: Optional RalphWiggum instance for iterative step execution
+        """
         self.client = client
+        self.ralph = ralph
         self._cancelled = False
+        self.max_iterations_per_step: int = 10
 
     def cancel(self) -> None:
         """Cancel ongoing execution."""
@@ -319,8 +330,20 @@ class PlanExecutor:
                     current_step=step.description,
                 )
                 
-                response = await self.client.send(prompt)
-                step.result = response.content
+                # Use Ralph loop if available, otherwise single call
+                if self.ralph:
+                    completion_promise = f"Step {step.number} complete"
+                    ralph_state = await self.ralph.loop(
+                        prompt,
+                        max_iterations=self.max_iterations_per_step,
+                        completion_promise=completion_promise,
+                    )
+                    # Use last response from Ralph loop as the result
+                    step.result = ralph_state.history[-1] if ralph_state.history else "Step completed"
+                else:
+                    response = await self.client.send(prompt)
+                    step.result = response.content
+                    
                 step.status = StepStatus.COMPLETED
                 step.completed_at = datetime.now()
                 
