@@ -90,7 +90,7 @@ def main(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = ReasoningEffort.HIGH.value,
 ) -> None:
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
     if ctx.invoked_subcommand is None:
@@ -272,7 +272,7 @@ def chat(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = ReasoningEffort.HIGH.value,
     max_retries: Annotated[
         int, typer.Option("--max-retries", help="Maximum retry attempts")
     ] = 5,
@@ -311,7 +311,13 @@ def chat(
         raise typer.Exit(1)
 
     try:
-        config.reasoning_effort = ReasoningEffort(reasoning)
+        requested_effort = parse_reasoning_effort(reasoning)
+        if requested_effort is None:
+            raise ValueError(reasoning)
+        normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+        config.reasoning_effort = normalized_effort
     except ValueError:
         console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
         raise typer.Exit(1)
@@ -531,7 +537,7 @@ def interactive(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = ReasoningEffort.HIGH.value,
     ui_theme: Annotated[
         Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
     ] = None,
@@ -816,7 +822,7 @@ def ralph_command(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = ReasoningEffort.HIGH.value,
 ) -> None:
     """
     Start a Ralph Wiggum loop - iterative AI development.
@@ -1034,7 +1040,7 @@ def plan_command(
     ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.XHIGH.value,
+    ] = ReasoningEffort.HIGH.value,
 ) -> None:
     """
     Generate and optionally execute a step-by-step plan.
