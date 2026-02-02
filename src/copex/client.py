@@ -14,7 +14,7 @@ from copilot.session import CopilotSession
 
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
-from copex.models import EventType, Model, ReasoningEffort
+from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
 
 
 @dataclass
@@ -714,7 +714,7 @@ async def copex(
     """
     config = CopexConfig(
         model=Model(model) if isinstance(model, str) else model,
-        reasoning_effort=ReasoningEffort(reasoning) if isinstance(reasoning, str) else reasoning,
+        reasoning_effort=parse_reasoning_effort(reasoning) if isinstance(reasoning, str) else reasoning,
         **kwargs,
     )
     client = Copex(config)

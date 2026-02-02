@@ -3,12 +3,13 @@
 import os
 import shutil
 import sys
+import warnings
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
-from copex.models import Model, ReasoningEffort
+from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
 
 
 def find_copilot_cli() -> str | None:
@@ -212,6 +213,28 @@ class CopexConfig(BaseModel):
         default="extended",
         description="UI density (compact or extended)"
     )
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _parse_reasoning_effort_aliases(cls, value: Any) -> Any:
+        # Accept short aliases like "xh".
+        try:
+            parsed = parse_reasoning_effort(value)
+        except Exception:
+            return value
+        return parsed if parsed is not None else value
+
+    @model_validator(mode="after")
+    def _cap_reasoning_by_model(self) -> "CopexConfig":
+        normalized, warning = normalize_reasoning_effort(self.model, self.reasoning_effort)
+        if warning and normalized != self.reasoning_effort:
+            # Only warn when the user explicitly set reasoning_effort.
+            # (Avoid noisy warnings when defaults get normalized.)
+            fields_set = getattr(self, "__pydantic_fields_set__", set())
+            if "reasoning_effort" in fields_set:
+                warnings.warn(warning, UserWarning)
+            self.reasoning_effort = normalized
+        return self
 
     @field_validator("ui_theme")
     @classmethod

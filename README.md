@@ -278,6 +278,8 @@ exponential_base = 2.0
 | `high` | Deep reasoning |
 | `xhigh` | Maximum reasoning (best for complex tasks) |
 
+**Note:** `xhigh` is only supported for GPT/Codex models **gpt-5.2+** (e.g. `gpt-5.2`, `gpt-5.2-codex`, and higher). If you request `xhigh` on other models (e.g. Claude), Copex will **downgrade to `high`** and emit a warning.
+
 ## Error Handling
 
 By default, Copex retries on **any error** (`retry_on_any_error=True`).

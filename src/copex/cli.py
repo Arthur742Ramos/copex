@@ -20,7 +20,7 @@ from rich.panel import Panel
 
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig, load_last_model, save_last_model
-from copex.models import Model, ReasoningEffort
+from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
 
 # Effective default: last used model or claude-opus-4.5
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
@@ -542,9 +542,15 @@ def interactive(
     """Start an interactive chat session."""
     effective_model = model or _DEFAULT_MODEL.value
     try:
+        model_enum = Model(effective_model)
+        requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+
         config = CopexConfig(
-            model=Model(effective_model),
-            reasoning_effort=ReasoningEffort(reasoning),
+            model=model_enum,
+            reasoning_effort=normalized_effort,
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -629,11 +635,19 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 if selected and selected != client.config.model:
                     client.config.model = selected
                     save_last_model(selected)  # Persist for next run
+
+                    desired_effort = client.config.reasoning_effort
                     # Prompt for reasoning effort if GPT model
                     if selected.value.startswith("gpt-"):
                         new_reasoning = await _reasoning_picker(client.config.reasoning_effort)
                         if new_reasoning:
-                            client.config.reasoning_effort = new_reasoning
+                            desired_effort = new_reasoning
+
+                    normalized_effort, warning = normalize_reasoning_effort(selected, desired_effort)
+                    if warning:
+                        console.print(f"[{Theme.WARNING}]{warning}[/{Theme.WARNING}]")
+                    client.config.reasoning_effort = normalized_effort
+
                     client.new_session()
                     # Clear UI history for new session
                     ui.state.history = []
@@ -657,6 +671,12 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     new_model = Model(model_name)
                     client.config.model = new_model
                     save_last_model(new_model)  # Persist for next run
+
+                    normalized_effort, warning = normalize_reasoning_effort(new_model, client.config.reasoning_effort)
+                    if warning:
+                        console.print(f"[{Theme.WARNING}]{warning}[/{Theme.WARNING}]")
+                    client.config.reasoning_effort = normalized_effort
+
                     client.new_session()  # Need new session for model change
                     # Clear UI history for new session
                     ui.state.history = []
@@ -673,12 +693,19 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     continue
                 level = parts[1].strip()
                 try:
-                    new_reasoning = ReasoningEffort(level)
-                    client.config.reasoning_effort = new_reasoning
+                    requested = parse_reasoning_effort(level)
+                    if requested is None:
+                        raise ValueError(level)
+
+                    normalized_effort, warning = normalize_reasoning_effort(client.config.model, requested)
+                    if warning:
+                        console.print(f"[{Theme.WARNING}]{warning}[/{Theme.WARNING}]")
+
+                    client.config.reasoning_effort = normalized_effort
                     client.new_session()  # Need new session for reasoning change
                     # Clear UI history for new session
                     ui.state.history = []
-                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_reasoning.value} reasoning (new session started)[/{Theme.SUCCESS}]\n")
+                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {normalized_effort.value} reasoning (new session started)[/{Theme.SUCCESS}]\n")
                 except ValueError:
                     valid = ", ".join(r.value for r in ReasoningEffort)
                     console.print(f"[{Theme.ERROR}]Invalid reasoning level. Valid: {valid}[/{Theme.ERROR}]")
@@ -802,9 +829,15 @@ def ralph_command(
     """
     effective_model = model or _DEFAULT_MODEL.value
     try:
+        model_enum = Model(effective_model)
+        requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+
         config = CopexConfig(
-            model=Model(effective_model),
-            reasoning_effort=ReasoningEffort(reasoning),
+            model=model_enum,
+            reasoning_effort=normalized_effort,
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -1020,9 +1053,15 @@ def plan_command(
     
     effective_model = model or _DEFAULT_MODEL.value
     try:
+        model_enum = Model(effective_model)
+        requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+
         config = CopexConfig(
-            model=Model(effective_model),
-            reasoning_effort=ReasoningEffort(reasoning),
+            model=model_enum,
+            reasoning_effort=normalized_effort,
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")

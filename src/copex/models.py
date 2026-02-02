@@ -1,6 +1,14 @@
-"""Model and configuration enums."""
+"""Model and configuration enums.
 
+This module also includes small helpers for validating combinations of model +
+"reasoning effort". Not all models support all effort levels.
+"""
+
+from __future__ import annotations
+
+import re
 from enum import Enum
+from typing import Tuple
 
 
 class Model(str, Enum):
@@ -30,6 +38,85 @@ class ReasoningEffort(str, Enum):
     MEDIUM = "medium"
     HIGH = "high"
     XHIGH = "xhigh"
+
+
+_GPT_VERSION_RE = re.compile(r"^gpt-(?P<major>\d+)(?:\.(?P<minor>\d+))?", re.IGNORECASE)
+
+
+def parse_reasoning_effort(value: str | ReasoningEffort | None) -> ReasoningEffort | None:
+    """Parse a reasoning effort string with small aliases.
+
+    Supported aliases:
+      - "xh" -> "xhigh"
+
+    Returns None if value is None.
+    """
+    if value is None:
+        return None
+    if isinstance(value, ReasoningEffort):
+        return value
+    v = value.strip().lower()
+    if v == "xh":
+        v = "xhigh"
+    return ReasoningEffort(v)
+
+
+def model_supports_xhigh(model: Model | str) -> bool:
+    """Return True if the model is in the GPT/Codex family that supports xhigh.
+
+    Policy:
+      - xhigh is allowed ONLY for GPT-5.2 (and higher GPT/Codex versions).
+      - Everything else is capped at high.
+
+    Notes:
+      - We treat "gpt-5" (no minor) and "gpt-5-mini" as NOT supporting xhigh.
+      - Any gpt major >= 6 supports xhigh.
+      - gpt-5.<minor> supports xhigh only when minor >= 2.
+    """
+    model_id = model.value if isinstance(model, Model) else str(model)
+    m = _GPT_VERSION_RE.match(model_id)
+    if not m:
+        return False
+
+    major = int(m.group("major"))
+    minor_str = m.group("minor")
+    minor = int(minor_str) if minor_str is not None else None
+
+    if major >= 6:
+        return True
+    if major < 5:
+        return False
+
+    # major == 5
+    return minor is not None and minor >= 2
+
+
+def normalize_reasoning_effort(
+    model: Model | str,
+    reasoning: ReasoningEffort | str,
+    *,
+    downgrade_to: ReasoningEffort = ReasoningEffort.HIGH,
+) -> Tuple[ReasoningEffort, str | None]:
+    """Normalize a requested reasoning effort for a given model.
+
+    If an unsupported effort is requested (currently: xhigh on non-supported
+    models), we downgrade to "high" and return a warning message.
+
+    Returns:
+      (normalized_effort, warning_message)
+    """
+    effort = parse_reasoning_effort(reasoning)
+    if effort is None:
+        return downgrade_to, None
+
+    if effort == ReasoningEffort.XHIGH and not model_supports_xhigh(model):
+        model_id = model.value if isinstance(model, Model) else str(model)
+        return downgrade_to, (
+            f"Model '{model_id}' does not support reasoning effort '{effort.value}'. "
+            f"Downgrading to '{downgrade_to.value}'."
+        )
+
+    return effort, None
 
 
 class EventType(str, Enum):
