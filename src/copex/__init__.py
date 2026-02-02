@@ -18,6 +18,15 @@ from copex.persistence import Message, PersistentSession, SessionData, SessionSt
 # Plan mode
 from copex.plan import Plan, PlanExecutor, PlanStep, StepStatus
 
+# Progress reporting
+from copex.progress import (
+    PlanProgressReporter,
+    ProgressItem,
+    ProgressReporter,
+    ProgressState,
+    ProgressStatus,
+)
+
 # Ralph Wiggum loops
 from copex.ralph import RalphConfig, RalphState, RalphWiggum, ralph_loop
 
@@ -41,6 +50,12 @@ __all__ = [
     "PlanStep",
     "PlanExecutor",
     "StepStatus",
+    # Progress
+    "ProgressReporter",
+    "ProgressState",
+    "ProgressItem",
+    "ProgressStatus",
+    "PlanProgressReporter",
     # Persistence
     "SessionStore",
     "PersistentSession",
@@ -66,4 +81,4 @@ __all__ = [
     "MCPTool",
     "load_mcp_config",
 ]
-__version__ = "0.4.2"
+__version__ = "0.8.5"
