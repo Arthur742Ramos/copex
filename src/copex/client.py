@@ -13,6 +13,10 @@ from copilot import CopilotClient
 
 from copex.config import CopexConfig
 from copex.models import EventType, Model, ReasoningEffort
+from copex._sdk_patch import patch_sdk, set_reasoning_effort, clear_reasoning_effort
+
+# Apply SDK patch on import to enable model_reasoning_effort support
+patch_sdk()
 
 
 @dataclass
@@ -106,7 +110,12 @@ class Copex:
         if not self._started:
             await self.start()
         if self._session is None:
-            self._session = await self._client.create_session(self.config.to_session_options())
+            # Set reasoning effort before creating session (SDK patch will inject it)
+            set_reasoning_effort(self.config.reasoning_effort.value)
+            try:
+                self._session = await self._client.create_session(self.config.to_session_options())
+            finally:
+                clear_reasoning_effort()
         return self._session
 
     async def _get_session_context(self, session: Any) -> str | None:
