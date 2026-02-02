@@ -104,7 +104,7 @@ class StdioTransport(MCPTransport):
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.DEVNULL,
             cwd=self.config.cwd,
             env={**dict(__import__("os").environ), **self.config.env} if self.config.env else None,
         )
@@ -192,7 +192,9 @@ class StdioTransport(MCPTransport):
 
         message = {**message, "id": request_id}
 
-        future: asyncio.Future = asyncio.get_event_loop().create_future()
+        # Use the running loop to create futures to avoid event loop issues
+        loop = asyncio.get_running_loop()
+        future: asyncio.Future = loop.create_future()
         self._pending[request_id] = future
 
         await self._write(message)

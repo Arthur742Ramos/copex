@@ -53,6 +53,7 @@ class StreamChunk:
     is_final: bool = False
     content: str | None = None  # Full content when is_final=True
     # Tool call info
+    tool_id: str | None = None
     tool_name: str | None = None
     tool_args: dict[str, Any] | None = None
     tool_result: str | None = None
@@ -219,6 +220,15 @@ class Copex:
                 content=state.final_reasoning,
             ))
 
+    def _extract_tool_id(self, data: Any) -> str | None:
+        """Extract tool ID from event data using common fields."""
+        return (
+            getattr(data, "tool_use_id", None)
+            or getattr(data, "id", None)
+            or getattr(data, "tool_id", None)
+            or None
+        )
+
     def _handle_tool_execution_start(
         self,
         event: Any,
@@ -227,12 +237,14 @@ class Copex:
     ) -> None:
         tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
         tool_args = getattr(event.data, "arguments", None)
+        tool_id = self._extract_tool_id(event.data)
         state.pending_tools += 1
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
         if on_chunk:
             on_chunk(StreamChunk(
                 type="tool_call",
+                tool_id=str(tool_id) if tool_id else None,
                 tool_name=str(tool_name) if tool_name else "unknown",
                 tool_args=tool_args if isinstance(tool_args, dict) else {},
             ))
@@ -245,11 +257,13 @@ class Copex:
     ) -> None:
         tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
         partial = getattr(event.data, "partial_output", None)
+        tool_id = self._extract_tool_id(event.data)
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
         if on_chunk and partial:
             on_chunk(StreamChunk(
                 type="tool_result",
+                tool_id=str(tool_id) if tool_id else None,
                 tool_name=str(tool_name) if tool_name else "unknown",
                 tool_result=str(partial),
             ))
@@ -267,12 +281,14 @@ class Copex:
             result_text = getattr(result_obj, "content", "") or str(result_obj)
         success = getattr(event.data, "success", None)
         duration = getattr(event.data, "duration", None)
+        tool_id = self._extract_tool_id(event.data)
         state.pending_tools = max(0, state.pending_tools - 1)
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
         if on_chunk:
             on_chunk(StreamChunk(
                 type="tool_result",
+                tool_id=str(tool_id) if tool_id else None,
                 tool_name=str(tool_name) if tool_name else "unknown",
                 tool_result=result_text,
                 tool_success=success,
@@ -293,6 +309,7 @@ class Copex:
         data = event.data
         tool_name = getattr(data, "name", None) or getattr(data, "tool", None) or "unknown"
         tool_args = getattr(data, "arguments", None) or getattr(data, "args", {})
+        tool_id = self._extract_tool_id(data)
         state.awaiting_post_tool_response = True
         if isinstance(tool_args, str):
             import json
@@ -303,6 +320,7 @@ class Copex:
         if on_chunk:
             on_chunk(StreamChunk(
                 type="tool_call",
+                tool_id=str(tool_id) if tool_id else None,
                 tool_name=str(tool_name),
                 tool_args=tool_args if isinstance(tool_args, dict) else {},
             ))
@@ -367,6 +385,8 @@ class Copex:
             payload["skillDirectories"] = opts["skill_directories"]
         if opts.get("disabled_skills"):
             payload["disabledSkills"] = opts["disabled_skills"]
+        if opts.get("skills"):
+            payload["skills"] = opts["skills"]
         if opts.get("instructions"):
             # Instructions go into system message
             if "systemMessage" not in payload:
@@ -374,7 +394,7 @@ class Copex:
             elif isinstance(payload["systemMessage"], dict):
                 existing = payload["systemMessage"].get("content", "")
                 payload["systemMessage"]["content"] = f"{existing}\n\n{opts['instructions']}" if existing else opts["instructions"]
-        
+
         # Call the JSON-RPC directly, bypassing the SDK's create_session
         response = await self._client._client.request("session.create", payload)
         

@@ -982,7 +982,7 @@ class TuiApp:
         
         # Welcome message
         from copex.ui import print_welcome
-        print_welcome(self.console, self._config.model.value)
+        print_welcome(self.console, self._config.model.value, self._config.reasoning_effort.value)
         
         async def spinner_loop() -> None:
             while self._running:

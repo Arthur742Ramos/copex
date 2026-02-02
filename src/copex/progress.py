@@ -182,11 +182,13 @@ class ProgressReporter:
         """Mark an item as completed."""
         item = self._get_item(id)
         if item:
+            prev_status = item.status
             item.status = ProgressStatus.COMPLETED
             item.completed_at = time.time()
             if message:
                 item.metadata["message"] = message
-            if item.status == ProgressStatus.RUNNING:
+            # Only decrement running if it was previously RUNNING
+            if prev_status == ProgressStatus.RUNNING:
                 self.state.running = max(0, self.state.running - 1)
             self.state.completed += 1
             self._update()
@@ -195,10 +197,12 @@ class ProgressReporter:
         """Mark an item as failed."""
         item = self._get_item(id)
         if item:
+            prev_status = item.status
             item.status = ProgressStatus.FAILED
             item.completed_at = time.time()
             item.error = error
-            if item.status == ProgressStatus.RUNNING:
+            # Only decrement running if it was previously RUNNING
+            if prev_status == ProgressStatus.RUNNING:
                 self.state.running = max(0, self.state.running - 1)
             self.state.failed += 1
             self._update()

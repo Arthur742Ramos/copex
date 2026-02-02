@@ -173,7 +173,8 @@ class ActivityType(str, Enum):
 @dataclass
 class ToolCallInfo:
     """Information about a tool call."""
-    name: str
+    tool_id: str = field(default_factory=lambda: "")
+    name: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
     result: str | None = None
     status: str = "running"  # running, success, error
@@ -728,14 +729,24 @@ class CopexUI:
         self.state.activity = ActivityType.TOOL_CALL
         self._touch()
 
-    def update_tool_call(self, name: str, status: str, result: str | None = None, duration: float | None = None) -> None:
-        """Update a tool call status."""
-        for tool in reversed(self.state.tool_calls):
-            if tool.name == name and tool.status == "running":
-                tool.status = status
-                tool.result = result
-                tool.duration = duration
-                break
+    def update_tool_call(self, tool_id: str | None, name: str, status: str, result: str | None = None, duration: float | None = None) -> None:
+        """Update a tool call status by tool_id (preferred) or by name as fallback."""
+        updated = False
+        if tool_id:
+            for tool in reversed(self.state.tool_calls):
+                if getattr(tool, 'tool_id', None) == tool_id and tool.status == "running":
+                    tool.status = status
+                    tool.result = result
+                    tool.duration = duration
+                    updated = True
+                    break
+        if not updated:
+            for tool in reversed(self.state.tool_calls):
+                if tool.name == name and tool.status == "running":
+                    tool.status = status
+                    tool.result = result
+                    tool.duration = duration
+                    break
         if self.state.activity == ActivityType.TOOL_CALL:
             running_tools = any(tool.status == "running" for tool in self.state.tool_calls)
             if not running_tools:

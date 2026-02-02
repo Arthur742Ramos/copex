@@ -255,7 +255,10 @@ class CopexConfig(BaseModel):
     @classmethod
     def from_file(cls, path: str | Path) -> "CopexConfig":
         """Load configuration from TOML file."""
-        import tomllib
+        try:
+            import tomllib  # Python 3.11+
+        except Exception:
+            import tomli as tomllib  # type: ignore
 
         path = Path(path)
         if not path.exists():

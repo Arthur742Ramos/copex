@@ -21,6 +21,7 @@ from rich.panel import Panel
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig, load_last_model, save_last_model
 from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
+from copex import __version__
 
 # Effective default: last used model or claude-opus-4.5
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
@@ -45,10 +46,6 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 console = Console()
-
-# Version for --version flag
-__version__ = "0.11.0"
-
 
 def version_callback(value: bool) -> None:
     """Print version and exit."""
@@ -296,11 +293,15 @@ def chat(
     ] = None,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors."""
-    # Load config
+    # Load config: explicit flag wins; otherwise auto-load from ~/.config/copex/config.toml if present
     if config_file and config_file.exists():
         config = CopexConfig.from_file(config_file)
     else:
-        config = CopexConfig()
+        default_path = CopexConfig.default_path()
+        if default_path.exists():
+            config = CopexConfig.from_file(default_path)
+        else:
+            config = CopexConfig()
 
     # Override with CLI options
     effective_model = model or _DEFAULT_MODEL.value
@@ -404,6 +405,7 @@ async def _stream_response(
                     ui.add_reasoning(chunk.delta)
         elif chunk.type == "tool_call":
             tool = ToolCallInfo(
+                tool_id=chunk.tool_id or "",
                 name=chunk.tool_name or "unknown",
                 arguments=chunk.tool_args or {},
                 status="running",
@@ -412,6 +414,7 @@ async def _stream_response(
         elif chunk.type == "tool_result":
             status = "success" if chunk.tool_success is not False else "error"
             ui.update_tool_call(
+                chunk.tool_id,
                 chunk.tool_name or "unknown",
                 status,
                 result=chunk.tool_result,
@@ -789,6 +792,7 @@ async def _stream_response_interactive(
                 ui.add_reasoning(chunk.delta)
         elif chunk.type == "tool_call":
             tool = ToolCallInfo(
+                tool_id=chunk.tool_id or "",
                 name=chunk.tool_name or "unknown",
                 arguments=chunk.tool_args or {},
                 status="running",
@@ -797,6 +801,7 @@ async def _stream_response_interactive(
         elif chunk.type == "tool_result":
             status = "success" if chunk.tool_success is not False else "error"
             ui.update_tool_call(
+                chunk.tool_id,
                 chunk.tool_name or "unknown",
                 status,
                 result=chunk.tool_result,
