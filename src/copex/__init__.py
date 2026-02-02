@@ -1,6 +1,6 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
-__version__ = "0.12.1"
+__version__ = "1.0.2"
 
 # Re-export core components for convenience
 from .client import Copex

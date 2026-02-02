@@ -68,20 +68,22 @@ class ToolCallState:
     @property
     def icon(self) -> str:
         """Get appropriate icon for the tool."""
+        from copex.ui import Icons
+
         name_lower = self.name.lower()
         if "read" in name_lower or "view" in name_lower:
-            return "📖"
+            return Icons.FILE_READ
         elif "write" in name_lower or "edit" in name_lower:
-            return "📝"
+            return Icons.FILE_WRITE
         elif "create" in name_lower:
-            return "📄"
+            return Icons.FILE_CREATE
         elif "search" in name_lower or "grep" in name_lower or "glob" in name_lower:
-            return "🔍"
+            return Icons.SEARCH
         elif "shell" in name_lower or "bash" in name_lower:
-            return "💻"
+            return Icons.TERMINAL
         elif "web" in name_lower or "fetch" in name_lower:
-            return "🌐"
-        return "⚡"
+            return Icons.GLOBE
+        return Icons.TOOL
 
     @property
     def summary(self) -> str:
@@ -89,8 +91,11 @@ class ToolCallState:
         status_icon = (
             "⏳" if self.status == "running" else ("✓" if self.status == "success" else "✗")
         )
+        status_label = "Running" if self.status == "running" else (
+            "OK" if self.status == "success" else "Failed"
+        )
         duration = f" ({self.elapsed:.1f}s)" if self.elapsed else ""
-        return f"{status_icon} {self.icon} {self.name}{duration}"
+        return f"{status_icon} {self.icon} {self.name} • {status_label}{duration}"
 
 
 @dataclass
@@ -177,10 +182,10 @@ class SessionState:
         minutes = int(duration // 60)
         seconds = int(duration % 60)
         if minutes < 60:
-            return f"{minutes}m {seconds}s"
+            return f"{minutes}m {seconds:02d}s"
         hours = minutes // 60
         minutes = minutes % 60
-        return f"{hours}h {minutes}m"
+        return f"{hours}h {minutes:02d}m"
 
     @property
     def model_label(self) -> str:
