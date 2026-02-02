@@ -2,16 +2,14 @@
 
 import io
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # NOTE: Avoid __future__.annotations for standalone import in tests (Python 3.14
 # dataclasses resolves string annotations via sys.modules).
-
 from rich.box import ROUNDED
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
@@ -36,6 +34,7 @@ def __getattr__(name: str):
     if name == "Theme":
         return _get_ui()[1]
     raise AttributeError(name)
+
 
 __all__ = [
     "RenderConfig",
@@ -62,6 +61,7 @@ __all__ = [
 @dataclass
 class RenderConfig:
     """Configuration for rendering."""
+
     width: int | None = None
     show_reasoning: bool = True
     show_tools: bool = True
@@ -77,7 +77,7 @@ def render_to_ansi(
 ) -> str:
     """
     Render a Rich renderable to ANSI escape codes.
-    
+
     This is useful for prompt_toolkit integration where we need
     ANSI-formatted strings.
     """
@@ -139,26 +139,30 @@ def render_status_bar(
     if cost is None:
         parts.append(Text("$—", style=Theme.MUTED))
     else:
-        cost_style = Theme.SUCCESS if cost < 0.10 else (Theme.WARNING if cost < 1.0 else Theme.ERROR)
+        cost_style = (
+            Theme.SUCCESS if cost < 0.10 else (Theme.WARNING if cost < 1.0 else Theme.ERROR)
+        )
         parts.append(Text(f"${cost:.4f}", style=cost_style))
 
     # Activity indicator (right side with spinner)
     if is_streaming:
         spinner = render_spinner(spinner_frame, style="pulse")
-        activity_style = Theme.PRIMARY if activity == "responding" else (
-            Theme.ACCENT if activity == "reasoning" else Theme.WARNING
+        activity_style = (
+            Theme.PRIMARY
+            if activity == "responding"
+            else (Theme.ACCENT if activity == "reasoning" else Theme.WARNING)
         )
         parts.append(Text(f"  {spinner} ", style=f"bold {activity_style}"))
         parts.append(Text(activity, style=activity_style))
     else:
         parts.append(Text(f"  {Icons.DONE} ", style=Theme.SUCCESS))
         parts.append(Text("ready", style=Theme.MUTED))
-    
+
     # Build full bar
     result = Text()
     for part in parts:
         result.append_text(part)
-    
+
     return render_to_ansi(result, width=width)
 
 
@@ -229,16 +233,20 @@ def render_tool_call_collapsed(
 
     # Status label for quick scan
     status_label = "Running" if status == "running" else ("OK" if status == "success" else "Failed")
-    status_style = Theme.WARNING if status == "running" else (Theme.SUCCESS if status == "success" else Theme.ERROR)
+    status_style = (
+        Theme.WARNING
+        if status == "running"
+        else (Theme.SUCCESS if status == "success" else Theme.ERROR)
+    )
     text.append(f"  {status_label}", style=status_style)
 
     # Expand hint (subtle chevron)
     text.append("  ▸", style=Theme.MUTED)
-    
+
     # Selection indicator
     if is_selected:
         text.stylize("reverse")
-    
+
     return text
 
 
@@ -253,7 +261,7 @@ def render_tool_call_expanded(
     """Render an expanded tool call with details."""
     Icons, Theme = _get_ui()
     elements = []
-    
+
     # Header
     header = Text()
     if status == "running":
@@ -268,30 +276,34 @@ def render_tool_call_expanded(
         header.append(f" ({duration:.1f}s)", style=Theme.MUTED)
     elif status == "running":
         header.append(" (in progress)", style=Theme.MUTED)
-    header_status = "Running" if status == "running" else ("OK" if status == "success" else "Failed")
+    header_status = (
+        "Running" if status == "running" else ("OK" if status == "success" else "Failed")
+    )
     header.append(
         f" • {header_status}",
-        style=Theme.WARNING if status == "running" else (Theme.SUCCESS if status == "success" else Theme.ERROR),
+        style=Theme.WARNING
+        if status == "running"
+        else (Theme.SUCCESS if status == "success" else Theme.ERROR),
     )
     elements.append(header)
-    
+
     # Arguments
     elements.append(Text("Arguments", style=Theme.SUBHEADER))
     if arguments:
         args_table = Table(show_header=False, box=None, padding=(0, 1))
         args_table.add_column("Key", style=Theme.MUTED)
         args_table.add_column("Value", style=Theme.MESSAGE, overflow="fold")
-        
+
         for key, value in arguments.items():
             val_str = str(value)
             if len(val_str) > 80:
                 val_str = val_str[:77] + "..."
             args_table.add_row(key, val_str)
-        
+
         elements.append(args_table)
     else:
         elements.append(Text("No arguments.", style=Theme.MUTED))
-    
+
     # Result
     elements.append(Text())
     elements.append(Text("Output", style=Theme.SUBHEADER))
@@ -300,7 +312,7 @@ def render_tool_call_expanded(
         result_display = result
         if len(result) > 500:
             result_display = result[:500] + f"\n... ({len(result) - 500} more chars)"
-        
+
         elements.append(Text(result_display, style=Theme.MUTED))
     else:
         if status == "running":
@@ -313,7 +325,7 @@ def render_tool_call_expanded(
     if status == "error" and result:
         elements.append(Text())
         elements.append(Text("Check logs for details.", style=Theme.ERROR))
-    
+
     if status == "running":
         border_style = Theme.BORDER_ACTIVE
     elif status == "success":
@@ -343,7 +355,7 @@ def render_palette(
     """Render the command palette as ANSI text."""
     Icons, Theme = _get_ui()
     elements = []
-    
+
     # Header with search box
     header = Text()
     header.append(f" {Icons.SEARCH} ", style=Theme.PRIMARY)
@@ -355,7 +367,7 @@ def render_palette(
     header.append(f"{len(commands)} results", style=Theme.MUTED if commands else Theme.MUTED)
     elements.append(header)
     elements.append(Text())
-    
+
     # Command list
     if not commands:
         elements.append(Text("  No matching commands", style=Theme.MUTED))
@@ -370,7 +382,9 @@ def render_palette(
                 line.append("   ", style=Theme.MUTED)
 
             # Label
-            label_style = f"bold {Theme.PRIMARY}" if i == selected_index else f"bold {Theme.MESSAGE}"
+            label_style = (
+                f"bold {Theme.PRIMARY}" if i == selected_index else f"bold {Theme.MESSAGE}"
+            )
             line.append(label, style=label_style)
 
             # Description
@@ -379,7 +393,7 @@ def render_palette(
             line.append(description, style=desc_style)
 
             elements.append(line)
-    
+
     # Help text
     elements.append(Text())
     help_text = Text()
@@ -392,7 +406,7 @@ def render_palette(
     help_text.append("Esc", style="bold")
     help_text.append(" close", style=Theme.MUTED)
     elements.append(help_text)
-    
+
     panel = Panel(
         Group(*elements),
         title=f"[{Theme.PRIMARY}]Command Palette[/{Theme.PRIMARY}]",
@@ -402,7 +416,7 @@ def render_palette(
         box=ROUNDED,
         width=min(width or 80, 80),
     )
-    
+
     return render_to_ansi(panel, width=width)
 
 
@@ -422,7 +436,11 @@ def render_reasoning_collapsed(
 def render_reasoning_expanded(reasoning: str) -> Panel:
     """Render expanded reasoning panel."""
     Icons, Theme = _get_ui()
-    content = Markdown(reasoning) if reasoning.strip() else Text("No reasoning provided.", style=Theme.MUTED)
+    content = (
+        Markdown(reasoning)
+        if reasoning.strip()
+        else Text("No reasoning provided.", style=Theme.MUTED)
+    )
     return Panel(
         content,
         title=f"[{Theme.ACCENT}]▾ {Icons.BRAIN} Reasoning[/{Theme.ACCENT}]",
@@ -451,7 +469,7 @@ def render_message(content: str, is_streaming: bool = False, spinner_frame: int 
         renderable = Markdown(content)
         title_icon = Icons.ROBOT
         border = Theme.BORDER
-    
+
     title_prefix = "▾ " if not is_streaming else ""
     return Panel(
         renderable,
@@ -467,14 +485,14 @@ def render_prompt_prefix(model: str, is_multiline: bool = False) -> str:
     """Render the prompt prefix with elegant styling."""
     Icons, Theme = _get_ui()
     text = Text()
-    
+
     # Use a clean arrow with subtle styling
     if is_multiline:
         text.append("  ", style=Theme.MUTED)
         text.append("┃ ", style=Theme.BORDER)
     else:
         text.append(f"{Icons.ARROW_RIGHT} ", style=f"bold {Theme.SUCCESS}")
-    
+
     return render_to_ansi(text)
 
 
@@ -482,7 +500,7 @@ def render_continuation_prefix(line_number: int) -> str:
     """Render the continuation prefix for multiline input."""
     Icons, Theme = _get_ui()
     text = Text()
-    text.append(f"   ... ", style=Theme.MUTED)
+    text.append("   ... ", style=Theme.MUTED)
     return render_to_ansi(text)
 
 
@@ -498,11 +516,11 @@ def render_help_panel(shortcuts: list[tuple[str, str, str]]) -> str:
     table.add_column("Shortcut", style="bold")
     table.add_column("Action", style=Theme.MESSAGE)
     table.add_column("Context", style=Theme.MUTED)
-    
+
     for shortcut, description, context in shortcuts:
         context_label = "all" if context == "always" else context
         table.add_row(shortcut, description, context_label)
-    
+
     panel = Panel(
         table,
         title=f"[{Theme.PRIMARY}]⌨️ Keyboard Shortcuts[/{Theme.PRIMARY}]",
@@ -511,7 +529,7 @@ def render_help_panel(shortcuts: list[tuple[str, str, str]]) -> str:
         padding=(0, 1),
         box=ROUNDED,
     )
-    
+
     return render_to_ansi(panel)
 
 
@@ -526,36 +544,36 @@ def render_stash_indicator(count: int, current_index: int) -> Text:
 
 class Spinners:
     """Collection of spinner styles for different contexts."""
-    
+
     # Braille dots - smooth, default for most contexts
     BRAILLE = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    
+
     # Bouncing dots - good for loading
     DOTS = ["⠁", "⠂", "⠄", "⡀", "⢀", "⠠", "⠐", "⠈"]
-    
+
     # Moon phases - elegant for long waits
     MOON = ["🌑", "🌒", "🌓", "🌔", "🌕", "🌖", "🌗", "🌘"]
-    
+
     # Simple line - minimal
     LINE = ["⎯", "\\", "|", "/"]
-    
+
     # Growing bar - good for progress-like activity
     BAR = ["▏", "▎", "▍", "▌", "▋", "▊", "▉", "█", "▉", "▊", "▋", "▌", "▍", "▎"]
-    
+
     # Pulse dot - clean and modern
     PULSE = ["○", "◔", "◑", "◕", "●", "◕", "◑", "◔"]
-    
+
     # Arc spinner - professional look
     ARC = ["◜", "◠", "◝", "◞", "◡", "◟"]
 
 
 def render_spinner(frame: int, style: str = "braille") -> str:
     """Get a spinner frame.
-    
+
     Args:
         frame: Current frame number
         style: Spinner style (braille, dots, moon, line, bar, pulse, arc)
-    
+
     Returns:
         Single character for the spinner frame
     """
@@ -580,7 +598,7 @@ def render_welcome_banner(
 ) -> str:
     """Render a stylish welcome banner for the TUI."""
     Icons, Theme = _get_ui()
-    
+
     # ASCII art logo - compact and elegant
     logo_lines = [
         "┌─────────────────────────────────────┐",
@@ -593,9 +611,9 @@ def render_welcome_banner(
         "│          Copilot Extended           │",
         "└─────────────────────────────────────┘",
     ]
-    
+
     elements = []
-    
+
     # Logo with gradient effect (top to bottom: primary -> accent)
     for i, line in enumerate(logo_lines):
         # Gradient from primary to accent
@@ -607,9 +625,9 @@ def render_welcome_banner(
             style = Theme.MUTED
         elements.append(Text(line, style=style))
         elements.append(Text("\n"))
-    
+
     elements.append(Text("\n"))
-    
+
     # Status info in a clean table format
     info = Text()
     info.append(f"  {Icons.ROBOT} ", style=Theme.PRIMARY)
@@ -622,7 +640,7 @@ def render_welcome_banner(
         info.append(f"  v{version}", style=Theme.MUTED)
     elements.append(info)
     elements.append(Text("\n\n"))
-    
+
     # Quick help
     help_text = Text()
     help_text.append("  ", style="")
@@ -635,9 +653,9 @@ def render_welcome_banner(
     help_text.append("Ctrl+D", style="bold")
     help_text.append(" exit", style=Theme.MUTED)
     elements.append(help_text)
-    
+
     result = Text()
     for elem in elements:
         result.append_text(elem)
-    
+
     return render_to_ansi(result, width=width)

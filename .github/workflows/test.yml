@@ -9,7 +9,11 @@ on:
 jobs:
   test:
     runs-on: ${{ matrix.os }}
+    # NOTE: Windows hosted runners occasionally fail to be acquired (GitHub infra).
+    # We still run the job when available, but don't block releases when runners are unavailable.
+    continue-on-error: ${{ matrix.os == 'windows-latest' }}
     strategy:
+      fail-fast: false
       matrix:
         os: [ubuntu-latest, windows-latest, macos-latest]
         python-version: ["3.10", "3.11", "3.12"]

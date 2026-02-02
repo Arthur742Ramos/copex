@@ -91,8 +91,10 @@ class ToolCallState:
         status_icon = (
             "⏳" if self.status == "running" else ("✓" if self.status == "success" else "✗")
         )
-        status_label = "Running" if self.status == "running" else (
-            "OK" if self.status == "success" else "Failed"
+        status_label = (
+            "Running"
+            if self.status == "running"
+            else ("OK" if self.status == "success" else "Failed")
         )
         duration = f" ({self.elapsed:.1f}s)" if self.elapsed else ""
         return f"{status_icon} {self.icon} {self.name} • {status_label}{duration}"

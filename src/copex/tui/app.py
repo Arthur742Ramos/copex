@@ -7,21 +7,19 @@ import json
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
-from prompt_toolkit import PromptSession
 from prompt_toolkit.application import Application
 from prompt_toolkit.buffer import Buffer
 from prompt_toolkit.filters import Condition
-from prompt_toolkit.formatted_text import ANSI, FormattedText, HTML
-from prompt_toolkit.key_binding import KeyBindings, merge_key_bindings
+from prompt_toolkit.formatted_text import ANSI, FormattedText
+from prompt_toolkit.key_binding import KeyBindings
 from prompt_toolkit.layout import Layout
 from prompt_toolkit.layout.containers import (
     ConditionalContainer,
     Float,
     FloatContainer,
     HSplit,
-    VSplit,
     Window,
 )
 from prompt_toolkit.layout.controls import BufferControl, FormattedTextControl
@@ -34,87 +32,81 @@ from .keymap import Action, KeymapManager
 from .palette import CommandCategory, CommandPalette, PaletteCommand
 from .render import (
     render_message,
-    render_palette,
-    render_spinner,
-    render_status_bar,
-    render_to_ansi,
+    render_prompt_prefix,
     render_reasoning_expanded,
+    render_spinner,
+    render_to_ansi,
     render_tool_call_collapsed,
     render_tool_call_expanded,
 )
-from .state import PanelState, SessionState, ToolCallState, TuiMode, TuiState
+from .state import SessionState, ToolCallState, TuiMode, TuiState
 
 # Conditional imports - these are only needed at runtime
 if TYPE_CHECKING:
-    from copex.client import Copex, StreamChunk
-    from copex.config import CopexConfig
-    from copex.metrics import MetricsCollector
+    pass
 
 
 # Styles for prompt_toolkit
-TUI_STYLE = Style.from_dict({
-    # Input area
-    "prompt": "bold fg:#9ece6a",
-    "continuation": "fg:#6b7280",
-    
-    # Status bar
-    "status": "bg:#1f2430 fg:#e6e6e6",
-    "status.model": "bold fg:#7dcfff",
-    "status.reasoning": "fg:#bb9af7",
-    "status.tokens": "fg:#7aa2f7",
-    "status.duration": "fg:#89b4fa",
-    "status.activity": "fg:#e0af68",
-    "status.sep": "fg:#3b4252",
-    "status.dim": "fg:#9aa4b2",
-    "status.divider": "fg:#1f2937",
-    "status.last": "fg:#a5b4fc",
-    "status.ready": "fg:#8ab4f8",
-    "status.active": "fg:#e0af68 bold",
-    "status.kpi": "fg:#cbd5f5",
-    "status.kpi.dim": "fg:#94a3b8",
-    "status.label": "fg:#94a3b8",
-    "status.metric": "fg:#cbd5f5",
-    
-    # Palette
-    "palette": "bg:#0f172a fg:#e5e7eb",
-    "palette.item": "fg:#e5e7eb",
-    "palette.selected": "bg:#1d4ed8 fg:#f8fafc bold",
-    "palette.description": "fg:#9ca3af",
-    "palette.description.selected": "bg:#1d4ed8 fg:#e2e8f0",
-    "palette.shortcut": "fg:#a78bfa",
-    "palette.meta": "fg:#60a5fa",
-    "palette.no_results": "fg:#94a3b8 italic",
-    "palette.meta.selected": "bg:#1d4ed8 fg:#c7d2fe",
-    "palette.shortcut.selected": "bg:#1d4ed8 fg:#e9d5ff",
-    "palette.border": "fg:#1f2937",
-    "palette.info": "fg:#94a3b8",
-    "palette.query": "bold fg:#f8fafc",
-    "palette.query.placeholder": "fg:#94a3b8 italic",
-    "palette.icon": "fg:#93c5fd",
-    "palette.icon.selected": "bg:#1d4ed8 fg:#dbeafe",
-    "palette.more": "fg:#64748b",
-    
-    # Messages
-    "user": "bold fg:ansigreen",
-    "assistant": "fg:ansiwhite",
-    "reasoning": "italic fg:ansigray",
-    "tool": "fg:ansiyellow",
-    
-    # Stash indicator
-    "stash": "fg:#60a5fa",
-    
-    # Input hint
-    "input_hint": "fg:#9ca3af italic",
-    "input_hint.key": "bold fg:#e2e8f0",
-    "input_hint.sep": "fg:#4b5563",
-})
+TUI_STYLE = Style.from_dict(
+    {
+        # Input area
+        "prompt": "bold fg:#9ece6a",
+        "continuation": "fg:#6b7280",
+        # Status bar
+        "status": "bg:#1f2430 fg:#e6e6e6",
+        "status.model": "bold fg:#7dcfff",
+        "status.reasoning": "fg:#bb9af7",
+        "status.tokens": "fg:#7aa2f7",
+        "status.duration": "fg:#89b4fa",
+        "status.activity": "fg:#e0af68",
+        "status.sep": "fg:#3b4252",
+        "status.dim": "fg:#9aa4b2",
+        "status.divider": "fg:#1f2937",
+        "status.last": "fg:#a5b4fc",
+        "status.ready": "fg:#8ab4f8",
+        "status.active": "fg:#e0af68 bold",
+        "status.kpi": "fg:#cbd5f5",
+        "status.kpi.dim": "fg:#94a3b8",
+        "status.label": "fg:#94a3b8",
+        "status.metric": "fg:#cbd5f5",
+        # Palette
+        "palette": "bg:#0f172a fg:#e5e7eb",
+        "palette.item": "fg:#e5e7eb",
+        "palette.selected": "bg:#1d4ed8 fg:#f8fafc bold",
+        "palette.description": "fg:#9ca3af",
+        "palette.description.selected": "bg:#1d4ed8 fg:#e2e8f0",
+        "palette.shortcut": "fg:#a78bfa",
+        "palette.meta": "fg:#60a5fa",
+        "palette.no_results": "fg:#94a3b8 italic",
+        "palette.meta.selected": "bg:#1d4ed8 fg:#c7d2fe",
+        "palette.shortcut.selected": "bg:#1d4ed8 fg:#e9d5ff",
+        "palette.border": "fg:#1f2937",
+        "palette.info": "fg:#94a3b8",
+        "palette.query": "bold fg:#f8fafc",
+        "palette.query.placeholder": "fg:#94a3b8 italic",
+        "palette.icon": "fg:#93c5fd",
+        "palette.icon.selected": "bg:#1d4ed8 fg:#dbeafe",
+        "palette.more": "fg:#64748b",
+        # Messages
+        "user": "bold fg:ansigreen",
+        "assistant": "fg:ansiwhite",
+        "reasoning": "italic fg:ansigray",
+        "tool": "fg:ansiyellow",
+        # Stash indicator
+        "stash": "fg:#60a5fa",
+        # Input hint
+        "input_hint": "fg:#9ca3af italic",
+        "input_hint.key": "bold fg:#e2e8f0",
+        "input_hint.sep": "fg:#4b5563",
+    }
+)
 
 
 @dataclass
 class TuiApp:
     """
     Main TUI Application for Copex.
-    
+
     Integrates:
     - prompt_toolkit for input handling
     - Rich for rendering
@@ -122,40 +114,40 @@ class TuiApp:
     - Command palette
     - History and stash
     """
-    
+
     # Core components (always available)
     state: TuiState = field(default_factory=TuiState)
     palette: CommandPalette = field(default_factory=CommandPalette)
     keymap: KeymapManager = field(default_factory=KeymapManager)
     history_manager: CombinedHistoryManager = field(default_factory=CombinedHistoryManager)
-    
+
     # Rich console for rendering
     console: Console = field(default_factory=Console)
-    
+
     # Internal state
     _running: bool = False
     _spinner_frame: int = 0
     _last_render: float = 0.0
     _app: Application | None = None
     _input_buffer: Buffer | None = None
-    
+
     # These will be set in run() - they require copex imports
     _config: Any = None
     _client: Any = None
     _metrics: Any = None
     _current_send_task: asyncio.Task[None] | None = None
-    
+
     def __post_init__(self) -> None:
         """Initialize components after dataclass creation."""
         # Register keymap handlers
         self._register_handlers()
-        
+
         # Register palette actions
         self._register_palette_actions()
-        
+
         # Set up state change callback
         self.state.on_state_change = self._on_state_change
-    
+
     def _register_handlers(self) -> None:
         """Register action handlers."""
         handlers = {
@@ -181,10 +173,10 @@ class TuiApp:
             Action.REASONING_PICKER: self._handle_reasoning_picker,
             Action.EXIT: self._handle_exit,
         }
-        
+
         for action, handler in handlers.items():
             self.keymap.register_handler(action, handler)
-    
+
     def _register_palette_actions(self) -> None:
         """Register actions for palette commands."""
         actions = {
@@ -199,43 +191,43 @@ class TuiApp:
             "help:shortcuts": self._handle_show_shortcuts,
             "help:about": self._handle_show_about,
         }
-        
+
         for cmd_id, action in actions.items():
             self.palette.set_action(cmd_id, action)
-    
+
     def _on_state_change(self) -> None:
         """Called when state changes."""
         if self._app:
             self._app.invalidate()
-    
+
     # =========================================================================
     # Action Handlers
     # =========================================================================
-    
+
     def _handle_send(self) -> None:
         """Handle send action."""
         if not self._input_buffer:
             return
-        
+
         text = self._input_buffer.text.strip()
         if not text:
             return
-        
+
         # Add to history
         self.history_manager.add_to_history(text, model=self.state.session.model_label)
-        
+
         # Clear input
         self._input_buffer.reset()
-        
+
         # Send message (will be handled by main loop)
         self.state.input_buffer = text
         self.state.notify_change()
-    
+
     def _handle_newline(self) -> None:
         """Insert a newline in the input."""
         if self._input_buffer:
             self._input_buffer.insert_text("\n")
-    
+
     def _handle_cancel(self) -> None:
         """Handle cancel action."""
         if self.state.mode == TuiMode.PALETTE:
@@ -259,62 +251,62 @@ class TuiApp:
             self.state.session.current_activity = "cancelled"
             self._show_notification("Request cancelled")
             self.state.notify_change()
-    
+
     def _handle_clear_input(self) -> None:
         """Clear the input buffer."""
         if self._input_buffer:
             self._input_buffer.reset()
-    
+
     def _handle_history_prev(self) -> None:
         """Navigate to previous history."""
         if not self._input_buffer:
             return
-        
+
         prev = self.history_manager.history_up(self._input_buffer.text)
         if prev is not None:
             self._input_buffer.document = self._input_buffer.document.__class__(prev)
-    
+
     def _handle_history_next(self) -> None:
         """Navigate to next history."""
         if not self._input_buffer:
             return
-        
+
         next_text = self.history_manager.history_down(self._input_buffer.text)
         if next_text is not None:
             self._input_buffer.document = self._input_buffer.document.__class__(next_text)
-    
+
     def _handle_open_palette(self) -> None:
         """Open the command palette."""
         self.palette.reset()
         self.state.open_palette()
-    
+
     def _handle_close_palette(self) -> None:
         """Close the command palette."""
         self.palette.reset()
         self.state.close_palette()
-    
+
     def _handle_palette_up(self) -> None:
         """Move palette selection up."""
         if self.state.mode == TuiMode.PALETTE:
             results = self.palette.search(self.state.palette_query)
             self.state.move_palette_selection(-1, max_index=len(results) - 1)
-    
+
     def _handle_palette_down(self) -> None:
         """Move palette selection down."""
         if self.state.mode == TuiMode.PALETTE:
             results = self.palette.search(self.state.palette_query)
             self.state.move_palette_selection(1, max_index=len(results) - 1)
-    
+
     def _handle_palette_select(self) -> None:
         """Select current palette item."""
         if self.state.mode != TuiMode.PALETTE:
             return
-        
+
         results = self.palette.search(self.state.palette_query)
         if results and 0 <= self.state.palette_selected < len(results):
             cmd, _ = results[self.state.palette_selected]
             self._execute_palette_command(cmd)
-    
+
     def _execute_palette_command(self, cmd: PaletteCommand) -> None:
         """Execute a palette command."""
         if cmd.action:
@@ -349,55 +341,51 @@ class TuiApp:
                 except Exception:
                     self.state.session.reasoning_effort = cmd.value
             self.state.close_palette()
-    
+
     def _handle_stash_save(self) -> None:
         """Save current input to stash."""
         if not self._input_buffer:
             return
-        
+
         text = self._input_buffer.text
         cursor_pos = self._input_buffer.cursor_position
-        
+
         if self.history_manager.stash_draft(text, cursor_pos):
             self._input_buffer.reset()
             self._show_notification("Draft saved to stash")
-    
+
     def _handle_stash_restore(self) -> None:
         """Restore from stash."""
         result = self.history_manager.restore_draft()
         if result and self._input_buffer:
             content, cursor_pos = result
-            self._input_buffer.document = self._input_buffer.document.__class__(
-                content, cursor_pos
-            )
+            self._input_buffer.document = self._input_buffer.document.__class__(content, cursor_pos)
             self._show_notification("Draft restored from stash")
-    
+
     def _handle_stash_cycle(self) -> None:
         """Cycle through stash."""
         result = self.history_manager.cycle_stash()
         if result and self._input_buffer:
             content, cursor_pos = result
-            self._input_buffer.document = self._input_buffer.document.__class__(
-                content, cursor_pos
-            )
-    
+            self._input_buffer.document = self._input_buffer.document.__class__(content, cursor_pos)
+
     def _handle_toggle_reasoning(self) -> None:
         """Toggle reasoning panel visibility."""
         self.state.show_reasoning = not self.state.show_reasoning
         self.state.notify_change()
-    
+
     def _handle_toggle_tools(self) -> None:
         """Toggle tool calls expansion."""
         if self.state.expand_all_tools:
             self.state.collapse_all_tool_calls()
         else:
             self.state.expand_all_tool_calls()
-    
+
     def _handle_toggle_statusbar(self) -> None:
         """Toggle status bar visibility."""
         self.state.show_status_bar = not self.state.show_status_bar
         self.state.notify_change()
-    
+
     def _handle_new_session(self) -> None:
         """Start a new session."""
         if self._client:
@@ -409,11 +397,11 @@ class TuiApp:
         reasoning = self._config.reasoning_effort if self._config else "xhigh"
         self.state.session = SessionState(model=model, reasoning_effort=reasoning)
         self._show_notification("New session started")
-    
+
     def _handle_clear_screen(self) -> None:
         """Clear the screen."""
         self.console.clear()
-    
+
     def _handle_model_picker(self) -> None:
         """Open the model picker."""
         self.palette.reset()
@@ -426,7 +414,7 @@ class TuiApp:
         else:
             # Fallback to query filter
             self.state.update_palette_query("model")
-    
+
     def _handle_reasoning_picker(self) -> None:
         """Open the reasoning picker."""
         self.palette.reset()
@@ -438,7 +426,7 @@ class TuiApp:
             self.state.update_palette_query("")
         else:
             self.state.update_palette_query("reasoning")
-    
+
     def _handle_exit(self) -> None:
         """Exit the application."""
         if self._input_buffer and self._input_buffer.text.strip():
@@ -448,7 +436,7 @@ class TuiApp:
             self._running = False
             if self._app:
                 self._app.exit()
-    
+
     def _show_notification(self, message: str) -> None:
         """Show a brief notification."""
         # For now, just print - can be enhanced with a toast
@@ -457,12 +445,14 @@ class TuiApp:
     def _handle_show_shortcuts(self) -> None:
         """Show keyboard shortcuts."""
         from .render import render_help_panel
+
         content = render_help_panel(self.keymap.get_help_text())
         self.console.print(content)
 
     def _handle_show_about(self) -> None:
         """Show about info."""
         from copex.cli import __version__
+
         self.console.print(f"[bold]Copex TUI[/bold] v{__version__}")
 
     def _handle_export(self, export_type: str) -> None:
@@ -499,16 +489,16 @@ class TuiApp:
                 self._show_notification(f"Exported metrics to {path}")
             else:
                 self._show_notification("No metrics available")
-    
+
     # =========================================================================
     # Rendering
     # =========================================================================
-    
+
     def _get_status_bar(self) -> FormattedText:
         """Build the status bar content."""
         if not self.state.show_status_bar:
             return FormattedText([])
-        
+
         from copex.ui import Icons
 
         parts: list[tuple[str, str]] = []
@@ -521,11 +511,15 @@ class TuiApp:
         add_sep()
 
         # Reasoning
-        parts.append(("class:status.reasoning", f" {Icons.BRAIN} {self.state.session.reasoning_label} "))
+        parts.append(
+            ("class:status.reasoning", f" {Icons.BRAIN} {self.state.session.reasoning_label} ")
+        )
         add_sep()
 
         # Duration
-        parts.append(("class:status.duration", f" {Icons.CLOCK} {self.state.session.session_duration_str} "))
+        parts.append(
+            ("class:status.duration", f" {Icons.CLOCK} {self.state.session.session_duration_str} ")
+        )
         add_sep()
 
         # Tokens (real counts when available; otherwise show unknown)
@@ -549,7 +543,9 @@ class TuiApp:
         parts.append(("class:status.kpi", f" {self.state.session.request_count} {req_label} "))
         if self.state.session.last_request_duration is not None:
             parts.append(("class:status.kpi.dim", "• "))
-            parts.append(("class:status.last", f"{self.state.session.last_request_duration:.1f}s last "))
+            parts.append(
+                ("class:status.last", f"{self.state.session.last_request_duration:.1f}s last ")
+            )
         elif self.state.session.request_count == 0:
             parts.append(("class:status.label", " • no requests "))
 
@@ -568,7 +564,7 @@ class TuiApp:
             count = self.history_manager.stash_count
             pos = self.history_manager.stash_position + 1
             parts.append(("class:stash", f" 📋 {pos}/{count} "))
-        
+
         return FormattedText(parts)
 
     def _get_input_hint(self) -> FormattedText:
@@ -627,18 +623,19 @@ class TuiApp:
             add_hint("Ctrl+T", tools_label)
             add_hint("Ctrl+G", reasoning_label)
         return FormattedText(parts)
-    
+
     def _get_palette_content(self) -> FormattedText:
         """Build the palette content."""
         if self.state.mode != TuiMode.PALETTE:
             return FormattedText([])
-        
+
         results = self.palette.search(self.state.palette_query)
-        
+
         parts: list[tuple[str, str]] = []
-        
+
         # Search box
         from copex.ui import Icons
+
         category_icons = {
             CommandCategory.MODEL: Icons.ROBOT,
             CommandCategory.REASONING: Icons.BRAIN,
@@ -659,16 +656,20 @@ class TuiApp:
         else:
             parts.append(("class:palette.info", "  0 results"))
         parts.append(("", "\n\n"))
-        
+
         # Results
         max_results = 8
         for i, (cmd, score) in enumerate(results[:max_results]):
             selected = i == self.state.palette_selected
             prefix = "▸" if selected else " "
             label_style = "class:palette.selected" if selected else "class:palette.item"
-            desc_style = "class:palette.description.selected" if selected else "class:palette.description"
+            desc_style = (
+                "class:palette.description.selected" if selected else "class:palette.description"
+            )
             meta_style = "class:palette.meta.selected" if selected else "class:palette.meta"
-            shortcut_style = "class:palette.shortcut.selected" if selected else "class:palette.shortcut"
+            shortcut_style = (
+                "class:palette.shortcut.selected" if selected else "class:palette.shortcut"
+            )
             icon_style = "class:palette.icon.selected" if selected else "class:palette.icon"
             icon = category_icons.get(cmd.category, Icons.INFO)
 
@@ -687,10 +688,10 @@ class TuiApp:
         if len(results) > max_results:
             parts.append(("class:palette.more", f"  … {len(results) - max_results} more"))
             parts.append(("", "\n"))
-        
+
         if not results:
             parts.append(("class:palette.no_results", "  No matching commands\n"))
-        
+
         # Help
         parts.append(("", "\n"))
         parts.append(("class:palette.shortcut", "↑↓"))
@@ -704,7 +705,7 @@ class TuiApp:
         parts.append(("class:palette.description", " close  "))
         parts.append(("class:palette.shortcut", "Ctrl+P"))
         parts.append(("class:palette.description", " toggle"))
-        
+
         return FormattedText(parts)
 
     def _get_main_content(self) -> ANSI:
@@ -782,7 +783,11 @@ class TuiApp:
 
             # Tool calls for the in-flight request
             for tc in self.state.tool_calls:
-                duration = tc.duration if tc.duration is not None else (tc.elapsed if tc.status == "running" else None)
+                duration = (
+                    tc.duration
+                    if tc.duration is not None
+                    else (tc.elapsed if tc.status == "running" else None)
+                )
                 if self.state.expand_all_tools or tc.is_expanded:
                     renderables.append(
                         render_tool_call_expanded(
@@ -815,7 +820,7 @@ class TuiApp:
             renderables.append(empty_text)
 
         return ANSI(render_to_ansi(Group(*renderables)))
-    
+
     def _build_layout(self) -> Layout:
         """Build the prompt_toolkit layout."""
         # Input buffer
@@ -823,7 +828,7 @@ class TuiApp:
             name="input",
             multiline=True,
         )
-        
+
         # Status bar at bottom
         status_bar = ConditionalContainer(
             content=Window(
@@ -842,11 +847,19 @@ class TuiApp:
             ),
             filter=Condition(lambda: self.state.show_status_bar),
         )
-        
+
         # Input area with prompt
         prompt_window = Window(
             content=FormattedTextControl(
-                lambda: ANSI(render_prompt_prefix(self.state.session.model_label, is_multiline=(self.state.mode != TuiMode.PALETTE and bool(self._input_buffer and self._input_buffer.multiline))))
+                lambda: ANSI(
+                    render_prompt_prefix(
+                        self.state.session.model_label,
+                        is_multiline=(
+                            self.state.mode != TuiMode.PALETTE
+                            and bool(self._input_buffer and self._input_buffer.multiline)
+                        ),
+                    )
+                )
             ),
             height=1,
         )
@@ -860,14 +873,14 @@ class TuiApp:
             style="class:input_hint",
         )
         input_area = HSplit([prompt_window, input_window, input_hint_window])
-        
+
         # Main content area (for messages)
         main_content = Window(
             content=FormattedTextControl(self._get_main_content),
             height=Dimension(weight=1),
             wrap_lines=True,
         )
-        
+
         # Palette overlay (float)
         palette_float = Float(
             content=ConditionalContainer(
@@ -882,30 +895,32 @@ class TuiApp:
             left=2,
             top=2,
         )
-        
+
         # Main layout
         root = FloatContainer(
-            content=HSplit([
-                main_content,
-                input_area,
-                status_separator,
-                status_bar,
-            ]),
+            content=HSplit(
+                [
+                    main_content,
+                    input_area,
+                    status_separator,
+                    status_bar,
+                ]
+            ),
             floats=[palette_float],
         )
-        
+
         return Layout(root, focused_element=input_window)
-    
+
     def _build_keybindings(self) -> KeyBindings:
         """Build keybindings for the application."""
         kb = KeyBindings()
-        
+
         # Mode getter for conditional bindings
         def get_mode() -> str:
             if self.state.mode == TuiMode.PALETTE:
                 return "palette"
             return "input"
-        
+
         # Enter to send (when not in palette and has content)
         @kb.add("enter")
         def handle_enter(event) -> None:
@@ -914,7 +929,7 @@ class TuiApp:
             elif self._input_buffer and self._input_buffer.text.strip():
                 self._handle_send()
             # else: do nothing (empty input)
-        
+
         # Multiline input
         #
         # Many terminals *cannot* send a distinct Shift+Enter sequence; they
@@ -942,7 +957,7 @@ class TuiApp:
                 self._handle_close_palette()
             else:
                 self._handle_open_palette()
-        
+
         # Escape to close palette
         @kb.add("escape")
         def handle_escape(event) -> None:
@@ -951,7 +966,7 @@ class TuiApp:
                     self.state.update_palette_query("")
                 else:
                     self._handle_close_palette()
-        
+
         # Arrow keys in palette
         @kb.add("up")
         def handle_up(event) -> None:
@@ -959,14 +974,14 @@ class TuiApp:
                 self._handle_palette_up()
             else:
                 self._handle_history_prev()
-        
+
         @kb.add("down")
         def handle_down(event) -> None:
             if self.state.mode == TuiMode.PALETTE:
                 self._handle_palette_down()
             else:
                 self._handle_history_next()
-        
+
         @kb.add("backspace", filter=Condition(lambda: self.state.mode == TuiMode.PALETTE))
         def handle_backspace(event) -> None:
             if self.state.palette_query:
@@ -981,12 +996,12 @@ class TuiApp:
         def handle_any(event) -> None:
             if event.data:
                 self.state.update_palette_query(self.state.palette_query + event.data)
-        
+
         # Stash commands
         @kb.add("c-s")
         def handle_ctrl_s(event) -> None:
             self._handle_stash_save()
-        
+
         @kb.add("c-r")
         def handle_ctrl_r(event) -> None:
             self._handle_stash_restore()
@@ -994,60 +1009,62 @@ class TuiApp:
         @kb.add("c-u")
         def handle_ctrl_u(event) -> None:
             self._handle_clear_input()
-        
+
         # Toggle commands
         @kb.add("c-t")
         def handle_ctrl_t(event) -> None:
             self._handle_toggle_tools()
-        
+
         @kb.add("c-g")
         def handle_ctrl_g(event) -> None:
             self._handle_toggle_reasoning()
-        
+
         # Session commands
         @kb.add("c-n")
         def handle_ctrl_n(event) -> None:
             self._handle_new_session()
-        
+
         @kb.add("c-l")
         def handle_ctrl_l(event) -> None:
             self._handle_clear_screen()
-        
+
         # Exit
         @kb.add("c-d")
         def handle_ctrl_d(event) -> None:
             if not self._input_buffer or not self._input_buffer.text.strip():
                 self._handle_exit()
-        
+
         @kb.add("c-c")
         def handle_ctrl_c(event) -> None:
             self._handle_cancel()
-        
+
         @kb.add("c-q")
         def handle_ctrl_q(event) -> None:
             self._handle_exit()
-        
+
         return kb
-    
+
     # =========================================================================
     # Main Loop
     # =========================================================================
-    
+
     async def _process_message(self, prompt: str) -> None:
         """Process a user message."""
         if not self._client:
             return
-        
+
         self.state.clear_current_response()
         self.state.session.start_request()
-        
+
         # Add user message to history
-        self.state.messages.append({
-            "role": "user",
-            "content": prompt,
-            "timestamp": time.time(),
-        })
-        
+        self.state.messages.append(
+            {
+                "role": "user",
+                "content": prompt,
+                "timestamp": time.time(),
+            }
+        )
+
         # Streaming callback - defined here to capture chunk type
         def on_chunk(chunk: Any) -> None:
             if chunk.type == "message":
@@ -1077,7 +1094,7 @@ class TuiApp:
                     status=status,
                     duration=chunk.tool_duration,
                 )
-        
+
         try:
             response = await self._client.send(
                 prompt,
@@ -1091,7 +1108,7 @@ class TuiApp:
                 prompt_tokens=prompt_tokens,
                 completion_tokens=completion_tokens,
             )
-            
+
             # Add assistant message (persist tool calls for exporting/viewing).
             tool_calls = [
                 {
@@ -1104,28 +1121,30 @@ class TuiApp:
                 for tc in self.state.tool_calls
             ]
 
-            self.state.messages.append({
-                "role": "assistant",
-                "content": response.content,
-                "reasoning": response.reasoning,
-                "tool_calls": tool_calls,
-                "timestamp": time.time(),
-            })
+            self.state.messages.append(
+                {
+                    "role": "assistant",
+                    "content": response.content,
+                    "reasoning": response.reasoning,
+                    "tool_calls": tool_calls,
+                    "timestamp": time.time(),
+                }
+            )
 
             # Clear transient streaming buffers (the completed message is now in
             # self.state.messages).
             self.state.clear_current_response()
-            
+
         except Exception as e:
             self.state.session.is_streaming = False
             self.state.session.current_activity = "error"
             self.console.print(f"[red]Error: {e}[/red]")
         finally:
             self._current_send_task = None
-    
+
     async def run(self, config: Any = None) -> None:
         """Run the TUI application.
-        
+
         Args:
             config: CopexConfig instance (imported at runtime to avoid circular imports)
         """
@@ -1133,25 +1152,25 @@ class TuiApp:
         from copex.client import Copex
         from copex.config import CopexConfig
         from copex.metrics import get_collector
-        
+
         # Initialize config
         self._config = config or CopexConfig()
         self._metrics = get_collector()
-        
+
         # Set initial state from config
         self.state.session.model = self._config.model
         self.state.session.reasoning_effort = self._config.reasoning_effort
-        
+
         # Initialize client
         self._client = Copex(self._config)
         await self._client.start()
-        
+
         self._running = True
-        
+
         # Build application
         layout = self._build_layout()
         keybindings = self._build_keybindings()
-        
+
         self._app = Application(
             layout=layout,
             key_bindings=keybindings,
@@ -1159,11 +1178,12 @@ class TuiApp:
             full_screen=False,
             mouse_support=True,
         )
-        
+
         # Welcome message
         from copex.ui import print_welcome
+
         print_welcome(self.console, self._config.model.value, self._config.reasoning_effort.value)
-        
+
         async def spinner_loop() -> None:
             while self._running:
                 self._spinner_frame = (self._spinner_frame + 1) % 10000
@@ -1235,7 +1255,7 @@ class TuiApp:
 
 async def run_tui(config: Any = None) -> None:
     """Run the Copex TUI.
-    
+
     Args:
         config: CopexConfig instance (optional)
     """
@@ -1246,6 +1266,7 @@ async def run_tui(config: Any = None) -> None:
 def main() -> None:
     """Entry point for the TUI."""
     import asyncio
+
     asyncio.run(run_tui())
 
 
