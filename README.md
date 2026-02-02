@@ -20,6 +20,7 @@ A resilient Python wrapper for the GitHub Copilot SDK with automatic retry, Ralp
 - 🎯 **Model Selection** - Easy switching between GPT-5.2-codex, Claude, Gemini, and more
 - 🧠 **Reasoning Effort** - Configure reasoning depth from `none` to `xhigh`
 - 💻 **Beautiful CLI** - Rich terminal output with markdown rendering
+- 🖥️ **TUI** - Full-screen terminal UI with command palette (`copex tui`)
 
 ## Installation
 
@@ -112,6 +113,22 @@ async def main():
 2. The AI sees its previous work in conversation history
 3. It iteratively improves until outputting `<promise>COMPLETION TEXT</promise>`
 4. Loop ends when promise matches or max iterations reached
+
+### Terminal UI (TUI)
+
+Run the full-screen terminal UI:
+
+```bash
+copex tui --model gpt-5.2-codex --reasoning xhigh
+```
+
+Key bindings (highlights):
+- Ctrl+P: command palette
+- Ctrl+J: insert newline (multiline input)
+- Enter: send
+- Esc: close palette / go back
+- Ctrl+C: cancel streaming
+- Ctrl+Q: quit
 
 ### Skills, Instructions & MCP
 

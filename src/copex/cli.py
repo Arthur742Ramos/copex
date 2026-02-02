@@ -47,7 +47,7 @@ app = typer.Typer(
 console = Console()
 
 # Version for --version flag
-__version__ = "0.10.0"
+__version__ = "0.11.0"
 
 
 def version_callback(value: bool) -> None:
@@ -493,6 +493,37 @@ def models() -> None:
     console.print("[bold]Available Models:[/bold]\n")
     for model in Model:
         console.print(f"  • {model.value}")
+
+
+@app.command("tui")
+def tui(
+    model: Annotated[
+        str | None, typer.Option("--model", "-m", help="Model to use")
+    ] = None,
+    reasoning: Annotated[
+        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH.value,
+) -> None:
+    """Start the Copex TUI."""
+    from copex.tui import run_tui
+
+    effective_model = model or _DEFAULT_MODEL.value
+    try:
+        model_enum = Model(effective_model)
+        requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+
+        config = CopexConfig(
+            model=model_enum,
+            reasoning_effort=normalized_effort,
+        )
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    asyncio.run(run_tui(config))
 
 
 @app.command()

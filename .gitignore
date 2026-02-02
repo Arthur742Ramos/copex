@@ -42,3 +42,4 @@ htmlcov/
 
 # Copex data
 .copex/
+.copex-state.json

@@ -24,8 +24,24 @@ class Response:
     content: str
     reasoning: str | None = None
     raw_events: list[dict[str, Any]] = field(default_factory=list)
+
+    # Request accounting (when available from the SDK)
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cost: float | None = None
+
     retries: int = 0
     auto_continues: int = 0
+
+    @property
+    def usage(self) -> dict[str, int] | None:
+        """Return token usage in an OpenAI-compatible shape when available."""
+        if self.prompt_tokens is None and self.completion_tokens is None:
+            return None
+        return {
+            "prompt_tokens": int(self.prompt_tokens or 0),
+            "completion_tokens": int(self.completion_tokens or 0),
+        }
 
 
 @dataclass
@@ -61,6 +77,11 @@ class _SendState:
     awaiting_post_tool_response: bool = False
     tool_execution_seen: bool = False
 
+    # Usage/cost (from "assistant.usage" events, when present)
+    prompt_tokens: int | None = None
+    completion_tokens: int | None = None
+    cost: float | None = None
+
 
 class Copex:
     """Copilot Extended - Resilient wrapper with automatic retry and stuck detection."""
@@ -91,6 +112,18 @@ class Copex:
             await self._client.stop()
             self._client = None
         self._started = False
+
+    async def abort(self) -> None:
+        """Abort the currently processing message (best-effort)."""
+        try:
+            session = await self._ensure_session()
+        except Exception:
+            return
+        try:
+            await session.abort()
+        except Exception:
+            # Aborting is best-effort; ignore failures.
+            return
 
     async def __aenter__(self) -> "Copex":
         await self.start()
@@ -457,11 +490,19 @@ class Copex:
                 result = await self._send_once(session, prompt, tools, on_chunk)
                 result.retries = retries
                 result.auto_continues = auto_continues
+                tokens = None
+                if result.prompt_tokens is not None or result.completion_tokens is not None:
+                    tokens = {
+                        "prompt": int(result.prompt_tokens or 0),
+                        "completion": int(result.completion_tokens or 0),
+                    }
+
                 collector.complete_request(
                     request.request_id,
                     success=True,
                     response=result.content,
                     retries=retries,
+                    tokens=tokens,
                 )
                 return result
 
@@ -578,6 +619,28 @@ class Copex:
                 elif event_type == EventType.TOOL_CALL.value:
                     self._handle_tool_call(event, state, on_chunk)
 
+                elif event_type == "assistant.usage":
+                    # Capture real token usage/cost when the SDK provides it.
+                    inp = getattr(event.data, "input_tokens", None)
+                    out = getattr(event.data, "output_tokens", None)
+                    cost = getattr(event.data, "cost", None)
+
+                    if inp is not None:
+                        try:
+                            state.prompt_tokens = int(inp)
+                        except Exception:
+                            pass
+                    if out is not None:
+                        try:
+                            state.completion_tokens = int(out)
+                        except Exception:
+                            pass
+                    if cost is not None:
+                        try:
+                            state.cost = float(cost)
+                        except Exception:
+                            pass
+
                 elif event_type == EventType.ASSISTANT_TURN_END.value:
                     self._handle_assistant_turn_end(state)
 
@@ -638,6 +701,9 @@ class Copex:
                 "".join(state.reasoning_parts) if state.reasoning_parts else None
             ),
             raw_events=state.raw_events,
+            prompt_tokens=state.prompt_tokens,
+            completion_tokens=state.completion_tokens,
+            cost=state.cost,
         )
 
     async def stream(
