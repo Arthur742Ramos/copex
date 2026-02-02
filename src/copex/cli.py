@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import sys
+import time
 from pathlib import Path
 from typing import Annotated, Optional
 
@@ -23,7 +24,7 @@ from copex.models import Model, ReasoningEffort
 
 # Effective default: last used model or claude-opus-4.5
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
-from copex.plan import Plan, PlanExecutor, PlanStep, StepStatus
+from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
     ActivityType,
@@ -44,6 +45,16 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 console = Console()
+
+# Version for --version flag
+__version__ = "0.9.0"
+
+
+def version_callback(value: bool) -> None:
+    """Print version and exit."""
+    if value:
+        console.print(f"copex version {__version__}")
+        raise typer.Exit()
 
 
 def model_callback(value: str | None) -> Model | None:
@@ -71,6 +82,9 @@ def reasoning_callback(value: str | None) -> ReasoningEffort | None:
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
+    version: Annotated[
+        bool, typer.Option("--version", "-V", callback=version_callback, is_eager=True, help="Show version and exit")
+    ] = False,
     model: Annotated[
         str | None, typer.Option("--model", "-m", help="Model to use")
     ] = None,
@@ -960,12 +974,15 @@ def status() -> None:
 
 @app.command("plan")
 def plan_command(
-    task: Annotated[str, typer.Argument(help="Task to plan")],
+    task: Annotated[Optional[str], typer.Argument(help="Task to plan (optional with --resume)")] = None,
     execute: Annotated[
         bool, typer.Option("--execute", "-e", help="Execute the plan after generating")
     ] = False,
     review: Annotated[
         bool, typer.Option("--review", "-R", help="Show plan and confirm before executing")
+    ] = False,
+    resume: Annotated[
+        bool, typer.Option("--resume", help="Resume from last checkpoint (.copex-state.json)")
     ] = False,
     output: Annotated[
         Optional[Path], typer.Option("--output", "-o", help="Save plan to file")
@@ -979,15 +996,6 @@ def plan_command(
     max_iterations: Annotated[
         int, typer.Option("--max-iterations", "-n", help="Max iterations per step (Ralph loop)")
     ] = 10,
-    parallel: Annotated[
-        bool, typer.Option("--parallel", "-P", help="Execute independent steps in parallel")
-    ] = False,
-    max_concurrent: Annotated[
-        int, typer.Option("--max-concurrent", "-c", help="Max concurrent steps for parallel execution")
-    ] = 3,
-    smart_plan: Annotated[
-        bool, typer.Option("--smart", "-S", help="Use v2 planning with dependency detection")
-    ] = False,
     model: Annotated[
         str | None, typer.Option("--model", "-m", help="Model to use")
     ] = None,
@@ -1002,10 +1010,14 @@ def plan_command(
         copex plan "Build a REST API"              # Generate plan only
         copex plan "Build a REST API" --execute    # Generate and execute
         copex plan "Build a REST API" --review     # Generate, review, then execute
+        copex plan --resume                        # Resume from .copex-state.json
         copex plan "Continue" --load plan.json -f3 # Resume from step 3
-        copex plan "Build API" -e --parallel -c 2  # Execute with parallel steps
-        copex plan "Complex task" -e --smart       # Use v2 planning with dependencies
     """
+    # Validate: need task OR resume OR load_plan
+    if not task and not resume and not load_plan:
+        console.print("[red]Error: Provide a task, --resume, or --load[/red]")
+        raise typer.Exit(1)
+    
     effective_model = model or _DEFAULT_MODEL.value
     try:
         config = CopexConfig(
@@ -1018,17 +1030,28 @@ def plan_command(
 
     asyncio.run(_run_plan(
         config=config,
-        task=task,
-        execute=execute or review,
+        task=task or "",
+        execute=execute or review or resume,  # --resume implies --execute
         review=review,
+        resume=resume,
         output=output,
         from_step=from_step,
         load_plan=load_plan,
         max_iterations=max_iterations,
-        parallel=parallel,
-        max_concurrent=max_concurrent,
-        smart_plan=smart_plan,
     ))
+
+
+def _format_duration(seconds: float) -> str:
+    """Format duration in human-readable form."""
+    if seconds < 60:
+        return f"{seconds:.0f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours = int(minutes // 60)
+    mins = int(minutes % 60)
+    return f"{hours}h {mins}m"
 
 
 async def _run_plan(
@@ -1036,13 +1059,11 @@ async def _run_plan(
     task: str,
     execute: bool,
     review: bool,
+    resume: bool,
     output: Path | None,
     from_step: int,
     load_plan: Path | None,
     max_iterations: int = 10,
-    parallel: bool = False,
-    max_concurrent: int = 3,
-    smart_plan: bool = False,
 ) -> None:
     """Run plan generation and optional execution."""
     client = Copex(config)
@@ -1054,24 +1075,40 @@ async def _run_plan(
         executor = PlanExecutor(client, ralph=ralph)
         executor.max_iterations_per_step = max_iterations
         
-        # Load or generate plan
-        if load_plan:
+        # Check for resume from checkpoint
+        if resume:
+            state = PlanState.load()
+            if state is None:
+                console.print("[red]No checkpoint found (.copex-state.json)[/red]")
+                console.print("[dim]Run a plan with --execute first to create a checkpoint[/dim]")
+                raise typer.Exit(1)
+            
+            plan = state.plan
+            from_step = state.current_step
+            console.print(Panel(
+                f"[bold]Resuming plan:[/bold] {state.task}\n"
+                f"[dim]Started:[/dim] {state.started_at}\n"
+                f"[dim]Completed steps:[/dim] {len(state.completed)}/{len(plan.steps)}\n"
+                f"[dim]Resuming from step:[/dim] {from_step}",
+                title="🔄 Resume from Checkpoint",
+                border_style="yellow",
+            ))
+        elif load_plan:
+            # Load from plan file
             if not load_plan.exists():
                 console.print(f"[red]Plan file not found: {load_plan}[/red]")
                 raise typer.Exit(1)
             plan = Plan.load(load_plan)
             console.print(f"[green]✓ Loaded plan from {load_plan}[/green]\n")
         else:
+            # Generate new plan
             console.print(Panel(
                 f"[bold]Generating plan for:[/bold]\n{task}",
-                title="📋 Plan Mode" + (" (smart)" if smart_plan else ""),
+                title="📋 Plan Mode",
                 border_style="blue",
             ))
             
-            if smart_plan:
-                plan = await executor.generate_plan_v2(task)
-            else:
-                plan = await executor.generate_plan(task)
+            plan = await executor.generate_plan(task)
             console.print(f"\n[green]✓ Generated {len(plan.steps)} steps[/green]\n")
         
         # Display plan
@@ -1089,45 +1126,59 @@ async def _run_plan(
                     console.print("[yellow]Execution cancelled[/yellow]")
                     return
             
-            mode_str = "parallel" if parallel else "sequential"
-            console.print(f"\n[bold blue]Executing from step {from_step} ({mode_str})...[/bold blue]\n")
+            console.print(f"\n[bold blue]Executing from step {from_step}...[/bold blue]\n")
+            
+            # Track execution timing
+            plan_start_time = time.time()
             
             def on_step_start(step: PlanStep) -> None:
-                console.print(f"[blue]▶ Step {step.number}:[/blue] {step.description}")
+                total = len(plan.steps)
+                console.print(f"[blue]⏳ Step {step.number}/{total}:[/blue] {step.description}")
             
             def on_step_complete(step: PlanStep) -> None:
-                preview = (step.result or "")[:150]
-                if len(step.result or "") > 150:
+                # Format duration
+                duration = step.duration_seconds or 0
+                duration_str = _format_duration(duration)
+                
+                # Get result preview
+                preview = (step.result or "")[:100]
+                if len(step.result or "") > 100:
                     preview += "..."
-                console.print(f"[green]✓ Step {step.number} complete[/green]")
+                
+                console.print(f"[green]✓ Step {step.number} complete ({duration_str})[/green]")
                 if preview:
-                    console.print(f"  [dim]{preview}[/dim]")
+                    console.print(f"  [dim]— {preview}[/dim]")
+                
+                # Show ETA after 2+ steps completed
+                completed_count = plan.completed_count
+                if completed_count >= 2:
+                    remaining_est = plan.estimate_remaining_seconds()
+                    if remaining_est is not None:
+                        console.print(f"  [dim cyan]Estimated remaining: ~{_format_duration(remaining_est)}[/dim cyan]")
+                
                 console.print()
             
             def on_error(step: PlanStep, error: Exception) -> bool:
-                console.print(f"[red]✗ Step {step.number} failed: {error}[/red]")
+                duration = step.duration_seconds or 0
+                duration_str = _format_duration(duration)
+                console.print(f"[red]✗ Step {step.number} failed ({duration_str}): {error}[/red]")
+                console.print(f"[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
                 return typer.confirm("Continue with next step?", default=False)
             
-            if parallel:
-                await executor.execute_plan_parallel(
-                    plan,
-                    max_concurrent=max_concurrent,
-                    from_step=from_step,
-                    on_step_start=on_step_start,
-                    on_step_complete=on_step_complete,
-                    on_error=on_error,
-                )
-            else:
-                await executor.execute_plan(
-                    plan,
-                    from_step=from_step,
-                    on_step_start=on_step_start,
-                    on_step_complete=on_step_complete,
-                    on_error=on_error,
-                )
+            await executor.execute_plan(
+                plan,
+                from_step=from_step,
+                on_step_start=on_step_start,
+                on_step_complete=on_step_complete,
+                on_error=on_error,
+                save_checkpoints=True,
+            )
             
-            # Show summary
-            _display_plan_summary(plan)
+            # Calculate total time
+            total_time = time.time() - plan_start_time
+            
+            # Show enhanced summary
+            _display_plan_summary_enhanced(plan, total_time)
             
             # Save updated plan
             if output:
@@ -1136,6 +1187,7 @@ async def _run_plan(
     
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
+        console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
     except Exception as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
@@ -1182,7 +1234,52 @@ def _display_plan_summary(plan: Plan) -> None:
         ))
 
 
-__version__ = "0.8.5"
+def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
+    """Display enhanced plan execution summary with timing and tokens."""
+    completed = plan.completed_count
+    failed = plan.failed_count
+    total = len(plan.steps)
+    
+    # Build summary lines
+    lines = []
+    
+    if plan.is_complete and failed == 0:
+        lines.append(f"[green]✅ {completed}/{total} steps completed successfully![/green]")
+    elif failed > 0:
+        lines.append(f"[yellow]⚠️ {completed}/{total} steps completed, {failed} failed[/yellow]")
+    else:
+        lines.append(f"[blue]📋 {completed}/{total} steps completed[/blue]")
+    
+    # Timing
+    lines.append("")
+    lines.append(f"[bold]Total time:[/bold] {_format_duration(total_time)}")
+    
+    # Per-step breakdown
+    if completed > 0:
+        avg = plan.avg_step_duration
+        if avg:
+            lines.append(f"[dim]Avg per step: {_format_duration(avg)}[/dim]")
+    
+    # Token usage (if tracked)
+    if plan.total_tokens > 0:
+        lines.append(f"[bold]Tokens used:[/bold] {plan.total_tokens:,}")
+    
+    # Determine panel style
+    if plan.is_complete and failed == 0:
+        title = "✅ Plan Complete"
+        border = "green"
+    elif failed > 0:
+        title = "⚠️ Plan Incomplete"
+        border = "yellow"
+    else:
+        title = "📋 Progress"
+        border = "blue"
+    
+    console.print(Panel(
+        "\n".join(lines),
+        title=title,
+        border_style=border,
+    ))
 
 
 if __name__ == "__main__":
