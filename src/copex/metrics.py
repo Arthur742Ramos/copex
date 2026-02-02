@@ -322,18 +322,38 @@ class MetricsCollector:
 
         with open(path, "w", newline="", encoding="utf-8") as f:
             writer = csv.writer(f)
-            writer.writerow([
-                "request_id", "timestamp", "model", "reasoning_effort",
-                "duration_ms", "prompt_tokens", "completion_tokens", "total_tokens",
-                "success", "retries", "error",
-            ])
+            writer.writerow(
+                [
+                    "request_id",
+                    "timestamp",
+                    "model",
+                    "reasoning_effort",
+                    "duration_ms",
+                    "prompt_tokens",
+                    "completion_tokens",
+                    "total_tokens",
+                    "success",
+                    "retries",
+                    "error",
+                ]
+            )
 
             for req in self.session.requests:
-                writer.writerow([
-                    req.request_id, req.timestamp, req.model, req.reasoning_effort,
-                    req.duration_ms, req.prompt_tokens, req.completion_tokens, req.total_tokens,
-                    req.success, req.retries, req.error or "",
-                ])
+                writer.writerow(
+                    [
+                        req.request_id,
+                        req.timestamp,
+                        req.model,
+                        req.reasoning_effort,
+                        req.duration_ms,
+                        req.prompt_tokens,
+                        req.completion_tokens,
+                        req.total_tokens,
+                        req.success,
+                        req.retries,
+                        req.error or "",
+                    ]
+                )
 
     def print_summary(self) -> str:
         """Get printable summary string."""
@@ -360,7 +380,9 @@ class MetricsCollector:
             lines.append("")
             lines.append("By Model:")
             for model, stats in by_model.items():
-                lines.append(f"  {model}: {stats['requests']} requests, {stats['success_rate']:.0%} success")
+                lines.append(
+                    f"  {model}: {stats['requests']} requests, {stats['success_rate']:.0%} success"
+                )
 
         return "\n".join(lines)
 

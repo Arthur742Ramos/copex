@@ -129,7 +129,10 @@ class RalphWiggum:
                 ralph_instructions = self._build_ralph_instructions()
 
                 # Check max iterations
-                if self._state.max_iterations and self._state.iteration > self._state.max_iterations:
+                if (
+                    self._state.max_iterations
+                    and self._state.iteration > self._state.max_iterations
+                ):
                     self._state.completed = True
                     self._state.completion_reason = f"max_iterations ({self._state.max_iterations})"
                     break
@@ -151,7 +154,9 @@ class RalphWiggum:
                     if self._state.completion_promise:
                         if self._check_promise(content, self._state.completion_promise):
                             self._state.completed = True
-                            self._state.completion_reason = f"promise: {self._state.completion_promise}"
+                            self._state.completion_reason = (
+                                f"promise: {self._state.completion_promise}"
+                            )
                             break
 
                     # Callback
@@ -162,7 +167,9 @@ class RalphWiggum:
                     consecutive_errors += 1
                     if consecutive_errors >= self.config.max_consecutive_errors:
                         self._state.completed = True
-                        self._state.completion_reason = f"errors: {consecutive_errors} consecutive failures"
+                        self._state.completion_reason = (
+                            f"errors: {consecutive_errors} consecutive failures"
+                        )
                         break
 
                     if not self.config.continue_on_error:
@@ -195,7 +202,9 @@ class RalphWiggum:
                 f"ONLY output this when the statement is genuinely TRUE."
             )
         else:
-            parts.append("\nNo completion promise set - loop runs until max iterations or cancelled.")
+            parts.append(
+                "\nNo completion promise set - loop runs until max iterations or cancelled."
+            )
 
         parts.append("\nYou can see your previous work in the conversation. Continue improving.")
 
@@ -244,4 +253,3 @@ async def ralph_loop(
         completion_promise=completion_promise,
         on_iteration=on_iteration,
     )
-

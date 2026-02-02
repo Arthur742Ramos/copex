@@ -297,16 +297,18 @@ class CheckpointStore:
                 if loop_id and data.get("loop_id") != loop_id:
                     continue
 
-                checkpoints.append({
-                    "checkpoint_id": data["checkpoint_id"],
-                    "loop_id": data["loop_id"],
-                    "iteration": data["iteration"],
-                    "max_iterations": data.get("max_iterations"),
-                    "completed": data.get("completed", False),
-                    "completion_reason": data.get("completion_reason"),
-                    "created_at": data["created_at"],
-                    "updated_at": data["updated_at"],
-                })
+                checkpoints.append(
+                    {
+                        "checkpoint_id": data["checkpoint_id"],
+                        "loop_id": data["loop_id"],
+                        "iteration": data["iteration"],
+                        "max_iterations": data.get("max_iterations"),
+                        "completed": data.get("completed", False),
+                        "completion_reason": data.get("completion_reason"),
+                        "created_at": data["created_at"],
+                        "updated_at": data["updated_at"],
+                    }
+                )
             except (json.JSONDecodeError, KeyError):
                 continue
 
@@ -390,8 +392,16 @@ class CheckpointedRalph:
 
         # Create new checkpoint if needed
         if not self._checkpoint:
-            model = self.client.config.model.value if hasattr(self.client.config.model, 'value') else str(self.client.config.model)
-            reasoning = self.client.config.reasoning_effort.value if hasattr(self.client.config.reasoning_effort, 'value') else str(self.client.config.reasoning_effort)
+            model = (
+                self.client.config.model.value
+                if hasattr(self.client.config.model, "value")
+                else str(self.client.config.model)
+            )
+            reasoning = (
+                self.client.config.reasoning_effort.value
+                if hasattr(self.client.config.reasoning_effort, "value")
+                else str(self.client.config.reasoning_effort)
+            )
 
             self._checkpoint = self.store.create(
                 loop_id=self.loop_id,

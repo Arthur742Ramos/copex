@@ -80,6 +80,7 @@ class ToolRegistry:
             async def search(query: str) -> str:
                 ...
         """
+
         def decorator(func: Callable[..., Awaitable[Any]]) -> Callable:
             self._tools[name] = func
             self._descriptions[name] = description or func.__doc__ or ""
@@ -104,8 +105,7 @@ class ToolRegistry:
     def list_tools(self) -> list[dict[str, str]]:
         """List all registered tools."""
         return [
-            {"name": name, "description": self._descriptions.get(name, "")}
-            for name in self._tools
+            {"name": name, "description": self._descriptions.get(name, "")} for name in self._tools
         ]
 
     async def execute(
@@ -265,7 +265,7 @@ class ToolRegistry:
 
             if attempt < max_retries:
                 # Exponential backoff
-                await asyncio.sleep(2 ** attempt * 0.5)
+                await asyncio.sleep(2**attempt * 0.5)
 
         return result
 
@@ -315,10 +315,7 @@ class ParallelToolExecutor:
         Returns:
             List of result dicts for Copex
         """
-        calls = [
-            (call["name"], call.get("arguments", {}))
-            for call in tool_calls
-        ]
+        calls = [(call["name"], call.get("arguments", {})) for call in tool_calls]
 
         results = await self.registry.execute_parallel(calls)
 
@@ -349,6 +346,7 @@ class ParallelToolExecutor:
 
             # Try to get type hints for parameters
             import inspect
+
             sig = inspect.signature(func)
             properties = {}
             required = []
@@ -371,15 +369,17 @@ class ParallelToolExecutor:
                 if param.default == inspect.Parameter.empty:
                     required.append(param_name)
 
-            definitions.append({
-                "name": tool_info["name"],
-                "description": tool_info["description"],
-                "parameters": {
-                    "type": "object",
-                    "properties": properties,
-                    "required": required,
-                },
-            })
+            definitions.append(
+                {
+                    "name": tool_info["name"],
+                    "description": tool_info["description"],
+                    "parameters": {
+                        "type": "object",
+                        "properties": properties,
+                        "required": required,
+                    },
+                }
+            )
 
         return definitions
 

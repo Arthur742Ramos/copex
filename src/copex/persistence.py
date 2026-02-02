@@ -176,13 +176,15 @@ class SessionStore:
             try:
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
-                sessions.append({
-                    "id": data["id"],
-                    "created_at": data["created_at"],
-                    "updated_at": data["updated_at"],
-                    "model": data["model"],
-                    "message_count": len(data.get("messages", [])),
-                })
+                sessions.append(
+                    {
+                        "id": data["id"],
+                        "created_at": data["created_at"],
+                        "updated_at": data["updated_at"],
+                        "model": data["model"],
+                        "message_count": len(data.get("messages", [])),
+                    }
+                )
             except (json.JSONDecodeError, KeyError):
                 continue
 
@@ -222,9 +224,11 @@ class SessionStore:
             ]
 
             for msg in data.messages:
-                role_label = {"user": "👤 User", "assistant": "🤖 Assistant", "system": "⚙️ System"}.get(
-                    msg.role, msg.role
-                )
+                role_label = {
+                    "user": "👤 User",
+                    "assistant": "🤖 Assistant",
+                    "system": "⚙️ System",
+                }.get(msg.role, msg.role)
                 lines.append(f"### {role_label}")
                 lines.append(f"*{msg.timestamp}*")
                 lines.append("")

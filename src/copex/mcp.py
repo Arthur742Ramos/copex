@@ -117,27 +117,31 @@ class StdioTransport(MCPTransport):
 
     async def _initialize(self) -> None:
         """Send MCP initialization."""
-        await self.send({
-            "jsonrpc": "2.0",
-            "method": "initialize",
-            "params": {
-                "protocolVersion": "2024-11-05",
-                "capabilities": {
-                    "tools": {},
-                    "resources": {},
+        await self.send(
+            {
+                "jsonrpc": "2.0",
+                "method": "initialize",
+                "params": {
+                    "protocolVersion": "2024-11-05",
+                    "capabilities": {
+                        "tools": {},
+                        "resources": {},
+                    },
+                    "clientInfo": {
+                        "name": "copex",
+                        "version": "0.1.0",
+                    },
                 },
-                "clientInfo": {
-                    "name": "copex",
-                    "version": "0.1.0",
-                },
-            },
-        })
+            }
+        )
 
         # Send initialized notification
-        await self._write({
-            "jsonrpc": "2.0",
-            "method": "notifications/initialized",
-        })
+        await self._write(
+            {
+                "jsonrpc": "2.0",
+                "method": "notifications/initialized",
+            }
+        )
 
     async def _reader_loop(self) -> None:
         """Read responses from the server."""
@@ -281,11 +285,13 @@ class MCPClient:
 
         # Get tools
         try:
-            result = await self._transport.send({
-                "jsonrpc": "2.0",
-                "method": "tools/list",
-                "params": {},
-            })
+            result = await self._transport.send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "tools/list",
+                    "params": {},
+                }
+            )
             self._tools = [
                 MCPTool(
                     name=t["name"],
@@ -299,11 +305,13 @@ class MCPClient:
 
         # Get resources
         try:
-            result = await self._transport.send({
-                "jsonrpc": "2.0",
-                "method": "resources/list",
-                "params": {},
-            })
+            result = await self._transport.send(
+                {
+                    "jsonrpc": "2.0",
+                    "method": "resources/list",
+                    "params": {},
+                }
+            )
             self._resources = [
                 MCPResource(
                     uri=r["uri"],
@@ -344,14 +352,16 @@ class MCPClient:
         if not self._transport:
             raise RuntimeError("Not connected")
 
-        result = await self._transport.send({
-            "jsonrpc": "2.0",
-            "method": "tools/call",
-            "params": {
-                "name": name,
-                "arguments": arguments,
-            },
-        })
+        result = await self._transport.send(
+            {
+                "jsonrpc": "2.0",
+                "method": "tools/call",
+                "params": {
+                    "name": name,
+                    "arguments": arguments,
+                },
+            }
+        )
 
         # Extract content from result
         content = result.get("content", [])
@@ -372,11 +382,13 @@ class MCPClient:
         if not self._transport:
             raise RuntimeError("Not connected")
 
-        result = await self._transport.send({
-            "jsonrpc": "2.0",
-            "method": "resources/read",
-            "params": {"uri": uri},
-        })
+        result = await self._transport.send(
+            {
+                "jsonrpc": "2.0",
+                "method": "resources/read",
+                "params": {"uri": uri},
+            }
+        )
 
         contents = result.get("contents", [])
         if contents:
@@ -475,13 +487,15 @@ class MCPManager:
         tools = []
         for server_name, client in self._clients.items():
             for tool in client._tools:
-                tools.append({
-                    "name": f"{server_name}:{tool.name}",
-                    "description": f"[{server_name}] {tool.description}",
-                    "parameters": tool.input_schema,
-                    "_server": server_name,
-                    "_tool": tool.name,
-                })
+                tools.append(
+                    {
+                        "name": f"{server_name}:{tool.name}",
+                        "description": f"[{server_name}] {tool.description}",
+                        "parameters": tool.input_schema,
+                        "_server": server_name,
+                        "_tool": tool.name,
+                    }
+                )
         return tools
 
     async def call_tool(self, qualified_name: str, arguments: dict[str, Any]) -> Any:
@@ -548,16 +562,18 @@ def load_mcp_config(path: Path | str | None = None) -> list[MCPServerConfig]:
 
     servers = []
     for name, config in data.get("servers", {}).items():
-        servers.append(MCPServerConfig(
-            name=name,
-            command=config["command"],
-            args=config.get("args", []),
-            env=config.get("env", {}),
-            cwd=config.get("cwd"),
-            transport=config.get("transport", "stdio"),
-            url=config.get("url"),
-            auto_start=config.get("auto_start", True),
-            restart_on_crash=config.get("restart_on_crash", True),
-        ))
+        servers.append(
+            MCPServerConfig(
+                name=name,
+                command=config["command"],
+                args=config.get("args", []),
+                env=config.get("env", {}),
+                cwd=config.get("cwd"),
+                transport=config.get("transport", "stdio"),
+                url=config.get("url"),
+                auto_start=config.get("auto_start", True),
+                restart_on_crash=config.get("restart_on_crash", True),
+            )
+        )
 
     return servers

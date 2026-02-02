@@ -43,7 +43,9 @@ def find_copilot_cli() -> str | None:
         ]
         # Also check USERPROFILE
         if "USERPROFILE" in os.environ:
-            candidates.append(Path(os.environ["USERPROFILE"]) / "AppData" / "Roaming" / "npm" / "copilot.cmd")
+            candidates.append(
+                Path(os.environ["USERPROFILE"]) / "AppData" / "Roaming" / "npm" / "copilot.cmd"
+            )
     elif sys.platform == "darwin":
         # macOS locations
         candidates = [
@@ -87,10 +89,18 @@ class RetryConfig(BaseModel):
     """Retry configuration."""
 
     max_retries: int = Field(default=5, ge=1, le=20, description="Maximum retry attempts")
-    max_auto_continues: int = Field(default=3, ge=0, le=10, description="Maximum auto-continue cycles after exhausting retries")
-    base_delay: float = Field(default=1.0, ge=0.1, description="Base delay between retries (seconds)")
-    max_delay: float = Field(default=30.0, ge=1.0, description="Maximum delay between retries (seconds)")
-    exponential_base: float = Field(default=2.0, ge=1.5, description="Exponential backoff multiplier")
+    max_auto_continues: int = Field(
+        default=3, ge=0, le=10, description="Maximum auto-continue cycles after exhausting retries"
+    )
+    base_delay: float = Field(
+        default=1.0, ge=0.1, description="Base delay between retries (seconds)"
+    )
+    max_delay: float = Field(
+        default=30.0, ge=1.0, description="Maximum delay between retries (seconds)"
+    )
+    exponential_base: float = Field(
+        default=2.0, ge=1.5, description="Exponential backoff multiplier"
+    )
     retry_on_any_error: bool = Field(
         default=True, description="Retry and auto-continue on any error"
     )
@@ -112,6 +122,7 @@ def load_last_model() -> Model | None:
         return None
     try:
         import json
+
         with open(state_path, "r", encoding="utf-8") as f:
             data = json.load(f)
         model_value = data.get("last_model")
@@ -125,9 +136,10 @@ def load_last_model() -> Model | None:
 def save_last_model(model: Model) -> None:
     """Save the last used model to user state."""
     import json
+
     state_path = get_user_state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    
+
     # Load existing state
     data: dict[str, Any] = {}
     if state_path.exists():
@@ -136,7 +148,7 @@ def save_last_model(model: Model) -> None:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             pass
-    
+
     # Update and save
     data["last_model"] = model.value
     with open(state_path, "w", encoding="utf-8") as f:
@@ -162,7 +174,9 @@ class CopexConfig(BaseModel):
     log_level: str = Field(default="warning", description="Log level")
 
     # Session options
-    timeout: float = Field(default=300.0, ge=10.0, description="Inactivity timeout (seconds) - resets on each event")
+    timeout: float = Field(
+        default=300.0, ge=10.0, description="Inactivity timeout (seconds) - resets on each event"
+    )
     auto_continue: bool = Field(
         default=True, description="Auto-send 'Keep going' on interruption/error"
     )
@@ -172,47 +186,34 @@ class CopexConfig(BaseModel):
 
     # Skills and capabilities
     skills: list[str] = Field(
-        default_factory=list,
-        description="Skills to enable (e.g., ['code-review', 'azure-openai'])"
+        default_factory=list, description="Skills to enable (e.g., ['code-review', 'azure-openai'])"
     )
     instructions: str | None = Field(
-        default=None,
-        description="Custom instructions for the session"
+        default=None, description="Custom instructions for the session"
     )
     instructions_file: str | None = Field(
-        default=None,
-        description="Path to instructions file (.md)"
+        default=None, description="Path to instructions file (.md)"
     )
 
     # MCP configuration
     mcp_servers: list[dict[str, Any]] = Field(
-        default_factory=list,
-        description="MCP server configurations"
+        default_factory=list, description="MCP server configurations"
     )
-    mcp_config_file: str | None = Field(
-        default=None,
-        description="Path to MCP config JSON file"
-    )
+    mcp_config_file: str | None = Field(default=None, description="Path to MCP config JSON file")
 
     # Tool filtering
     available_tools: list[str] | None = Field(
-        default=None,
-        description="Whitelist of tools to enable (None = all)"
+        default=None, description="Whitelist of tools to enable (None = all)"
     )
     excluded_tools: list[str] = Field(
-        default_factory=list,
-        description="Blacklist of tools to disable"
+        default_factory=list, description="Blacklist of tools to disable"
     )
 
     # UI options
     ui_theme: str = Field(
-        default="default",
-        description="UI theme (default, midnight, mono, sunset)"
+        default="default", description="UI theme (default, midnight, mono, sunset)"
     )
-    ui_density: str = Field(
-        default="extended",
-        description="UI density (compact or extended)"
-    )
+    ui_density: str = Field(default="extended", description="UI density (compact or extended)")
 
     @field_validator("reasoning_effort", mode="before")
     @classmethod
@@ -323,6 +324,7 @@ class CopexConfig(BaseModel):
             if not config_path.exists():
                 raise FileNotFoundError(f"MCP config file not found: {config_path}")
             import json
+
             with open(config_path, "r", encoding="utf-8") as f:
                 mcp_data = json.load(f)
                 if "servers" in mcp_data:

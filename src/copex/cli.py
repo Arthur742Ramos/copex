@@ -18,13 +18,10 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 
+from copex import __version__
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig, load_last_model, save_last_model
 from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
-from copex import __version__
-
-# Effective default: last used model or claude-opus-4.5
-_DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
 from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
@@ -39,6 +36,9 @@ from copex.ui import (
     print_welcome,
 )
 
+# Effective default: last used model or claude-opus-4.5
+_DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
+
 app = typer.Typer(
     name="copex",
     help="Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops.",
@@ -46,6 +46,7 @@ app = typer.Typer(
     invoke_without_command=True,
 )
 console = Console()
+
 
 def version_callback(value: bool) -> None:
     """Print version and exit."""
@@ -80,11 +81,16 @@ def reasoning_callback(value: str | None) -> ReasoningEffort | None:
 def main(
     ctx: typer.Context,
     version: Annotated[
-        bool, typer.Option("--version", "-V", callback=version_callback, is_eager=True, help="Show version and exit")
+        bool,
+        typer.Option(
+            "--version",
+            "-V",
+            callback=version_callback,
+            is_eager=True,
+            help="Show version and exit",
+        ),
     ] = False,
-    model: Annotated[
-        str | None, typer.Option("--model", "-m", help="Model to use")
-    ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
@@ -186,10 +192,13 @@ async def _model_picker(current: Model) -> Model | None:
         return lines
 
     from prompt_toolkit.styles import Style
-    style = Style.from_dict({
-        "selected": "fg:ansicyan bold",
-        "current": "fg:ansiyellow italic",
-    })
+
+    style = Style.from_dict(
+        {
+            "selected": "fg:ansicyan bold",
+            "current": "fg:ansiyellow italic",
+        }
+    )
 
     app: Application[Model | None] = Application(
         layout=Layout(Window(FormattedTextControl(get_text))),
@@ -234,7 +243,12 @@ async def _reasoning_picker(current: ReasoningEffort) -> ReasoningEffort | None:
         event.app.exit(result=None)
 
     def get_text():
-        lines = [("bold", "Select reasoning effort (↑/↓ to navigate, Enter to select, Esc to cancel):\n\n")]
+        lines = [
+            (
+                "bold",
+                "Select reasoning effort (↑/↓ to navigate, Enter to select, Esc to cancel):\n\n",
+            )
+        ]
         for i, r in enumerate(efforts):
             if i == selected_idx:
                 lines.append(("class:selected", f"  ▸ {r.value}"))
@@ -246,10 +260,13 @@ async def _reasoning_picker(current: ReasoningEffort) -> ReasoningEffort | None:
         return lines
 
     from prompt_toolkit.styles import Style
-    style = Style.from_dict({
-        "selected": "fg:ansicyan bold",
-        "current": "fg:ansiyellow italic",
-    })
+
+    style = Style.from_dict(
+        {
+            "selected": "fg:ansicyan bold",
+            "current": "fg:ansiyellow italic",
+        }
+    )
 
     app: Application[ReasoningEffort | None] = Application(
         layout=Layout(Window(FormattedTextControl(get_text))),
@@ -263,16 +280,14 @@ async def _reasoning_picker(current: ReasoningEffort) -> ReasoningEffort | None:
 
 @app.command()
 def chat(
-    prompt: Annotated[Optional[str], typer.Argument(help="Prompt to send (or read from stdin)")] = None,
-    model: Annotated[
-        str | None, typer.Option("--model", "-m", help="Model to use")
+    prompt: Annotated[
+        Optional[str], typer.Argument(help="Prompt to send (or read from stdin)")
     ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
-    max_retries: Annotated[
-        int, typer.Option("--max-retries", help="Maximum retry attempts")
-    ] = 5,
+    max_retries: Annotated[int, typer.Option("--max-retries", help="Maximum retry attempts")] = 5,
     no_stream: Annotated[
         bool, typer.Option("--no-stream", help="Disable streaming output")
     ] = False,
@@ -282,9 +297,7 @@ def chat(
     config_file: Annotated[
         Optional[Path], typer.Option("--config", "-c", help="Config file path")
     ] = None,
-    raw: Annotated[
-        bool, typer.Option("--raw", help="Output raw text without formatting")
-    ] = False,
+    raw: Annotated[bool, typer.Option("--raw", help="Output raw text without formatting")] = False,
     ui_theme: Annotated[
         Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
     ] = None,
@@ -342,9 +355,7 @@ def chat(
     asyncio.run(_run_chat(config, prompt, show_reasoning, raw))
 
 
-async def _run_chat(
-    config: CopexConfig, prompt: str, show_reasoning: bool, raw: bool
-) -> None:
+async def _run_chat(config: CopexConfig, prompt: str, show_reasoning: bool, raw: bool) -> None:
     """Run the chat command."""
     client = Copex(config)
 
@@ -359,17 +370,17 @@ async def _run_chat(
                 print(response.content)
             else:
                 if show_reasoning and response.reasoning:
-                    console.print(Panel(
-                        Markdown(response.reasoning),
-                        title="[dim]Reasoning[/dim]",
-                        border_style="dim",
-                    ))
+                    console.print(
+                        Panel(
+                            Markdown(response.reasoning),
+                            title="[dim]Reasoning[/dim]",
+                            border_style="dim",
+                        )
+                    )
                 console.print(Markdown(response.content))
 
                 if response.retries > 0:
-                    console.print(
-                        f"\n[dim]Completed with {response.retries} retries[/dim]"
-                    )
+                    console.print(f"\n[dim]Completed with {response.retries} retries[/dim]")
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted[/yellow]")
@@ -380,11 +391,11 @@ async def _run_chat(
         await client.stop()
 
 
-async def _stream_response(
-    client: Copex, prompt: str, show_reasoning: bool
-) -> None:
+async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> None:
     """Stream response with beautiful live updates."""
-    ui = CopexUI(console, theme=client.config.ui_theme, density=client.config.ui_density, show_all_tools=True)
+    ui = CopexUI(
+        console, theme=client.config.ui_theme, density=client.config.ui_density, show_all_tools=True
+    )
     ui.reset(model=client.config.model.value)
     ui.set_activity(ActivityType.THINKING)
 
@@ -443,7 +454,11 @@ async def _stream_response(
             response = await client.send(prompt, on_chunk=on_chunk)
             # Prefer streamed content over response object (which may have stale fallback)
             final_message = ui.state.message if ui.state.message else response.content
-            final_reasoning = (ui.state.reasoning if ui.state.reasoning else response.reasoning) if show_reasoning else None
+            final_reasoning = (
+                (ui.state.reasoning if ui.state.reasoning else response.reasoning)
+                if show_reasoning
+                else None
+            )
             ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
         finally:
@@ -480,7 +495,7 @@ async def _stream_response_plain(client: Copex, prompt: str) -> None:
     retries = response.retries
     if response.content and response.content != content:
         if response.content.startswith(content):
-            sys.stdout.write(response.content[len(content):])
+            sys.stdout.write(response.content[len(content) :])
         else:
             sys.stdout.write(response.content)
     sys.stdout.write("\n")
@@ -500,9 +515,7 @@ def models() -> None:
 
 @app.command("tui")
 def tui(
-    model: Annotated[
-        str | None, typer.Option("--model", "-m", help="Model to use")
-    ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
@@ -566,9 +579,7 @@ def init(
 
 @app.command()
 def interactive(
-    model: Annotated[
-        str | None, typer.Option("--model", "-m", help="Model to use")
-    ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
@@ -612,7 +623,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
     await client.start()
     session = _build_prompt_session()
     show_all_tools = False
-    
+
     # Create persistent UI for conversation history
     ui = CopexUI(
         console,
@@ -623,19 +634,35 @@ async def _interactive_loop(config: CopexConfig) -> None:
 
     def show_help() -> None:
         console.print(f"\n[{Theme.MUTED}]Commands:[/{Theme.MUTED}]")
-        console.print(f"  [{Theme.PRIMARY}]/model <name>[/{Theme.PRIMARY}]     - Change model (e.g., /model gpt-5.1-codex)")
-        console.print(f"  [{Theme.PRIMARY}]/reasoning <level>[/{Theme.PRIMARY}] - Change reasoning (low, medium, high, xhigh)")
-        console.print(f"  [{Theme.PRIMARY}]/models[/{Theme.PRIMARY}]            - List available models")
-        console.print(f"  [{Theme.PRIMARY}]/new[/{Theme.PRIMARY}]               - Start new session")
-        console.print(f"  [{Theme.PRIMARY}]/status[/{Theme.PRIMARY}]            - Show current settings")
-        console.print(f"  [{Theme.PRIMARY}]/tools[/{Theme.PRIMARY}]             - Toggle full tool call list")
+        console.print(
+            f"  [{Theme.PRIMARY}]/model <name>[/{Theme.PRIMARY}]     - Change model (e.g., /model gpt-5.1-codex)"
+        )
+        console.print(
+            f"  [{Theme.PRIMARY}]/reasoning <level>[/{Theme.PRIMARY}] - Change reasoning (low, medium, high, xhigh)"
+        )
+        console.print(
+            f"  [{Theme.PRIMARY}]/models[/{Theme.PRIMARY}]            - List available models"
+        )
+        console.print(
+            f"  [{Theme.PRIMARY}]/new[/{Theme.PRIMARY}]               - Start new session"
+        )
+        console.print(
+            f"  [{Theme.PRIMARY}]/status[/{Theme.PRIMARY}]            - Show current settings"
+        )
+        console.print(
+            f"  [{Theme.PRIMARY}]/tools[/{Theme.PRIMARY}]             - Toggle full tool call list"
+        )
         console.print(f"  [{Theme.PRIMARY}]/help[/{Theme.PRIMARY}]              - Show this help")
         console.print(f"  [{Theme.PRIMARY}]exit[/{Theme.PRIMARY}]               - Exit\n")
 
     def show_status() -> None:
         console.print(f"\n[{Theme.MUTED}]Current settings:[/{Theme.MUTED}]")
-        console.print(f"  Model:     [{Theme.PRIMARY}]{client.config.model.value}[/{Theme.PRIMARY}]")
-        console.print(f"  Reasoning: [{Theme.PRIMARY}]{client.config.reasoning_effort.value}[/{Theme.PRIMARY}]\n")
+        console.print(
+            f"  Model:     [{Theme.PRIMARY}]{client.config.model.value}[/{Theme.PRIMARY}]"
+        )
+        console.print(
+            f"  Reasoning: [{Theme.PRIMARY}]{client.config.reasoning_effort.value}[/{Theme.PRIMARY}]\n"
+        )
 
     try:
         while True:
@@ -659,7 +686,9 @@ async def _interactive_loop(config: CopexConfig) -> None:
                 client.new_session()
                 # Clear UI history for new session
                 ui.state.history = []
-                console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Started new session[/{Theme.SUCCESS}]\n")
+                console.print(
+                    f"\n[{Theme.SUCCESS}]{Icons.DONE} Started new session[/{Theme.SUCCESS}]\n"
+                )
                 continue
 
             if command in {"help", "/help"}:
@@ -683,7 +712,9 @@ async def _interactive_loop(config: CopexConfig) -> None:
                         if new_reasoning:
                             desired_effort = new_reasoning
 
-                    normalized_effort, warning = normalize_reasoning_effort(selected, desired_effort)
+                    normalized_effort, warning = normalize_reasoning_effort(
+                        selected, desired_effort
+                    )
                     if warning:
                         console.print(f"[{Theme.WARNING}]{warning}[/{Theme.WARNING}]")
                     client.config.reasoning_effort = normalized_effort
@@ -691,9 +722,11 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     client.new_session()
                     # Clear UI history for new session
                     ui.state.history = []
-                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {selected.value} (new session started)[/{Theme.SUCCESS}]\n")
+                    console.print(
+                        f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {selected.value} (new session started)[/{Theme.SUCCESS}]\n"
+                    )
                 continue
- 
+
             if command in {"tools", "/tools"}:
                 show_all_tools = not show_all_tools
                 ui.show_all_tools = show_all_tools
@@ -712,7 +745,9 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     client.config.model = new_model
                     save_last_model(new_model)  # Persist for next run
 
-                    normalized_effort, warning = normalize_reasoning_effort(new_model, client.config.reasoning_effort)
+                    normalized_effort, warning = normalize_reasoning_effort(
+                        new_model, client.config.reasoning_effort
+                    )
                     if warning:
                         console.print(f"[{Theme.WARNING}]{warning}[/{Theme.WARNING}]")
                     client.config.reasoning_effort = normalized_effort
@@ -720,10 +755,14 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     client.new_session()  # Need new session for model change
                     # Clear UI history for new session
                     ui.state.history = []
-                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_model.value} (new session started)[/{Theme.SUCCESS}]\n")
+                    console.print(
+                        f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {new_model.value} (new session started)[/{Theme.SUCCESS}]\n"
+                    )
                 except ValueError:
                     console.print(f"[{Theme.ERROR}]Unknown model: {model_name}[/{Theme.ERROR}]")
-                    console.print(f"[{Theme.MUTED}]Use /models to see available models[/{Theme.MUTED}]")
+                    console.print(
+                        f"[{Theme.MUTED}]Use /models to see available models[/{Theme.MUTED}]"
+                    )
                 continue
 
             if command.startswith("/reasoning ") or command.startswith("reasoning "):
@@ -737,7 +776,9 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     if requested is None:
                         raise ValueError(level)
 
-                    normalized_effort, warning = normalize_reasoning_effort(client.config.model, requested)
+                    normalized_effort, warning = normalize_reasoning_effort(
+                        client.config.model, requested
+                    )
                     if warning:
                         console.print(f"[{Theme.WARNING}]{warning}[/{Theme.WARNING}]")
 
@@ -745,10 +786,14 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     client.new_session()  # Need new session for reasoning change
                     # Clear UI history for new session
                     ui.state.history = []
-                    console.print(f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {normalized_effort.value} reasoning (new session started)[/{Theme.SUCCESS}]\n")
+                    console.print(
+                        f"\n[{Theme.SUCCESS}]{Icons.DONE} Switched to {normalized_effort.value} reasoning (new session started)[/{Theme.SUCCESS}]\n"
+                    )
                 except ValueError:
                     valid = ", ".join(r.value for r in ReasoningEffort)
-                    console.print(f"[{Theme.ERROR}]Invalid reasoning level. Valid: {valid}[/{Theme.ERROR}]")
+                    console.print(
+                        f"[{Theme.ERROR}]Invalid reasoning level. Valid: {valid}[/{Theme.ERROR}]"
+                    )
                 continue
 
             try:
@@ -771,7 +816,7 @@ async def _stream_response_interactive(
     """Stream response with beautiful UI in interactive mode."""
     # Add user message to history
     ui.add_user_message(prompt)
-    
+
     # Reset for new turn but preserve history
     ui.reset(model=client.config.model.value, preserve_history=True)
     ui.set_activity(ActivityType.THINKING)
@@ -853,9 +898,7 @@ def ralph_command(
     completion_promise: Annotated[
         Optional[str], typer.Option("--promise", "-p", help="Completion promise text")
     ] = None,
-    model: Annotated[
-        str | None, typer.Option("--model", "-m", help="Model to use")
-    ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
@@ -885,15 +928,17 @@ def ralph_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    console.print(Panel(
-        f"[bold]Ralph Wiggum Loop[/bold]\n"
-        f"Model: {config.model.value}\n"
-        f"Reasoning: {config.reasoning_effort.value}\n"
-        f"Max iterations: {max_iterations}\n"
-        f"Completion promise: {completion_promise or '(none)'}",
-        title="🔄 Starting Loop",
-        border_style="yellow",
-    ))
+    console.print(
+        Panel(
+            f"[bold]Ralph Wiggum Loop[/bold]\n"
+            f"Model: {config.model.value}\n"
+            f"Reasoning: {config.reasoning_effort.value}\n"
+            f"Max iterations: {max_iterations}\n"
+            f"Completion promise: {completion_promise or '(none)'}",
+            title="🔄 Starting Loop",
+            border_style="yellow",
+        )
+    )
 
     if completion_promise:
         console.print(
@@ -916,19 +961,22 @@ async def _run_ralph(
 
     def on_iteration(iteration: int, response: str) -> None:
         preview = response[:200] + "..." if len(response) > 200 else response
-        console.print(Panel(
-            preview,
-            title=f"[bold]Iteration {iteration}[/bold]",
-            border_style="blue",
-        ))
+        console.print(
+            Panel(
+                preview,
+                title=f"[bold]Iteration {iteration}[/bold]",
+                border_style="blue",
+            )
+        )
 
     def on_complete(state: RalphState) -> None:
-        console.print(Panel(
-            f"Iterations: {state.iteration}\n"
-            f"Reason: {state.completion_reason}",
-            title="[bold green]Loop Complete[/bold green]",
-            border_style="green",
-        ))
+        console.print(
+            Panel(
+                f"Iterations: {state.iteration}\nReason: {state.completion_reason}",
+                title="[bold green]Loop Complete[/bold green]",
+                border_style="green",
+            )
+        )
 
     try:
         ralph = RalphWiggum(client)
@@ -1016,21 +1064,22 @@ def status() -> None:
     if cli_path:
         try:
             result = subprocess.run(
-                [cli_path, "--version"],
-                capture_output=True, text=True, timeout=5
+                [cli_path, "--version"], capture_output=True, text=True, timeout=5
             )
             copilot_version = result.stdout.strip() or result.stderr.strip()
         except Exception:
             pass
 
-    console.print(Panel(
-        f"[bold]Copex Version:[/bold] {__version__}\n"
-        f"[bold]Copilot CLI:[/bold] {cli_path or '[red]Not found[/red]'}\n"
-        f"[bold]Copilot Version:[/bold] {copilot_version}\n"
-        f"[bold]GitHub CLI:[/bold] {gh_path or '[red]Not found[/red]'}",
-        title="Copex Status",
-        border_style="blue",
-    ))
+    console.print(
+        Panel(
+            f"[bold]Copex Version:[/bold] {__version__}\n"
+            f"[bold]Copilot CLI:[/bold] {cli_path or '[red]Not found[/red]'}\n"
+            f"[bold]Copilot Version:[/bold] {copilot_version}\n"
+            f"[bold]GitHub CLI:[/bold] {gh_path or '[red]Not found[/red]'}",
+            title="Copex Status",
+            border_style="blue",
+        )
+    )
 
     if not cli_path:
         console.print("\n[red]Copilot CLI not found.[/red]")
@@ -1049,7 +1098,9 @@ def status() -> None:
 
 @app.command("plan")
 def plan_command(
-    task: Annotated[Optional[str], typer.Argument(help="Task to plan (optional with --resume)")] = None,
+    task: Annotated[
+        Optional[str], typer.Argument(help="Task to plan (optional with --resume)")
+    ] = None,
     execute: Annotated[
         bool, typer.Option("--execute", "-e", help="Execute the plan after generating")
     ] = False,
@@ -1066,14 +1117,13 @@ def plan_command(
         int, typer.Option("--from-step", "-f", help="Resume execution from step number")
     ] = 1,
     load_plan: Annotated[
-        Optional[Path], typer.Option("--load", "-l", help="Load plan from file instead of generating")
+        Optional[Path],
+        typer.Option("--load", "-l", help="Load plan from file instead of generating"),
     ] = None,
     max_iterations: Annotated[
         int, typer.Option("--max-iterations", "-n", help="Max iterations per step (Ralph loop)")
     ] = 10,
-    model: Annotated[
-        str | None, typer.Option("--model", "-m", help="Model to use")
-    ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
@@ -1092,7 +1142,7 @@ def plan_command(
     if not task and not resume and not load_plan:
         console.print("[red]Error: Provide a task, --resume, or --load[/red]")
         raise typer.Exit(1)
-    
+
     effective_model = model or _DEFAULT_MODEL.value
     try:
         model_enum = Model(effective_model)
@@ -1109,17 +1159,19 @@ def plan_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    asyncio.run(_run_plan(
-        config=config,
-        task=task or "",
-        execute=execute or review or resume,  # --resume implies --execute
-        review=review,
-        resume=resume,
-        output=output,
-        from_step=from_step,
-        load_plan=load_plan,
-        max_iterations=max_iterations,
-    ))
+    asyncio.run(
+        _run_plan(
+            config=config,
+            task=task or "",
+            execute=execute or review or resume,  # --resume implies --execute
+            review=review,
+            resume=resume,
+            output=output,
+            from_step=from_step,
+            load_plan=load_plan,
+            max_iterations=max_iterations,
+        )
+    )
 
 
 def _format_duration(seconds: float) -> str:
@@ -1155,7 +1207,7 @@ async def _run_plan(
         ralph = RalphWiggum(client)
         executor = PlanExecutor(client, ralph=ralph)
         executor.max_iterations_per_step = max_iterations
-        
+
         # Check for resume from checkpoint
         if resume:
             state = PlanState.load()
@@ -1163,17 +1215,19 @@ async def _run_plan(
                 console.print("[red]No checkpoint found (.copex-state.json)[/red]")
                 console.print("[dim]Run a plan with --execute first to create a checkpoint[/dim]")
                 raise typer.Exit(1)
-            
+
             plan = state.plan
             from_step = state.current_step
-            console.print(Panel(
-                f"[bold]Resuming plan:[/bold] {state.task}\n"
-                f"[dim]Started:[/dim] {state.started_at}\n"
-                f"[dim]Completed steps:[/dim] {len(state.completed)}/{len(plan.steps)}\n"
-                f"[dim]Resuming from step:[/dim] {from_step}",
-                title="🔄 Resume from Checkpoint",
-                border_style="yellow",
-            ))
+            console.print(
+                Panel(
+                    f"[bold]Resuming plan:[/bold] {state.task}\n"
+                    f"[dim]Started:[/dim] {state.started_at}\n"
+                    f"[dim]Completed steps:[/dim] {len(state.completed)}/{len(plan.steps)}\n"
+                    f"[dim]Resuming from step:[/dim] {from_step}",
+                    title="🔄 Resume from Checkpoint",
+                    border_style="yellow",
+                )
+            )
         elif load_plan:
             # Load from plan file
             if not load_plan.exists():
@@ -1183,69 +1237,73 @@ async def _run_plan(
             console.print(f"[green]✓ Loaded plan from {load_plan}[/green]\n")
         else:
             # Generate new plan
-            console.print(Panel(
-                f"[bold]Generating plan for:[/bold]\n{task}",
-                title="📋 Plan Mode",
-                border_style="blue",
-            ))
-            
+            console.print(
+                Panel(
+                    f"[bold]Generating plan for:[/bold]\n{task}",
+                    title="📋 Plan Mode",
+                    border_style="blue",
+                )
+            )
+
             plan = await executor.generate_plan(task)
             console.print(f"\n[green]✓ Generated {len(plan.steps)} steps[/green]\n")
-        
+
         # Display plan
         _display_plan(plan)
-        
+
         # Save plan if requested
         if output:
             plan.save(output)
             console.print(f"\n[green]✓ Saved plan to {output}[/green]")
-        
+
         # Execute if requested
         if execute:
             if review:
                 if not typer.confirm("\nProceed with execution?"):
                     console.print("[yellow]Execution cancelled[/yellow]")
                     return
-            
+
             console.print(f"\n[bold blue]Executing from step {from_step}...[/bold blue]\n")
-            
+
             # Track execution timing
             plan_start_time = time.time()
-            
+
             def on_step_start(step: PlanStep) -> None:
                 total = len(plan.steps)
                 console.print(f"[blue]⏳ Step {step.number}/{total}:[/blue] {step.description}")
-            
+
             def on_step_complete(step: PlanStep) -> None:
                 # Format duration
                 duration = step.duration_seconds or 0
                 duration_str = _format_duration(duration)
-                
+
                 # Get result preview
                 preview = (step.result or "")[:100]
                 if len(step.result or "") > 100:
                     preview += "..."
-                
+
                 console.print(f"[green]✓ Step {step.number} complete ({duration_str})[/green]")
                 if preview:
                     console.print(f"  [dim]— {preview}[/dim]")
-                
+
                 # Show ETA after 2+ steps completed
                 completed_count = plan.completed_count
                 if completed_count >= 2:
                     remaining_est = plan.estimate_remaining_seconds()
                     if remaining_est is not None:
-                        console.print(f"  [dim cyan]Estimated remaining: ~{_format_duration(remaining_est)}[/dim cyan]")
-                
+                        console.print(
+                            f"  [dim cyan]Estimated remaining: ~{_format_duration(remaining_est)}[/dim cyan]"
+                        )
+
                 console.print()
-            
+
             def on_error(step: PlanStep, error: Exception) -> bool:
                 duration = step.duration_seconds or 0
                 duration_str = _format_duration(duration)
                 console.print(f"[red]✗ Step {step.number} failed ({duration_str}): {error}[/red]")
-                console.print(f"[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
+                console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
                 return typer.confirm("Continue with next step?", default=False)
-            
+
             await executor.execute_plan(
                 plan,
                 from_step=from_step,
@@ -1254,18 +1312,18 @@ async def _run_plan(
                 on_error=on_error,
                 save_checkpoints=True,
             )
-            
+
             # Calculate total time
             total_time = time.time() - plan_start_time
-            
+
             # Show enhanced summary
             _display_plan_summary_enhanced(plan, total_time)
-            
+
             # Save updated plan
             if output:
                 plan.save(output)
                 console.print(f"\n[green]✓ Updated plan saved to {output}[/green]")
-    
+
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
         console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
@@ -1294,25 +1352,31 @@ def _display_plan_summary(plan: Plan) -> None:
     completed = plan.completed_count
     failed = plan.failed_count
     total = len(plan.steps)
-    
+
     if plan.is_complete and failed == 0:
-        console.print(Panel(
-            f"[green]All {total} steps completed successfully![/green]",
-            title="✅ Plan Complete",
-            border_style="green",
-        ))
+        console.print(
+            Panel(
+                f"[green]All {total} steps completed successfully![/green]",
+                title="✅ Plan Complete",
+                border_style="green",
+            )
+        )
     elif failed > 0:
-        console.print(Panel(
-            f"Completed: {completed}/{total}\nFailed: {failed}",
-            title="⚠️ Plan Incomplete",
-            border_style="yellow",
-        ))
+        console.print(
+            Panel(
+                f"Completed: {completed}/{total}\nFailed: {failed}",
+                title="⚠️ Plan Incomplete",
+                border_style="yellow",
+            )
+        )
     else:
-        console.print(Panel(
-            f"Completed: {completed}/{total}",
-            title="📋 Progress",
-            border_style="blue",
-        ))
+        console.print(
+            Panel(
+                f"Completed: {completed}/{total}",
+                title="📋 Progress",
+                border_style="blue",
+            )
+        )
 
 
 def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
@@ -1320,31 +1384,31 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
     completed = plan.completed_count
     failed = plan.failed_count
     total = len(plan.steps)
-    
+
     # Build summary lines
     lines = []
-    
+
     if plan.is_complete and failed == 0:
         lines.append(f"[green]✅ {completed}/{total} steps completed successfully![/green]")
     elif failed > 0:
         lines.append(f"[yellow]⚠️ {completed}/{total} steps completed, {failed} failed[/yellow]")
     else:
         lines.append(f"[blue]📋 {completed}/{total} steps completed[/blue]")
-    
+
     # Timing
     lines.append("")
     lines.append(f"[bold]Total time:[/bold] {_format_duration(total_time)}")
-    
+
     # Per-step breakdown
     if completed > 0:
         avg = plan.avg_step_duration
         if avg:
             lines.append(f"[dim]Avg per step: {_format_duration(avg)}[/dim]")
-    
+
     # Token usage (if tracked)
     if plan.total_tokens > 0:
         lines.append(f"[bold]Tokens used:[/bold] {plan.total_tokens:,}")
-    
+
     # Determine panel style
     if plan.is_complete and failed == 0:
         title = "✅ Plan Complete"
@@ -1355,12 +1419,14 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
     else:
         title = "📋 Progress"
         border = "blue"
-    
-    console.print(Panel(
-        "\n".join(lines),
-        title=title,
-        border_style=border,
-    ))
+
+    console.print(
+        Panel(
+            "\n".join(lines),
+            title=title,
+            border_style=border,
+        )
+    )
 
 
 if __name__ == "__main__":

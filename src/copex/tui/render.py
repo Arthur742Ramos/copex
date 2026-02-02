@@ -2,16 +2,14 @@
 
 import io
 from dataclasses import dataclass
-from typing import Any, TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 # NOTE: Avoid __future__.annotations for standalone import in tests (Python 3.14
 # dataclasses resolves string annotations via sys.modules).
-
 from rich.box import ROUNDED
 from rich.console import Console, Group, RenderableType
 from rich.markdown import Markdown
 from rich.panel import Panel
-from rich.style import Style
 from rich.table import Table
 from rich.text import Text
 
@@ -37,6 +35,7 @@ def __getattr__(name: str):
         return _get_ui()[1]
     raise AttributeError(name)
 
+
 __all__ = [
     "RenderConfig",
     "render_to_ansi",
@@ -60,6 +59,7 @@ __all__ = [
 @dataclass
 class RenderConfig:
     """Configuration for rendering."""
+
     width: int | None = None
     show_reasoning: bool = True
     show_tools: bool = True
@@ -75,7 +75,7 @@ def render_to_ansi(
 ) -> str:
     """
     Render a Rich renderable to ANSI escape codes.
-    
+
     This is useful for prompt_toolkit integration where we need
     ANSI-formatted strings.
     """
@@ -102,50 +102,50 @@ def render_status_bar(
     """Render the status bar as ANSI text."""
     Icons, Theme = _get_ui()
     parts = []
-    
+
     # Model
     parts.append(Text(f"  {model} ", style=f"bold {Theme.PRIMARY}"))
-    
+
     # Separator
     parts.append(Text("│", style=Theme.BORDER))
-    
+
     # Reasoning effort
     parts.append(Text(f" {Icons.BRAIN} {reasoning} ", style=Theme.ACCENT))
-    
+
     # Separator
     parts.append(Text("│", style=Theme.BORDER))
-    
+
     # Tokens
     if tokens is None:
         parts.append(Text(" N/A tokens ", style=Theme.INFO))
     else:
         parts.append(Text(f" {tokens:,} tokens ", style=Theme.INFO))
-    
+
     # Separator
     parts.append(Text("│", style=Theme.BORDER))
-    
+
     # Cost
     if cost is None:
         parts.append(Text(" $N/A ", style=Theme.WARNING))
     else:
         parts.append(Text(f" ${cost:.4f} ", style=Theme.SUCCESS if cost < 1.0 else Theme.WARNING))
-    
+
     # Activity indicator (right aligned)
     if is_streaming:
         spinner = "⠋"  # Will be animated by caller
         activity_text = f" {spinner} {activity} "
     else:
         activity_text = f" {Icons.DONE} ready "
-    
+
     # Build full bar
     result = Text()
     for part in parts:
         result.append_text(part)
-    
+
     # Add activity on right
     result.append(" " * 5)  # Spacer
     result.append(activity_text, style=Theme.PRIMARY if is_streaming else Theme.MUTED)
-    
+
     return render_to_ansi(result, width=width)
 
 
@@ -159,7 +159,7 @@ def render_tool_call_collapsed(
     """Render a collapsed tool call as a single line."""
     Icons, Theme = _get_ui()
     text = Text()
-    
+
     # Status indicator
     if status == "running":
         text.append("⏳ ", style=Theme.WARNING)
@@ -167,22 +167,22 @@ def render_tool_call_collapsed(
         text.append(f"{Icons.DONE} ", style=Theme.SUCCESS)
     else:
         text.append(f"{Icons.ERROR} ", style=Theme.ERROR)
-    
+
     # Icon and name
     text.append(f"{icon} ", style=Theme.WARNING)
     text.append(name, style=f"bold {Theme.WARNING}" if status == "running" else Theme.MUTED)
-    
+
     # Duration
     if duration is not None:
         text.append(f" ({duration:.1f}s)", style=Theme.MUTED)
-    
+
     # Expand hint
     text.append("  ▸", style=Theme.MUTED)
-    
+
     # Selection indicator
     if is_selected:
         text.stylize("reverse")
-    
+
     return text
 
 
@@ -197,7 +197,7 @@ def render_tool_call_expanded(
     """Render an expanded tool call with details."""
     Icons, Theme = _get_ui()
     elements = []
-    
+
     # Header
     header = Text()
     if status == "running":
@@ -211,34 +211,34 @@ def render_tool_call_expanded(
     if duration is not None:
         header.append(f" ({duration:.1f}s)", style=Theme.MUTED)
     elements.append(header)
-    
+
     # Arguments
     if arguments:
         args_table = Table(show_header=False, box=None, padding=(0, 1))
         args_table.add_column("Key", style=Theme.MUTED)
         args_table.add_column("Value", style=Theme.MESSAGE)
-        
+
         for key, value in arguments.items():
             val_str = str(value)
             if len(val_str) > 80:
                 val_str = val_str[:77] + "..."
             args_table.add_row(key, val_str)
-        
+
         elements.append(Text())
         elements.append(args_table)
-    
+
     # Result
     if result:
         elements.append(Text())
         elements.append(Text("Result:", style=Theme.SUBHEADER))
-        
+
         # Truncate long results
         result_display = result
         if len(result) > 500:
             result_display = result[:500] + f"\n... ({len(result) - 500} more chars)"
-        
+
         elements.append(Text(result_display, style=Theme.MUTED))
-    
+
     return Panel(
         Group(*elements),
         title=f"[{Theme.WARNING}]{icon} {name}[/{Theme.WARNING}]",
@@ -258,7 +258,7 @@ def render_palette(
     """Render the command palette as ANSI text."""
     Icons, Theme = _get_ui()
     elements = []
-    
+
     # Header with search box
     header = Text()
     header.append(" 🔍 ", style=Theme.PRIMARY)
@@ -266,28 +266,28 @@ def render_palette(
     header.append("│", style=Theme.MUTED)
     elements.append(header)
     elements.append(Text())
-    
+
     # Command list
     if not commands:
         elements.append(Text("  No matching commands", style=Theme.MUTED))
     else:
         for i, (cmd_id, label, description, score) in enumerate(commands[:10]):
             line = Text()
-            
+
             # Selection indicator
             if i == selected_index:
                 line.append(" ▸ ", style=f"bold {Theme.PRIMARY}")
             else:
                 line.append("   ")
-            
+
             # Label
             line.append(label, style="bold" if i == selected_index else "")
-            
+
             # Description
             line.append(f"  {description}", style=Theme.MUTED)
-            
+
             elements.append(line)
-    
+
     # Help text
     elements.append(Text())
     help_text = Text()
@@ -298,7 +298,7 @@ def render_palette(
     help_text.append("Esc", style="bold")
     help_text.append(" close", style=Theme.MUTED)
     elements.append(help_text)
-    
+
     panel = Panel(
         Group(*elements),
         title=f"[{Theme.PRIMARY}]Command Palette[/{Theme.PRIMARY}]",
@@ -308,7 +308,7 @@ def render_palette(
         box=ROUNDED,
         width=min(width or 80, 80),
     )
-    
+
     return render_to_ansi(panel, width=width)
 
 
@@ -349,7 +349,7 @@ def render_message(content: str, is_streaming: bool = False) -> Panel:
     else:
         # Render as markdown when complete
         renderable = Markdown(content)
-    
+
     return Panel(
         renderable,
         title=f"[{Theme.PRIMARY}]{Icons.ROBOT} Response[/{Theme.PRIMARY}]",
@@ -365,10 +365,10 @@ def render_prompt_prefix(model: str, is_multiline: bool = False) -> str:
     Icons, Theme = _get_ui()
     text = Text()
     text.append(f"{Icons.ARROW_RIGHT} ", style=f"bold {Theme.SUCCESS}")
-    
+
     if is_multiline:
         return render_to_ansi(text)
-    
+
     return render_to_ansi(text)
 
 
@@ -376,7 +376,7 @@ def render_continuation_prefix(line_number: int) -> str:
     """Render the continuation prefix for multiline input."""
     Icons, Theme = _get_ui()
     text = Text()
-    text.append(f"   ... ", style=Theme.MUTED)
+    text.append("   ... ", style=Theme.MUTED)
     return render_to_ansi(text)
 
 
@@ -391,10 +391,10 @@ def render_help_panel(shortcuts: list[tuple[str, str]]) -> str:
     )
     table.add_column("Shortcut", style="bold")
     table.add_column("Action", style=Theme.MESSAGE)
-    
+
     for shortcut, description in shortcuts:
         table.add_row(shortcut, description)
-    
+
     panel = Panel(
         table,
         title=f"[{Theme.PRIMARY}]⌨️ Keyboard Shortcuts[/{Theme.PRIMARY}]",
@@ -403,7 +403,7 @@ def render_help_panel(shortcuts: list[tuple[str, str]]) -> str:
         padding=(0, 1),
         box=ROUNDED,
     )
-    
+
     return render_to_ansi(panel)
 
 

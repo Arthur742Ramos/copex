@@ -21,6 +21,7 @@ from typing import Any, Callable, TextIO
 
 class ProgressStatus(str, Enum):
     """Status of a progress item."""
+
     PENDING = "pending"
     RUNNING = "running"
     COMPLETED = "completed"
@@ -31,6 +32,7 @@ class ProgressStatus(str, Enum):
 @dataclass
 class ProgressItem:
     """A single progress item (e.g., a plan step)."""
+
     id: str | int
     description: str
     status: ProgressStatus = ProgressStatus.PENDING
@@ -51,6 +53,7 @@ class ProgressItem:
 @dataclass
 class ProgressState:
     """Overall progress state."""
+
     total: int = 0
     completed: int = 0
     failed: int = 0

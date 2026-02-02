@@ -11,18 +11,18 @@ from typing import TYPE_CHECKING, Any, Callable
 # Python 3.14's dataclasses will crash when __future__.annotations is enabled in
 # such a loading mode (all annotations become strings, which dataclasses tries
 # to resolve via sys.modules). So we avoid __future__.annotations here.
-
 from copex.models import Model, ReasoningEffort
 
 DEFAULT_MODEL: Model | str = Model.CLAUDE_OPUS_4_5
 DEFAULT_REASONING: ReasoningEffort | str = ReasoningEffort.XHIGH
 
 if TYPE_CHECKING:
-    from copex.ui import ToolCallInfo
+    pass
 
 
 class TuiMode(str, Enum):
     """Current TUI mode."""
+
     NORMAL = "normal"
     PALETTE = "palette"
     PICKER = "picker"
@@ -30,6 +30,7 @@ class TuiMode(str, Enum):
 
 class PanelState(str, Enum):
     """State of a collapsible panel."""
+
     COLLAPSED = "collapsed"
     EXPANDED = "expanded"
 
@@ -37,6 +38,7 @@ class PanelState(str, Enum):
 @dataclass
 class ToolCallState:
     """State of a tool call with collapse tracking."""
+
     tool_id: str = ""
     name: str = ""
     arguments: dict[str, Any] = field(default_factory=dict)
@@ -84,8 +86,8 @@ class ToolCallState:
     @property
     def summary(self) -> str:
         """One-line summary for collapsed state."""
-        status_icon = "⏳" if self.status == "running" else (
-            "✓" if self.status == "success" else "✗"
+        status_icon = (
+            "⏳" if self.status == "running" else ("✓" if self.status == "success" else "✗")
         )
         duration = f" ({self.elapsed:.1f}s)" if self.elapsed else ""
         return f"{status_icon} {self.icon} {self.name}{duration}"
@@ -94,6 +96,7 @@ class ToolCallState:
 @dataclass
 class SessionState:
     """State for a Copex session."""
+
     model: Model | str = DEFAULT_MODEL
     reasoning_effort: ReasoningEffort | str = DEFAULT_REASONING
 
@@ -197,6 +200,7 @@ class SessionState:
 @dataclass
 class PromptDraft:
     """A saved prompt draft."""
+
     content: str
     cursor_position: int = 0
     created_at: float = field(default_factory=time.time)
@@ -205,6 +209,7 @@ class PromptDraft:
 @dataclass
 class TuiState:
     """Complete TUI state."""
+
     # Session
     session: SessionState = field(default_factory=SessionState)
 
@@ -307,9 +312,13 @@ class TuiState:
         return self.restore_stash(new_index)
 
     # Tool call operations
-    def add_tool_call(self, tool_id: str | None = None, name: str = "", arguments: dict[str, Any] | None = None) -> None:
+    def add_tool_call(
+        self, tool_id: str | None = None, name: str = "", arguments: dict[str, Any] | None = None
+    ) -> None:
         """Add a new tool call."""
-        self.tool_calls.append(ToolCallState(tool_id=tool_id or "", name=name, arguments=arguments or {}))
+        self.tool_calls.append(
+            ToolCallState(tool_id=tool_id or "", name=name, arguments=arguments or {})
+        )
         self.notify_change()
 
     def update_tool_call(self, tool_id: str | None = None, **kwargs: Any) -> None:

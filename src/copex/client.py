@@ -138,9 +138,7 @@ class Copex:
         if self.config.retry.retry_on_any_error:
             return True
         error_str = str(error).lower()
-        return any(
-            pattern.lower() in error_str for pattern in self.config.retry.retry_on_errors
-        )
+        return any(pattern.lower() in error_str for pattern in self.config.retry.retry_on_errors)
 
     def _is_tool_state_error(self, error: str | Exception) -> bool:
         """Detect tool-state mismatch errors that require session recovery."""
@@ -149,7 +147,7 @@ class Copex:
 
     def _calculate_delay(self, attempt: int) -> float:
         """Calculate delay with exponential backoff and jitter."""
-        delay = self.config.retry.base_delay * (self.config.retry.exponential_base ** attempt)
+        delay = self.config.retry.base_delay * (self.config.retry.exponential_base**attempt)
         delay = min(delay, self.config.retry.max_delay)
         # Add jitter (±25%)
         jitter = delay * 0.25 * (2 * random.random() - 1)
@@ -167,7 +165,11 @@ class Copex:
         if delta:
             state.received_content = True
         state.content_parts.append(delta)
-        if state.awaiting_post_tool_response and state.tool_execution_seen and state.pending_tools == 0:
+        if (
+            state.awaiting_post_tool_response
+            and state.tool_execution_seen
+            and state.pending_tools == 0
+        ):
             state.awaiting_post_tool_response = False
         if on_chunk:
             on_chunk(StreamChunk(type="message", delta=delta))
@@ -195,15 +197,21 @@ class Copex:
         state.final_content = content
         if content:
             state.received_content = True
-        if state.awaiting_post_tool_response and state.tool_execution_seen and state.pending_tools == 0:
+        if (
+            state.awaiting_post_tool_response
+            and state.tool_execution_seen
+            and state.pending_tools == 0
+        ):
             state.awaiting_post_tool_response = False
         if on_chunk:
-            on_chunk(StreamChunk(
-                type="message",
-                delta="",
-                is_final=True,
-                content=state.final_content,
-            ))
+            on_chunk(
+                StreamChunk(
+                    type="message",
+                    delta="",
+                    is_final=True,
+                    content=state.final_content,
+                )
+            )
 
     def _handle_reasoning(
         self,
@@ -213,12 +221,14 @@ class Copex:
     ) -> None:
         state.final_reasoning = getattr(event.data, "content", "") or ""
         if on_chunk:
-            on_chunk(StreamChunk(
-                type="reasoning",
-                delta="",
-                is_final=True,
-                content=state.final_reasoning,
-            ))
+            on_chunk(
+                StreamChunk(
+                    type="reasoning",
+                    delta="",
+                    is_final=True,
+                    content=state.final_reasoning,
+                )
+            )
 
     def _extract_tool_id(self, data: Any) -> str | None:
         """Extract tool ID from event data using common fields."""
@@ -242,12 +252,14 @@ class Copex:
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
         if on_chunk:
-            on_chunk(StreamChunk(
-                type="tool_call",
-                tool_id=str(tool_id) if tool_id else None,
-                tool_name=str(tool_name) if tool_name else "unknown",
-                tool_args=tool_args if isinstance(tool_args, dict) else {},
-            ))
+            on_chunk(
+                StreamChunk(
+                    type="tool_call",
+                    tool_id=str(tool_id) if tool_id else None,
+                    tool_name=str(tool_name) if tool_name else "unknown",
+                    tool_args=tool_args if isinstance(tool_args, dict) else {},
+                )
+            )
 
     def _handle_tool_execution_partial_result(
         self,
@@ -261,12 +273,14 @@ class Copex:
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
         if on_chunk and partial:
-            on_chunk(StreamChunk(
-                type="tool_result",
-                tool_id=str(tool_id) if tool_id else None,
-                tool_name=str(tool_name) if tool_name else "unknown",
-                tool_result=str(partial),
-            ))
+            on_chunk(
+                StreamChunk(
+                    type="tool_result",
+                    tool_id=str(tool_id) if tool_id else None,
+                    tool_name=str(tool_name) if tool_name else "unknown",
+                    tool_result=str(partial),
+                )
+            )
 
     def _handle_tool_execution_complete(
         self,
@@ -286,14 +300,16 @@ class Copex:
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
         if on_chunk:
-            on_chunk(StreamChunk(
-                type="tool_result",
-                tool_id=str(tool_id) if tool_id else None,
-                tool_name=str(tool_name) if tool_name else "unknown",
-                tool_result=result_text,
-                tool_success=success,
-                tool_duration=duration,
-            ))
+            on_chunk(
+                StreamChunk(
+                    type="tool_result",
+                    tool_id=str(tool_id) if tool_id else None,
+                    tool_name=str(tool_name) if tool_name else "unknown",
+                    tool_result=result_text,
+                    tool_success=success,
+                    tool_duration=duration,
+                )
+            )
 
     def _handle_error_event(self, event: Any, state: _SendState) -> None:
         error_msg = str(getattr(event.data, "message", event.data))
@@ -313,17 +329,20 @@ class Copex:
         state.awaiting_post_tool_response = True
         if isinstance(tool_args, str):
             import json
+
             try:
                 tool_args = json.loads(tool_args)
             except Exception:
                 tool_args = {"raw": tool_args}
         if on_chunk:
-            on_chunk(StreamChunk(
-                type="tool_call",
-                tool_id=str(tool_id) if tool_id else None,
-                tool_name=str(tool_name),
-                tool_args=tool_args if isinstance(tool_args, dict) else {},
-            ))
+            on_chunk(
+                StreamChunk(
+                    type="tool_call",
+                    tool_id=str(tool_id) if tool_id else None,
+                    tool_name=str(tool_name),
+                    tool_args=tool_args if isinstance(tool_args, dict) else {},
+                )
+            )
 
     def _handle_assistant_turn_end(self, state: _SendState) -> None:
         if not state.awaiting_post_tool_response:
@@ -342,34 +361,34 @@ class Copex:
 
     async def _create_session_with_reasoning(self) -> CopilotSession:
         """Create a session with reasoning effort support.
-        
+
         The GitHub Copilot SDK's create_session() ignores model_reasoning_effort,
         so we bypass it and call the JSON-RPC directly to inject this parameter.
-        
+
         Falls back to SDK's create_session() in test environments where the
         internal JSON-RPC client isn't accessible.
         """
         opts = self.config.to_session_options()
-        
+
         # Check if we can access the internal JSON-RPC client
         # If not (e.g., in tests with mocked clients), fall back to SDK's create_session
-        if not hasattr(self._client, '_client') or self._client._client is None:
+        if not hasattr(self._client, "_client") or self._client._client is None:
             return await self._client.create_session(opts)
-        
+
         # Build the wire payload with proper camelCase keys
         payload: dict[str, Any] = {}
-        
+
         if opts.get("model"):
             payload["model"] = opts["model"]
         if opts.get("streaming") is not None:
             payload["streaming"] = opts["streaming"]
-        
+
         # The key fix: inject modelReasoningEffort directly into the wire payload
         # The SDK's create_session() drops this, but the server accepts it!
         reasoning_effort = opts.get("model_reasoning_effort")
         if reasoning_effort and reasoning_effort != "none":
             payload["modelReasoningEffort"] = reasoning_effort
-        
+
         # Map other session options
         if opts.get("system_message"):
             payload["systemMessage"] = opts["system_message"]
@@ -393,22 +412,24 @@ class Copex:
                 payload["systemMessage"] = {"mode": "append", "content": opts["instructions"]}
             elif isinstance(payload["systemMessage"], dict):
                 existing = payload["systemMessage"].get("content", "")
-                payload["systemMessage"]["content"] = f"{existing}\n\n{opts['instructions']}" if existing else opts["instructions"]
+                payload["systemMessage"]["content"] = (
+                    f"{existing}\n\n{opts['instructions']}" if existing else opts["instructions"]
+                )
 
         # Call the JSON-RPC directly, bypassing the SDK's create_session
         response = await self._client._client.request("session.create", payload)
-        
+
         session_id = response["sessionId"]
         workspace_path = response.get("workspacePath")
-        
+
         # Create a CopilotSession using the SDK's class
         session = CopilotSession(session_id, self._client._client, workspace_path)
-        
+
         # Register the session with the client for event dispatch
         # Note: we access the internal _sessions dict since we bypassed create_session
         with self._client._sessions_lock:
             self._client._sessions[session_id] = session
-        
+
         return session
 
     async def _get_session_context(self, session: Any) -> str | None:
@@ -443,7 +464,9 @@ class Copex:
         except Exception:
             return None
 
-    async def _recover_session(self, on_chunk: Callable[[StreamChunk], None] | None) -> tuple[Any, str]:
+    async def _recover_session(
+        self, on_chunk: Callable[[StreamChunk], None] | None
+    ) -> tuple[Any, str]:
         """Destroy bad session and create new one, preserving context."""
         context = None
         if self._session:
@@ -468,10 +491,12 @@ class Copex:
             recovery_prompt = self.config.continue_prompt
 
         if on_chunk:
-            on_chunk(StreamChunk(
-                type="system",
-                delta="\n[Session recovered with fresh connection]\n",
-            ))
+            on_chunk(
+                StreamChunk(
+                    type="system",
+                    delta="\n[Session recovered with fresh connection]\n",
+                )
+            )
 
         return session, recovery_prompt
 
@@ -543,10 +568,12 @@ class Copex:
                     retries = 0
                     session, prompt = await self._recover_session(on_chunk)
                     if on_chunk:
-                        on_chunk(StreamChunk(
-                            type="system",
-                            delta="\n[Tool state mismatch detected; recovered session]\n",
-                        ))
+                        on_chunk(
+                            StreamChunk(
+                                type="system",
+                                delta="\n[Tool state mismatch detected; recovered session]\n",
+                            )
+                        )
                     delay = self._calculate_delay(0)
                     await asyncio.sleep(delay)
                     continue
@@ -565,12 +592,17 @@ class Copex:
                     # Normal retry with exponential backoff (same session)
                     delay = self._calculate_delay(retries - 1)
                     if on_chunk:
-                        on_chunk(StreamChunk(
-                            type="system",
-                            delta=f"\n[Retry {retries}/{self.config.retry.max_retries} after error: {error_str[:50]}...]\n",
-                        ))
+                        on_chunk(
+                            StreamChunk(
+                                type="system",
+                                delta=f"\n[Retry {retries}/{self.config.retry.max_retries} after error: {error_str[:50]}...]\n",
+                            )
+                        )
                     await asyncio.sleep(delay)
-                elif self.config.auto_continue and auto_continues < self.config.retry.max_auto_continues:
+                elif (
+                    self.config.auto_continue
+                    and auto_continues < self.config.retry.max_auto_continues
+                ):
                     # Retries exhausted - session may be in bad state
                     # Recover with fresh session, preserving context
                     auto_continues += 1
@@ -578,10 +610,12 @@ class Copex:
                     session, prompt = await self._recover_session(on_chunk)
                     delay = self._calculate_delay(0)
                     if on_chunk:
-                        on_chunk(StreamChunk(
-                            type="system",
-                            delta=f"\n[Auto-continue #{auto_continues}/{self.config.retry.max_auto_continues} with fresh session]\n",
-                        ))
+                        on_chunk(
+                            StreamChunk(
+                                type="system",
+                                delta=f"\n[Auto-continue #{auto_continues}/{self.config.retry.max_auto_continues} with fresh session]\n",
+                            )
+                        )
                     await asyncio.sleep(delay)
                 else:
                     collector.complete_request(
@@ -706,7 +740,9 @@ class Copex:
                         message_type.value if hasattr(message_type, "value") else str(message_type)
                     )
                     if message_value == EventType.ASSISTANT_MESSAGE.value:
-                        state.final_content = getattr(message.data, "content", "") or state.final_content
+                        state.final_content = (
+                            getattr(message.data, "content", "") or state.final_content
+                        )
                         if state.final_content:
                             break
             except Exception:
@@ -717,9 +753,8 @@ class Copex:
 
         return Response(
             content=state.final_content or "".join(state.content_parts),
-            reasoning=state.final_reasoning or (
-                "".join(state.reasoning_parts) if state.reasoning_parts else None
-            ),
+            reasoning=state.final_reasoning
+            or ("".join(state.reasoning_parts) if state.reasoning_parts else None),
             raw_events=state.raw_events,
             prompt_tokens=state.prompt_tokens,
             completion_tokens=state.completion_tokens,
@@ -800,7 +835,9 @@ async def copex(
     """
     config = CopexConfig(
         model=Model(model) if isinstance(model, str) else model,
-        reasoning_effort=parse_reasoning_effort(reasoning) if isinstance(reasoning, str) else reasoning,
+        reasoning_effort=parse_reasoning_effort(reasoning)
+        if isinstance(reasoning, str)
+        else reasoning,
         **kwargs,
     )
     client = Copex(config)

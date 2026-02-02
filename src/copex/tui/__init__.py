@@ -9,10 +9,10 @@ This module provides an enhanced TUI experience for Copex with:
 
 Usage:
     from copex.tui import run_tui, TuiApp
-    
+
     # Run with defaults
     await run_tui()
-    
+
     # Run with custom config
     from copex import CopexConfig
     config = CopexConfig(model=Model.CLAUDE_OPUS_4_5)
@@ -53,6 +53,7 @@ from .state import PanelState, SessionState, ToolCallState, TuiMode, TuiState
 # App requires prompt_toolkit - import lazily
 try:
     from .app import TuiApp, main, run_tui
+
     _HAS_PROMPT_TOOLKIT = True
 except ImportError:
     TuiApp = None  # type: ignore
