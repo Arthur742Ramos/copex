@@ -14,10 +14,10 @@ logger = logging.getLogger(__name__)
 
 class CopexError(Exception):
     """Base exception for Copex errors.
-    
+
     All Copex exceptions inherit from this class to allow catching
     any Copex-related error with a single except clause.
-    
+
     Attributes:
         message: Human-readable error description
         context: Additional context for debugging
@@ -45,7 +45,7 @@ class CopexError(Exception):
 
 class ConfigError(CopexError):
     """Raised for configuration errors.
-    
+
     Examples:
         - Invalid model name
         - Invalid reasoning level
@@ -56,7 +56,7 @@ class ConfigError(CopexError):
 
 class MCPError(CopexError):
     """Raised for MCP (Model Context Protocol) related errors.
-    
+
     Examples:
         - MCP server connection failure
         - Tool execution failure
@@ -83,7 +83,7 @@ class MCPError(CopexError):
 
 class RetryError(CopexError):
     """Raised when all retry attempts have been exhausted.
-    
+
     Attributes:
         attempts: Number of attempts made
         last_error: The last error that occurred
@@ -107,7 +107,7 @@ class RetryError(CopexError):
 
 class PlanExecutionError(CopexError):
     """Raised when plan execution fails.
-    
+
     Attributes:
         step_index: The step that failed (0-indexed)
         step_name: Name of the failed step
@@ -137,7 +137,7 @@ class PlanExecutionError(CopexError):
 
 class ValidationError(CopexError):
     """Raised for input validation errors.
-    
+
     Examples:
         - Invalid file path
         - Invalid model name
@@ -163,7 +163,7 @@ class ValidationError(CopexError):
 
 class SecurityError(CopexError):
     """Raised for security-related violations.
-    
+
     Examples:
         - Path traversal attempt
         - Disallowed environment variable
@@ -185,7 +185,7 @@ class SecurityError(CopexError):
 
 class TimeoutError(CopexError):
     """Raised when an operation times out.
-    
+
     Attributes:
         timeout_seconds: The timeout value that was exceeded
         operation: Description of the operation that timed out
@@ -210,7 +210,7 @@ class TimeoutError(CopexError):
 
 class AuthenticationError(CopexError):
     """Raised for authentication/authorization failures.
-    
+
     Examples:
         - GitHub token expired
         - Invalid credentials
@@ -220,7 +220,7 @@ class AuthenticationError(CopexError):
 
 class RateLimitError(CopexError):
     """Raised when rate limits are exceeded.
-    
+
     Attributes:
         retry_after: Seconds to wait before retrying (if known)
     """
@@ -240,7 +240,7 @@ class RateLimitError(CopexError):
 
 class ConnectionError(CopexError):
     """Raised for network connection errors.
-    
+
     Attributes:
         host: The host that couldn't be reached
         port: The port number

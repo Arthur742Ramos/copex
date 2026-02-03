@@ -11,19 +11,19 @@ Provides pre-built templates for:
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import Any, Callable
+from typing import Any
 
-from copex.conditions import Condition, when
+from copex.conditions import Condition
 
 
 @dataclass
 class StepTemplate:
     """A reusable step template.
-    
+
     Templates define the structure of a step with placeholders
     that can be filled in when instantiated.
     """
-    
+
     name: str
     description_template: str  # Can contain {placeholders}
     prompt_template: str       # Main instruction template
@@ -31,13 +31,13 @@ class StepTemplate:
     depends_on: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
-    
+
     def instantiate(self, **kwargs: Any) -> "StepInstance":
         """Create a concrete step instance from this template.
-        
+
         Args:
             **kwargs: Values for placeholders in the template
-        
+
         Returns:
             A StepInstance with all placeholders filled
         """
@@ -55,7 +55,7 @@ class StepTemplate:
 @dataclass
 class StepInstance:
     """A concrete step created from a template."""
-    
+
     name: str
     description: str
     prompt: str
@@ -293,11 +293,11 @@ Report PR URL.""",
 
 class TemplateRegistry:
     """Registry of available step templates."""
-    
+
     def __init__(self) -> None:
         self._templates: dict[str, StepTemplate] = {}
         self._register_builtins()
-    
+
     def _register_builtins(self) -> None:
         """Register built-in templates."""
         builtins = [
@@ -321,32 +321,32 @@ class TemplateRegistry:
         ]
         for template in builtins:
             self.register(template)
-    
+
     def register(self, template: StepTemplate) -> None:
         """Register a template."""
         self._templates[template.name] = template
-    
+
     def get(self, name: str) -> StepTemplate | None:
         """Get a template by name."""
         return self._templates.get(name)
-    
+
     def list(self, tag: str | None = None) -> list[StepTemplate]:
         """List templates, optionally filtered by tag."""
         templates = list(self._templates.values())
         if tag:
             templates = [t for t in templates if tag in t.tags]
         return templates
-    
+
     def create_step(self, template_name: str, **kwargs: Any) -> StepInstance:
         """Create a step instance from a template.
-        
+
         Args:
             template_name: Name of the template to use
             **kwargs: Values for template placeholders
-        
+
         Returns:
             A StepInstance
-        
+
         Raises:
             KeyError: If template not found
         """
@@ -381,12 +381,12 @@ def test_workflow(
     options: str = "-v",
 ) -> list[StepInstance]:
     """Create a standard test workflow.
-    
+
     Args:
         framework: Test framework to use
         directory: Test directory
         options: Additional options
-    
+
     Returns:
         List of step instances for the workflow
     """
@@ -414,13 +414,13 @@ def build_workflow(
     type_check: bool = True,
 ) -> list[StepInstance]:
     """Create a standard build workflow.
-    
+
     Args:
         project_name: Name of the project
         build_command: Command to build the project
         lint: Whether to include linting
         type_check: Whether to include type checking
-    
+
     Returns:
         List of step instances for the workflow
     """
@@ -432,7 +432,7 @@ def build_workflow(
             install_command="pip install -r requirements.txt",
         ),
     ]
-    
+
     if lint:
         steps.append(LINT_CODE.instantiate(
             linter="ruff",
@@ -440,7 +440,7 @@ def build_workflow(
             paths="src",
             lint_command="ruff check src",
         ))
-    
+
     if type_check:
         steps.append(TYPE_CHECK.instantiate(
             type_checker="mypy",
@@ -448,13 +448,13 @@ def build_workflow(
             strictness="strict",
             check_command="mypy src",
         ))
-    
+
     steps.append(BUILD_PROJECT.instantiate(
         project_name=project_name,
         build_command=build_command,
         environment="production",
     ))
-    
+
     return steps
 
 
@@ -466,13 +466,13 @@ def deploy_workflow(
     health_endpoint: str | None = None,
 ) -> list[StepInstance]:
     """Create a standard deployment workflow.
-    
+
     Args:
         environment: Target environment
         target: Deployment target
         version: Version to deploy
         health_endpoint: Health check endpoint
-    
+
     Returns:
         List of step instances for the workflow
     """
@@ -484,7 +484,7 @@ def deploy_workflow(
             deploy_command=f"deploy --env {environment} --version {version}",
         ),
     ]
-    
+
     if health_endpoint:
         steps.append(HEALTH_CHECK.instantiate(
             service=target,
@@ -492,12 +492,12 @@ def deploy_workflow(
             expected_status="200",
             timeout="30s",
         ))
-    
+
     # Add rollback as conditional step
     steps.append(ROLLBACK.instantiate(
         environment=environment,
         version="previous",
         reason="Deployment failed",
     ))
-    
+
     return steps

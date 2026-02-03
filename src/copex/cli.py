@@ -1345,7 +1345,7 @@ async def _run_plan(
     visualize: str | None = None,
 ) -> None:
     """Run plan generation and optional execution with beautiful UI."""
-    from copex.ui import PlanUI, format_duration
+    from copex.ui import PlanUI
     from copex.visualization import visualize_plan
 
     client = Copex(config)

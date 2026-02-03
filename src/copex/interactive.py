@@ -32,7 +32,7 @@ from rich.text import Text
 if TYPE_CHECKING:
     from copex.client import Copex, StreamChunk
     from copex.config import CopexConfig
-    from copex.models import Model, ReasoningEffort
+    from copex.models import Model
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -203,7 +203,7 @@ class StreamRenderer:
         elif self.state.phase == "responding":
             text.append(f"  {spinner} ", style=Colors.TEXT_MUTED)
         elif self.state.phase == "tool_call":
-            running = sum(1 for t in self.state.tool_calls if t.status == "running")
+            sum(1 for t in self.state.tool_calls if t.status == "running")
             tool = next((t for t in self.state.tool_calls if t.status == "running"), None)
             text.append(f"  {spinner} ", style=Colors.TEXT_MUTED)
             if tool:
@@ -453,9 +453,14 @@ async def run_interactive(config: "CopexConfig") -> None:
     from pathlib import Path
 
     from copex import __version__
-    from copex.client import Copex, StreamChunk
+    from copex.client import Copex
     from copex.config import save_last_model
-    from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
+    from copex.models import (
+        Model,
+        ReasoningEffort,
+        normalize_reasoning_effort,
+        parse_reasoning_effort,
+    )
 
     console = Console()
     client = Copex(config)
@@ -594,7 +599,6 @@ async def run_interactive(config: "CopexConfig") -> None:
 
 async def _stream_message(console: Console, client: "Copex", prompt: str) -> None:
     """Stream a message with beautiful live updates."""
-    from copex.client import StreamChunk
 
     state = StreamState(model=client.config.model.value)
     state.phase = "thinking"
@@ -682,10 +686,9 @@ async def _stream_message(console: Console, client: "Copex", prompt: str) -> Non
 def _print_welcome(console: Console, model: str, reasoning: str, version: str) -> None:
     """Print welcome banner - clean like Copilot CLI."""
     from pathlib import Path
-    import os
-    
+
     console.print()
-    
+
     # Title line - simple and clean
     title = Text()
     title.append("copex", style=f"bold {Colors.PRIMARY}")
@@ -700,7 +703,7 @@ def _print_welcome(console: Console, model: str, reasoning: str, version: str) -
         display_path = f"~/{cwd.relative_to(home)}"
     except ValueError:
         display_path = str(cwd)
-    
+
     console.print(f"[{Colors.TEXT_MUTED}]Working in: {display_path}[/{Colors.TEXT_MUTED}]")
     console.print(f"[{Colors.TEXT_DIM}]Model: {model} · Reasoning: {reasoning}[/{Colors.TEXT_DIM}]")
     console.print()
@@ -711,7 +714,7 @@ def _print_welcome(console: Console, model: str, reasoning: str, version: str) -
 def _print_help(console: Console) -> None:
     """Print help message - clean like Copilot CLI."""
     console.print()
-    console.print(f"[bold]Commands[/bold]")
+    console.print("[bold]Commands[/bold]")
     console.print()
     cmds = [
         ("/model <name>", "Change model"),
@@ -724,9 +727,9 @@ def _print_help(console: Console) -> None:
     ]
     for cmd, desc in cmds:
         console.print(f"  [{Colors.PRIMARY}]{cmd:22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]{desc}[/{Colors.TEXT_MUTED}]")
-    
+
     console.print()
-    console.print(f"[bold]Keyboard[/bold]")
+    console.print("[bold]Keyboard[/bold]")
     console.print()
     console.print(f"  [{Colors.PRIMARY}]{'Enter':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Send message[/{Colors.TEXT_MUTED}]")
     console.print(f"  [{Colors.PRIMARY}]{'Esc + Enter':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]New line[/{Colors.TEXT_MUTED}]")
@@ -740,11 +743,11 @@ def _print_help(console: Console) -> None:
 def _print_status(console: Console, client: "Copex") -> None:
     """Print current status - clean format."""
     from pathlib import Path
-    
+
     console.print()
-    console.print(f"[bold]Current Session[/bold]")
+    console.print("[bold]Current Session[/bold]")
     console.print()
-    
+
     # Working directory
     cwd = Path.cwd()
     home = Path.home()
@@ -752,7 +755,7 @@ def _print_status(console: Console, client: "Copex") -> None:
         display_path = f"~/{cwd.relative_to(home)}"
     except ValueError:
         display_path = str(cwd)
-    
+
     console.print(f"  [{Colors.TEXT_DIM}]Directory:[/{Colors.TEXT_DIM}]  [{Colors.TEXT_MUTED}]{display_path}[/{Colors.TEXT_MUTED}]")
     console.print(f"  [{Colors.TEXT_DIM}]Model:[/{Colors.TEXT_DIM}]      [{Colors.PRIMARY}]{client.config.model.value}[/{Colors.PRIMARY}]")
     console.print(f"  [{Colors.TEXT_DIM}]Reasoning:[/{Colors.TEXT_DIM}]  [{Colors.ACCENT}]{client.config.reasoning_effort.value}[/{Colors.ACCENT}]")
@@ -764,7 +767,7 @@ def _print_models(console: Console, current: "Model") -> None:
     from copex.models import Model
 
     console.print()
-    console.print(f"[bold]Available Models[/bold]")
+    console.print("[bold]Available Models[/bold]")
     console.print()
     for model in Model:
         if model == current:
