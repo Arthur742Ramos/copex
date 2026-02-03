@@ -1013,6 +1013,15 @@ def ralph_command(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
+    skill_dir: Annotated[
+        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+    ] = None,
+    disable_skill: Annotated[
+        Optional[list[str]], typer.Option("--disable-skill", help="Disable specific skill")
+    ] = None,
+    no_auto_skills: Annotated[
+        bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
+    ] = False,
 ) -> None:
     """
     Start a Ralph Wiggum loop - iterative AI development.
@@ -1035,6 +1044,14 @@ def ralph_command(
             model=model_enum,
             reasoning_effort=normalized_effort,
         )
+
+        # Skills options
+        if skill_dir:
+            config.skill_directories.extend(skill_dir)
+        if disable_skill:
+            config.disabled_skills.extend(disable_skill)
+        if no_auto_skills:
+            config.auto_discover_skills = False
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
@@ -1232,6 +1249,15 @@ def plan_command(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
+    skill_dir: Annotated[
+        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+    ] = None,
+    disable_skill: Annotated[
+        Optional[list[str]], typer.Option("--disable-skill", help="Disable specific skill")
+    ] = None,
+    no_auto_skills: Annotated[
+        bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
+    ] = False,
 ) -> None:
     """
     Generate and optionally execute a step-by-step plan.
@@ -1260,6 +1286,14 @@ def plan_command(
             model=model_enum,
             reasoning_effort=normalized_effort,
         )
+
+        # Skills options
+        if skill_dir:
+            config.skill_directories.extend(skill_dir)
+        if disable_skill:
+            config.disabled_skills.extend(disable_skill)
+        if no_auto_skills:
+            config.auto_discover_skills = False
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
