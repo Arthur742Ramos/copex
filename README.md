@@ -22,6 +22,16 @@ A resilient Python wrapper for the GitHub Copilot SDK with automatic retry, Ralp
 - 💻 **Beautiful CLI** - Rich terminal output with markdown rendering
 - 🖥️ **TUI** - Full-screen terminal UI with command palette (`copex tui`)
 
+### New in v1.1.0
+
+- 📋 **Plan Visualization** - ASCII, Mermaid, and tree views of execution plans (`--visualize`)
+- 🛡️ **Security Module** - Input sanitization, path validation, and env var filtering
+- ⚠️ **Typed Exceptions** - Structured error hierarchy with logging context
+- 🔄 **Adaptive Retry Backoff** - Per-error-category retry strategies with jitter
+- 💾 **Step Caching** - Cache step results with TTL to skip unchanged steps
+- 🔀 **Conditional Steps** - Dynamic plan flows based on conditions and prior outputs
+- 📦 **Step Templates** - Reusable templates for testing, building, and deployment workflows
+
 ## Installation
 
 ```bash
@@ -355,6 +365,235 @@ config = CopexConfig(
 
 - **Ralph Wiggum technique**: [Geoffrey Huntley](https://ghuntley.com/ralph/)
 - **GitHub Copilot SDK**: [github/copilot-sdk](https://github.com/github/copilot-sdk)
+
+## v1.1.0 Features
+
+### Plan Visualization
+
+Visualize execution plans in ASCII, Mermaid, or tree format:
+
+```bash
+# Generate plan with ASCII visualization
+copex plan "Build a REST API" --visualize ascii
+
+# Mermaid diagram (for docs/GitHub)
+copex plan "Build a REST API" --visualize mermaid
+
+# Simple tree view
+copex plan "Build a REST API" --visualize tree
+```
+
+Programmatic usage:
+
+```python
+from copex import Plan, visualize_plan, render_ascii, render_mermaid
+
+plan = Plan(task="Build API", steps=[...])
+
+# Get ASCII visualization
+print(visualize_plan(plan, format="ascii"))
+
+# Get Mermaid diagram
+print(render_mermaid(plan))
+```
+
+### Typed Exception Hierarchy
+
+All exceptions inherit from `CopexError` for unified handling:
+
+```python
+from copex import (
+    CopexError,        # Base exception
+    ConfigError,       # Invalid configuration
+    MCPError,          # MCP server/tool errors
+    RetryError,        # All retries exhausted
+    PlanExecutionError, # Plan step failed
+    ValidationError,   # Input validation failed
+    SecurityError,     # Security violation
+    TimeoutError,      # Operation timed out
+    RateLimitError,    # Rate limit exceeded
+    ConnectionError,   # Network connection failed
+)
+
+try:
+    result = await copex.send(prompt)
+except RateLimitError as e:
+    print(f"Rate limited, retry after {e.retry_after}s")
+except CopexError as e:
+    print(f"Copex error: {e.message}")
+    print(f"Context: {e.context}")
+```
+
+### Adaptive Retry Backoff
+
+Per-error-category retry strategies:
+
+```python
+from copex import AdaptiveRetry, BackoffStrategy, ErrorCategory
+
+# Custom strategies per error type
+retry = AdaptiveRetry(
+    strategies={
+        ErrorCategory.RATE_LIMIT: BackoffStrategy(
+            base_delay=5.0,
+            max_delay=120.0,
+            max_retries=10,
+        ),
+        ErrorCategory.NETWORK: BackoffStrategy(
+            base_delay=1.0,
+            max_delay=30.0,
+            max_retries=5,
+        ),
+    },
+    max_total_time=300.0,  # 5 minute timeout
+)
+
+# Use with any async operation
+result = await retry.execute(some_async_function)
+
+# Or as decorator
+@retry.wrap()
+async def my_operation():
+    ...
+```
+
+### Step Caching
+
+Cache step results to skip unchanged steps:
+
+```python
+from copex import StepCache, get_cache
+
+cache = get_cache(default_ttl=3600)  # 1 hour TTL
+
+# Compute hash for a step
+step_hash = cache.compute_hash(
+    description="Run tests",
+    inputs={"framework": "pytest"},
+    file_paths=["tests/", "src/"],  # Content affects hash
+)
+
+# Check cache
+if cached := cache.get(step_hash):
+    print(f"Cache hit: {cached.result}")
+else:
+    result = run_step()
+    cache.set(step_hash, result)
+
+# Cache stats
+print(cache.stats())
+```
+
+### Conditional Plan Steps
+
+Dynamic plan flows based on conditions:
+
+```python
+from copex import Condition, ConditionContext, when, all_of, any_of
+
+# Built-in conditions
+run_if_success = Condition.step_completed(1)
+run_if_failed = Condition.step_failed(1)
+check_env = Condition.env_equals("CI", "true")
+
+# Expression-based conditions
+deploy_condition = when("${step.3.status} == 'completed'")
+
+# Combine conditions
+full_check = all_of(
+    Condition.step_completed(1),
+    Condition.step_completed(2),
+    "${env.DEPLOY_ENABLED} == 'true'",
+)
+
+# Evaluate against context
+context = ConditionContext(
+    step_outputs={1: "Tests passed"},
+    step_statuses={1: "completed"},
+    env=os.environ,
+    variables={},
+)
+
+if full_check.evaluate(context):
+    run_deployment()
+```
+
+### Step Templates
+
+Reusable templates for common workflows:
+
+```python
+from copex import (
+    create_step,
+    get_registry,
+    test_workflow,
+    build_workflow,
+    deploy_workflow,
+)
+
+# Use built-in templates
+test_step = create_step(
+    "run_tests",
+    test_framework="pytest",
+    directory="tests/",
+    options="-v --cov",
+    command="pytest tests/ -v --cov",
+)
+
+# Pre-built workflows
+steps = test_workflow(framework="pytest", directory="tests")
+steps = build_workflow(project_name="myapp", build_command="python -m build")
+steps = deploy_workflow(environment="prod", target="api", version="1.2.0")
+
+# Register custom templates
+from copex import StepTemplate
+
+my_template = StepTemplate(
+    name="security_scan",
+    description_template="Security scan with {scanner}",
+    prompt_template="Run {scanner} on {paths}...",
+    tags=["security"],
+)
+
+registry = get_registry()
+registry.register(my_template)
+```
+
+### Security Module
+
+Input sanitization and validation:
+
+```python
+from copex import (
+    filter_env_vars,
+    sanitize_command,
+    validate_path,
+    validate_mcp_tool_name,
+    SecurityError,
+)
+
+# Filter environment variables (allowlist-based)
+safe_env = filter_env_vars(
+    os.environ,
+    include_prefixes=["COPEX_", "MY_APP_"],
+)
+
+# Sanitize commands (prevent injection)
+try:
+    safe_cmd = sanitize_command(["ls", "-la", user_input])
+except SecurityError as e:
+    print(f"Dangerous input: {e}")
+
+# Validate paths (prevent traversal)
+try:
+    path = validate_path(
+        user_path,
+        base_dir="/allowed/directory",
+        must_exist=True,
+    )
+except SecurityError as e:
+    print(f"Path violation: {e}")
+```
 
 ## Contributing
 

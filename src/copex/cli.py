@@ -1245,6 +1245,10 @@ def plan_command(
     max_iterations: Annotated[
         int, typer.Option("--max-iterations", "-n", help="Max iterations per step (Ralph loop)")
     ] = 10,
+    visualize: Annotated[
+        Optional[str],
+        typer.Option("--visualize", "-V", help="Show plan visualization (ascii, mermaid, tree)")
+    ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
@@ -1266,6 +1270,7 @@ def plan_command(
         copex plan "Build a REST API"              # Generate plan only
         copex plan "Build a REST API" --execute    # Generate and execute
         copex plan "Build a REST API" --review     # Generate, review, then execute
+        copex plan "Build a REST API" --visualize ascii  # Show ASCII plan graph
         copex plan --resume                        # Resume from .copex-state.json
         copex plan "Continue" --load plan.json -f3 # Resume from step 3
     """
@@ -1309,6 +1314,7 @@ def plan_command(
             from_step=from_step,
             load_plan=load_plan,
             max_iterations=max_iterations,
+            visualize=visualize,
         )
     )
 
@@ -1336,9 +1342,11 @@ async def _run_plan(
     from_step: int,
     load_plan: Path | None,
     max_iterations: int = 10,
+    visualize: str | None = None,
 ) -> None:
     """Run plan generation and optional execution with beautiful UI."""
     from copex.ui import PlanUI, format_duration
+    from copex.visualization import visualize_plan
 
     client = Copex(config)
     await client.start()
@@ -1394,6 +1402,16 @@ async def _run_plan(
         # Display plan overview with new UI
         steps_info = [(s.number, s.description, s.status.value) for s in plan.steps]
         plan_ui.print_plan_overview(steps_info)
+
+        # Show visualization if requested
+        if visualize:
+            try:
+                viz_output = visualize_plan(plan, format=visualize)
+                console.print(f"\n[bold]Plan Visualization ({visualize}):[/bold]")
+                console.print(viz_output)
+                console.print()
+            except ValueError as e:
+                console.print(f"[yellow]Visualization error: {e}[/yellow]")
 
         # Save plan if requested
         if output:
