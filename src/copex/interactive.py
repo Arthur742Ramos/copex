@@ -1,12 +1,14 @@
-"""Beautiful interactive mode for Copex - inspired by Claude Code, OpenCode, and Aider.
+"""Beautiful interactive mode for Copex - inspired by GitHub Copilot CLI.
 
 This module provides a polished interactive chat experience with:
-- Clean prompt showing model name
+- Clean banner showing working directory and model
+- Simple `>` prompt with Tab completion for commands
 - Animated spinner during thinking with elapsed time
 - Smooth streaming with live markdown rendering
-- Compact, collapsible tool call display
-- Persistent status bar with session info
-- Clean stats line after each response
+- Tool call display with ✓/✗ status and duration
+- Clean stats line (API time, tokens, tools)
+- Keyboard shortcuts (Ctrl+L, ↑/↓ history, Esc+Enter multiline)
+- Intuitive commands (/model, /reasoning, /models, /status, /help)
 """
 
 from __future__ import annotations
