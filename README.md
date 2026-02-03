@@ -236,7 +236,40 @@ copex models
 
 # Create default config file
 copex init
+
+# List available skills (auto-discovered)
+copex skills list
+
+# Show skill content
+copex skills show code-review
 ```
+
+### Skills Management
+
+Copex auto-discovers skills from:
+- `.github/skills/` (in repo)
+- `.claude/skills/` (in repo, Claude Code compatibility)
+- `.copex/skills/` (in repo)
+- `~/.config/copex/skills/` (personal skills)
+
+```bash
+# List all discovered skills
+copex skills list
+
+# Show a specific skill
+copex skills show my-skill
+
+# Add explicit skill directory
+copex chat "Do something" --skill-dir ./my-skills
+
+# Disable a specific skill
+copex chat "Do something" --disable-skill broken-skill
+
+# Disable auto-discovery
+copex chat "Do something" --no-auto-skills
+```
+
+The same flags work on `interactive`, `ralph`, and `plan` commands.
 
 ## Configuration
 
@@ -250,8 +283,13 @@ timeout = 300.0
 auto_continue = true
 continue_prompt = "Keep going"
 
-# Skills to enable
+# Skills to enable (named skills)
 skills = ["code-review", "api-design", "test-writer"]
+
+# Skills auto-discovery
+auto_discover_skills = true  # Auto-discover from repo and user dirs
+skill_directories = []       # Explicit skill directories to add
+disabled_skills = []         # Skills to disable by name
 
 # Custom instructions (inline or file path)
 instructions = "Follow our team coding standards. Prefer functional programming."
