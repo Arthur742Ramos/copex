@@ -188,6 +188,18 @@ class CopexConfig(BaseModel):
     skills: list[str] = Field(
         default_factory=list, description="Skills to enable (e.g., ['code-review', 'azure-openai'])"
     )
+    skill_directories: list[str] = Field(
+        default_factory=list, description="Explicit skill directories to load"
+    )
+    disabled_skills: list[str] = Field(
+        default_factory=list, description="Skills to disable"
+    )
+    auto_discover_skills: bool = Field(
+        default=True, description="Auto-discover skills from repo and user dirs"
+    )
+    working_directory: str | None = Field(
+        default=None, description="Working directory for SDK (defaults to cwd)"
+    )
     instructions: str | None = Field(
         default=None, description="Custom instructions for the session"
     )
@@ -296,15 +308,34 @@ class CopexConfig(BaseModel):
 
     def to_session_options(self) -> dict[str, Any]:
         """Convert to create_session options."""
+        from copex.skills import SkillDiscovery
+
         opts: dict[str, Any] = {
             "model": self.model.value,
             "model_reasoning_effort": self.reasoning_effort.value,
             "streaming": self.streaming,
         }
 
-        # Skills
+        # Skills (named skills like 'code-review')
         if self.skills:
             opts["skills"] = self.skills
+
+        # Skill directories - auto-discover + explicit
+        discovery = SkillDiscovery(
+            explicit_dirs=[Path(d) for d in self.skill_directories],
+            disabled_skills=set(self.disabled_skills),
+            auto_discover=self.auto_discover_skills,
+        )
+        skill_dirs = discovery.get_skill_directories_for_sdk()
+        if skill_dirs:
+            opts["skill_directories"] = skill_dirs
+
+        # Disabled skills
+        if self.disabled_skills:
+            opts["disabled_skills"] = self.disabled_skills
+
+        # Working directory (defaults to cwd)
+        opts["working_directory"] = self.working_directory or str(Path.cwd())
 
         # Instructions
         if self.instructions:

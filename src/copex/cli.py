@@ -304,6 +304,15 @@ def chat(
     ui_density: Annotated[
         Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
     ] = None,
+    skill_dir: Annotated[
+        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+    ] = None,
+    disable_skill: Annotated[
+        Optional[list[str]], typer.Option("--disable-skill", help="Disable specific skill")
+    ] = None,
+    no_auto_skills: Annotated[
+        bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
+    ] = False,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors."""
     # Load config: explicit flag wins; otherwise auto-load from ~/.config/copex/config.toml if present
@@ -342,6 +351,14 @@ def chat(
         config.ui_theme = ui_theme
     if ui_density:
         config.ui_density = ui_density
+
+    # Skills options
+    if skill_dir:
+        config.skill_directories.extend(skill_dir)
+    if disable_skill:
+        config.disabled_skills.extend(disable_skill)
+    if no_auto_skills:
+        config.auto_discover_skills = False
 
     # Get prompt from stdin if not provided
     if prompt is None:
@@ -514,6 +531,68 @@ def models() -> None:
         console.print(f"  • {model.value}")
 
 
+# Skills subcommand group
+skills_app = typer.Typer(
+    name="skills",
+    help="Manage and discover skills.",
+    no_args_is_help=True,
+)
+app.add_typer(skills_app, name="skills")
+
+
+@skills_app.command("list")
+def skills_list(
+    skill_dir: Annotated[
+        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+    ] = None,
+    no_auto: Annotated[
+        bool, typer.Option("--no-auto", help="Disable auto-discovery")
+    ] = False,
+) -> None:
+    """List all available skills."""
+    from copex.skills import list_skills
+
+    skills = list_skills(
+        skill_directories=skill_dir,
+        auto_discover=not no_auto,
+    )
+
+    if not skills:
+        console.print("[yellow]No skills found.[/yellow]")
+        console.print("\nSkills are auto-discovered from:")
+        console.print("  • .github/skills/ (in repo)")
+        console.print("  • .claude/skills/ (in repo)")
+        console.print("  • .copex/skills/ (in repo)")
+        console.print("  • ~/.config/copex/skills/ (user)")
+        return
+
+    console.print("[bold]Available Skills:[/bold]\n")
+    for skill in skills:
+        source_label = f"[dim]({skill.source})[/dim]"
+        desc = f" - {skill.description}" if skill.description else ""
+        console.print(f"  • [cyan]{skill.name}[/cyan]{desc} {source_label}")
+        console.print(f"    [dim]{skill.path}[/dim]")
+
+
+@skills_app.command("show")
+def skills_show(
+    name: Annotated[str, typer.Argument(help="Skill name to show")],
+    skill_dir: Annotated[
+        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+    ] = None,
+) -> None:
+    """Show the content of a specific skill."""
+    from copex.skills import get_skill_content
+
+    content = get_skill_content(name, skill_directories=skill_dir)
+
+    if content is None:
+        console.print(f"[red]Skill not found: {name}[/red]")
+        raise typer.Exit(1)
+
+    console.print(Markdown(content))
+
+
 @app.command("tui")
 def tui(
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
@@ -593,6 +672,15 @@ def interactive(
     classic: Annotated[
         bool, typer.Option("--classic", help="Use classic interactive mode (legacy)")
     ] = False,
+    skill_dir: Annotated[
+        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+    ] = None,
+    disable_skill: Annotated[
+        Optional[list[str]], typer.Option("--disable-skill", help="Disable specific skill")
+    ] = None,
+    no_auto_skills: Annotated[
+        bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
+    ] = False,
 ) -> None:
     """Start an interactive chat session."""
     effective_model = model or _DEFAULT_MODEL.value
@@ -611,6 +699,14 @@ def interactive(
             config.ui_theme = ui_theme
         if ui_density:
             config.ui_density = ui_density
+
+        # Skills options
+        if skill_dir:
+            config.skill_directories.extend(skill_dir)
+        if disable_skill:
+            config.disabled_skills.extend(disable_skill)
+        if no_auto_skills:
+            config.auto_discover_skills = False
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
