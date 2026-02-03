@@ -151,7 +151,7 @@ class SkillDiscovery:
 
     def get_skill_directories_for_sdk(self) -> list[str]:
         """Get skill directories as strings for the SDK."""
-        return [str(d) for d in self.discover_skill_directories()]
+        return [str(d.resolve()) for d in self.discover_skill_directories()]
 
 
 def get_working_directory() -> str:
