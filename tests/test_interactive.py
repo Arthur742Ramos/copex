@@ -32,14 +32,14 @@ class TestColors:
 class TestIcons:
     """Test the Icons class."""
 
-    def test_has_prompt_icon(self):
-        assert Icons.PROMPT == "❯"
-
-    def test_has_thinking_icon(self):
-        assert Icons.THINKING == "◐"
-
     def test_has_done_icon(self):
         assert Icons.DONE == "✓"
+
+    def test_has_error_icon(self):
+        assert Icons.ERROR == "✗"
+
+    def test_has_clock_icon(self):
+        assert Icons.CLOCK == "⏱"
 
 
 class TestSpinners:
@@ -47,12 +47,6 @@ class TestSpinners:
 
     def test_dots_has_frames(self):
         assert len(Spinners.DOTS) == 10
-
-    def test_pulse_has_frames(self):
-        assert len(Spinners.PULSE) == 8
-
-    def test_arc_has_frames(self):
-        assert len(Spinners.ARC) == 6
 
 
 class TestToolCall:
@@ -200,14 +194,14 @@ class TestBuildStatsLine:
         ]
         result = _build_stats_line(state)
         plain = result.plain
-        assert "2 tools" in plain
+        assert "Tools: 2" in plain
 
     def test_with_retries(self):
         state = StreamState()
         state.retries = 3
         result = _build_stats_line(state)
         plain = result.plain
-        assert "3 retries" in plain
+        assert "Retries: 3" in plain
 
 
 class TestFormatArgPreview:

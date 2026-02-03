@@ -12,27 +12,19 @@ This module provides a polished interactive chat experience with:
 from __future__ import annotations
 
 import asyncio
-import io
-import sys
 import time
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
-from prompt_toolkit.formatted_text import ANSI, FormattedText
+from prompt_toolkit.formatted_text import FormattedText
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
-from prompt_toolkit.patch_stdout import patch_stdout
 from prompt_toolkit.styles import Style
-from rich.box import ROUNDED
 from rich.console import Console, Group
 from rich.live import Live
 from rich.markdown import Markdown
-from rich.panel import Panel
-from rich.style import Style as RichStyle
-from rich.syntax import Syntax
-from rich.table import Table
 from rich.text import Text
 
 if TYPE_CHECKING:
@@ -71,28 +63,17 @@ class Colors:
 
 
 class Icons:
-    """Unicode icons."""
+    """Unicode icons used in UI."""
 
-    PROMPT = "❯"
-    THINKING = "◐"
     DONE = "✓"
     ERROR = "✗"
-    TOOL = "⚡"
-    BRAIN = "🧠"
-    ROBOT = "🤖"
     CLOCK = "⏱"
-    ARROW = "→"
-    CHEVRON_RIGHT = "›"
-    CHEVRON_DOWN = "▾"
-    SPARKLE = "✨"
 
 
 class Spinners:
     """Spinner animation frames."""
 
     DOTS = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
-    PULSE = ["○", "◔", "◑", "◕", "●", "◕", "◑", "◔"]
-    ARC = ["◜", "◠", "◝", "◞", "◡", "◟"]
 
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -207,55 +188,38 @@ class StreamRenderer:
         return text
 
     def _build_status_line(self) -> Text:
-        """Build the status line showing current activity."""
+        """Build the status line - minimal and calm."""
         text = Text()
         spinner = self.state.spinner
         self.state.advance_frame()
 
+        # Just show spinner + brief phase indicator, all in dim muted style
         if self.state.phase == "thinking":
-            text.append(f" {spinner} ", style=f"bold {Colors.PRIMARY}")
-            text.append("Thinking", style=Colors.PRIMARY)
-            text.append("...", style=Colors.TEXT_MUTED)
+            text.append(f"  {spinner} ", style=Colors.TEXT_MUTED)
         elif self.state.phase == "reasoning":
-            text.append(f" {spinner} ", style=f"bold {Colors.ACCENT}")
-            text.append("Reasoning", style=Colors.ACCENT)
-            text.append("...", style=Colors.TEXT_MUTED)
+            text.append(f"  {spinner} ", style=Colors.TEXT_MUTED)
         elif self.state.phase == "responding":
-            text.append(f" {spinner} ", style=f"bold {Colors.SUCCESS}")
-            text.append("Responding", style=Colors.SUCCESS)
-            text.append("...", style=Colors.TEXT_MUTED)
+            text.append(f"  {spinner} ", style=Colors.TEXT_MUTED)
         elif self.state.phase == "tool_call":
             running = sum(1 for t in self.state.tool_calls if t.status == "running")
-            text.append(f" {spinner} ", style=f"bold {Colors.WARNING}")
-            if running == 1:
-                tool = next(t for t in self.state.tool_calls if t.status == "running")
-                text.append(f"Running {tool.name}", style=Colors.WARNING)
-            else:
-                text.append(f"Running {running} tools", style=Colors.WARNING)
-            text.append("...", style=Colors.TEXT_MUTED)
+            tool = next((t for t in self.state.tool_calls if t.status == "running"), None)
+            text.append(f"  {spinner} ", style=Colors.TEXT_MUTED)
+            if tool:
+                text.append(f"{tool.name}", style=Colors.TEXT_MUTED)
         elif self.state.phase == "done":
-            text.append(f" {Icons.DONE} ", style=f"bold {Colors.SUCCESS}")
-            text.append("Complete", style=Colors.SUCCESS)
+            text.append(f"  {Icons.DONE} ", style=Colors.TEXT_MUTED)
         elif self.state.phase == "error":
-            text.append(f" {Icons.ERROR} ", style=f"bold {Colors.ERROR}")
-            text.append("Error", style=Colors.ERROR)
+            text.append(f"  {Icons.ERROR} ", style=Colors.ERROR)
         else:
-            text.append("   ", style="")
-            text.append("Ready", style=Colors.TEXT_MUTED)
+            text.append("    ", style="")
 
-        # Add elapsed time on the right
-        text.append("  ")
+        # Add elapsed time
         text.append_text(self._format_elapsed())
-
-        # Add model name
-        if self.state.model:
-            text.append("  │  ", style=Colors.TEXT_DIM)
-            text.append(self.state.model, style=Colors.TEXT_MUTED)
 
         return text
 
     def _build_tool_calls_compact(self) -> Text | None:
-        """Build compact tool calls summary."""
+        """Build compact tool calls - clean like Copilot CLI."""
         if not self.state.tool_calls:
             return None
 
@@ -263,34 +227,34 @@ class StreamRenderer:
         running = [t for t in self.state.tool_calls if t.status == "running"]
         completed = [t for t in self.state.tool_calls if t.status != "running"]
 
-        # Show running tools first
+        # Show running tools with spinner and key info
         for tool in running[-self._max_tool_preview :]:
             spinner = self.state.spinner
-            text.append(f"\n  {spinner} ", style=f"bold {Colors.WARNING}")
-            text.append(tool.icon + " ", style=Colors.WARNING)
-            text.append(tool.name, style=Colors.WARNING)
-            # Show key argument
+            text.append(f"{spinner} ", style=Colors.TEXT_MUTED)
+            text.append(tool.name, style=Colors.INFO)
+            # Show key argument inline
             if tool.arguments:
                 arg_preview = self._format_arg_preview(tool.arguments)
                 if arg_preview:
-                    text.append(f" {arg_preview}", style=Colors.TEXT_MUTED)
-            text.append(f"  {tool.elapsed:.1f}s", style=Colors.TEXT_MUTED)
+                    text.append(f" {arg_preview}", style=Colors.TEXT_DIM)
+            text.append("\n")
 
-        # Show completed tools (last few)
+        # Show completed tools - checkmark or x
         for tool in completed[-self._max_tool_preview :]:
-            icon = Icons.DONE if tool.status == "success" else Icons.ERROR
-            style = Colors.SUCCESS if tool.status == "success" else Colors.ERROR
-            text.append(f"\n  {icon} ", style=style)
-            text.append(tool.icon + " ", style=Colors.TEXT_MUTED)
-            text.append(tool.name, style=Colors.TEXT_MUTED)
+            if tool.status == "success":
+                text.append("✓ ", style=Colors.SUCCESS)
+            else:
+                text.append("✗ ", style=Colors.ERROR)
+            text.append(tool.name, style=Colors.TEXT_DIM)
             if tool.duration:
-                text.append(f"  {tool.duration:.1f}s", style=Colors.TEXT_MUTED)
+                text.append(f" ({tool.duration:.1f}s)", style=Colors.TEXT_DIM)
+            text.append("\n")
 
         # Show count if more
         total = len(self.state.tool_calls)
         shown = min(total, self._max_tool_preview * 2)
         if total > shown:
-            text.append(f"\n  ... and {total - shown} more", style=Colors.TEXT_MUTED)
+            text.append(f"+{total - shown} more\n", style=Colors.TEXT_DIM)
 
         return text
 
@@ -304,8 +268,8 @@ class StreamRenderer:
                 return f"{key}={val}"
         return ""
 
-    def _build_reasoning_panel(self) -> Panel | None:
-        """Build reasoning panel if available."""
+    def _build_reasoning_panel(self) -> Text | None:
+        """Build reasoning text (no panel, minimal style)."""
         if not self.state.reasoning or not self._show_reasoning:
             return None
 
@@ -315,74 +279,63 @@ class StreamRenderer:
         if len(content) > max_chars:
             content = "..." + content[-max_chars:]
 
-        text = Text(content, style=f"italic {Colors.TEXT_MUTED}")
+        text = Text()
+        text.append(content, style=f"dim italic {Colors.TEXT_MUTED}")
 
         # Add cursor if still reasoning
         if self.state.phase == "reasoning":
-            text.append("▌", style=f"bold {Colors.ACCENT}")
+            text.append("▌", style=Colors.TEXT_MUTED)
 
-        border = Colors.BORDER_ACTIVE if self.state.phase == "reasoning" else Colors.BORDER
-        return Panel(
-            text,
-            title=f"[{Colors.ACCENT}]{Icons.BRAIN} Reasoning[/{Colors.ACCENT}]",
-            title_align="left",
-            border_style=border,
-            padding=(0, 1),
-            box=ROUNDED,
-        )
+        return text
 
-    def _build_message_panel(self) -> Panel | None:
-        """Build message panel with streaming content."""
+    def _build_message_panel(self) -> Text | Markdown | None:
+        """Build message content (no panel, clean text)."""
         if not self.state.message:
             return None
 
         # During streaming, show raw text for performance
         if self.state.phase in ("responding", "thinking", "reasoning", "tool_call"):
             content = Text(self.state.message, style=Colors.TEXT)
-            # Blinking cursor
+            # Simple blinking cursor during streaming
             if self.state.phase == "responding":
-                cursors = ["▏", "▎", "▍", "▌", "▋", "▊", "▉", "█"]
-                cursor = cursors[self.state._frame % len(cursors)]
-                content.append(cursor, style=f"bold {Colors.PRIMARY}")
+                content.append("▌", style=f"bold {Colors.PRIMARY}")
+            return content
         else:
             # Final render with markdown
-            content = Markdown(self.state.message)
-
-        border = Colors.BORDER_ACTIVE if self.state.phase == "responding" else Colors.BORDER
-        return Panel(
-            content,
-            title=f"[{Colors.PRIMARY}]{Icons.ROBOT} Response[/{Colors.PRIMARY}]",
-            title_align="left",
-            border_style=border,
-            padding=(0, 1),
-            box=ROUNDED,
-        )
+            return Markdown(self.state.message)
 
     def build(self) -> Group:
-        """Build the complete live display."""
+        """Build the complete live display - minimal and clean."""
         elements = []
 
-        # Status line (always shown)
-        elements.append(self._build_status_line())
-
-        # Tool calls (compact inline)
+        # Tool calls only when running (minimal)
         tools_text = self._build_tool_calls_compact()
         if tools_text:
             elements.append(tools_text)
-            elements.append(Text())  # Spacer
 
-        # Reasoning panel (if available)
+        # Reasoning (if available and not compact)
         if not self.compact:
-            reasoning_panel = self._build_reasoning_panel()
-            if reasoning_panel:
+            reasoning = self._build_reasoning_panel()
+            if reasoning:
                 elements.append(Text())  # Spacer
-                elements.append(reasoning_panel)
+                elements.append(reasoning)
 
-        # Message panel
-        message_panel = self._build_message_panel()
-        if message_panel:
-            elements.append(Text())  # Spacer
-            elements.append(message_panel)
+        # Message content
+        message = self._build_message_panel()
+        if message:
+            if elements:
+                elements.append(Text())  # Spacer
+            elements.append(message)
+
+        # If nothing to show yet, show spinner with elapsed time
+        if not elements and self.state.phase in ("thinking", "reasoning"):
+            spinner = self.state.spinner
+            self.state.advance_frame()
+            wait_text = Text()
+            wait_text.append(f"{spinner} ", style=Colors.TEXT_MUTED)
+            wait_text.append("Thinking", style=f"dim {Colors.TEXT_MUTED}")
+            wait_text.append(f" ({self.state.elapsed_str})", style=Colors.TEXT_DIM)
+            elements.append(wait_text)
 
         return Group(*elements)
 
@@ -399,74 +352,50 @@ def render_final_output(
     show_stats: bool = True,
 ) -> None:
     """Render the final formatted output after streaming completes."""
-    elements = []
-
-    # Reasoning panel (collapsible style)
+    # Reasoning (subtle, no emoji)
     if state.reasoning and show_reasoning:
-        console.print(
-            Panel(
-                Markdown(state.reasoning),
-                title=f"[{Colors.ACCENT}]{Icons.BRAIN} Reasoning[/{Colors.ACCENT}]",
-                title_align="left",
-                border_style=Colors.BORDER,
-                padding=(0, 1),
-                box=ROUNDED,
-            )
-        )
+        text = Text(state.reasoning, style=f"dim italic {Colors.TEXT_MUTED}")
+        console.print(text)
         console.print()
 
-    # Main response with markdown
+    # Main response with markdown (no panel)
     if state.message:
-        console.print(
-            Panel(
-                Markdown(state.message),
-                title=f"[{Colors.PRIMARY}]{Icons.ROBOT} Response[/{Colors.PRIMARY}]",
-                title_align="left",
-                border_style=Colors.BORDER_ACTIVE,
-                padding=(0, 1),
-                box=ROUNDED,
-            )
-        )
+        console.print(Markdown(state.message))
+        console.print()
 
     # Stats line
     if show_stats:
         console.print(_build_stats_line(state))
-    console.print()
 
 
 def _build_stats_line(state: StreamState) -> Text:
-    """Build a clean stats line."""
+    """Build a clean stats line - styled like Copilot CLI."""
     text = Text()
 
-    # Elapsed time
-    text.append(f"{Icons.CLOCK} ", style=Colors.TEXT_MUTED)
+    # Header label
+    text.append("API time: ", style=Colors.TEXT_DIM)
     text.append(state.elapsed_str, style=Colors.TEXT_MUTED)
 
-    # Token counts
+    # Token counts (formatted nicely)
     if state.input_tokens is not None or state.output_tokens is not None:
-        text.append("  │  ", style=Colors.TEXT_DIM)
+        text.append("  Tokens: ", style=Colors.TEXT_DIM)
         inp = state.input_tokens or 0
         out = state.output_tokens or 0
-        text.append(f"{inp:,}", style=Colors.INFO)
-        text.append(" in / ", style=Colors.TEXT_MUTED)
-        text.append(f"{out:,}", style=Colors.INFO)
-        text.append(" out", style=Colors.TEXT_MUTED)
+        text.append(f"{inp:,} in, {out:,} out", style=Colors.TEXT_MUTED)
 
     # Tool calls
     if state.tool_calls:
-        successful = sum(1 for t in state.tool_calls if t.status == "success")
         failed = sum(1 for t in state.tool_calls if t.status == "error")
-        text.append("  │  ", style=Colors.TEXT_DIM)
-        text.append(f"{Icons.TOOL} ", style=Colors.WARNING)
+        text.append("  Tools: ", style=Colors.TEXT_DIM)
         if failed:
-            text.append(f"{successful} ok, {failed} failed", style=Colors.WARNING)
+            text.append(f"{len(state.tool_calls)} ({failed} failed)", style=Colors.WARNING)
         else:
-            text.append(f"{len(state.tool_calls)} tools", style=Colors.TEXT_MUTED)
+            text.append(str(len(state.tool_calls)), style=Colors.TEXT_MUTED)
 
     # Retries
     if state.retries:
-        text.append("  │  ", style=Colors.TEXT_DIM)
-        text.append(f"{state.retries} retries", style=Colors.WARNING)
+        text.append("  Retries: ", style=Colors.TEXT_DIM)
+        text.append(str(state.retries), style=Colors.WARNING)
 
     return text
 
@@ -501,24 +430,17 @@ class SlashCompleter(Completer):
 
 
 def _build_prompt_message(model: str, reasoning: str) -> FormattedText:
-    """Build the prompt message showing model info."""
+    """Build the prompt message - clean like Copilot CLI."""
     return FormattedText(
         [
-            ("class:model", f"[{model}"),
-            ("class:sep", "/"),
-            ("class:reasoning", f"{reasoning}"),
-            ("class:model", "] "),
-            ("class:prompt", f"{Icons.PROMPT} "),
+            ("class:prompt", "> "),
         ]
     )
 
 
 PROMPT_STYLE = Style.from_dict(
     {
-        "model": "#7aa2f7 bold",
-        "sep": "#565f89",
-        "reasoning": "#bb9af7",
-        "prompt": "#9ece6a bold",
+        "prompt": "#7aa2f7 bold",
         "continuation": "#565f89",
     }
 )
@@ -555,6 +477,10 @@ async def run_interactive(config: "CopexConfig") -> None:
     def handle_newline(event):
         event.app.current_buffer.insert_text("\n")
 
+    @bindings.add("c-l")
+    def handle_clear(event):
+        console.clear()
+
     session: PromptSession = PromptSession(
         message=_build_prompt_message(
             config.model.value.split("/")[-1],  # Just model name, not provider
@@ -565,7 +491,7 @@ async def run_interactive(config: "CopexConfig") -> None:
         completer=SlashCompleter(),
         complete_while_typing=True,
         multiline=True,
-        prompt_continuation=lambda width, ln, is_soft: "  ... ",
+        prompt_continuation=lambda width, ln, is_soft: ". ",
         style=PROMPT_STYLE,
     )
 
@@ -587,15 +513,15 @@ async def run_interactive(config: "CopexConfig") -> None:
 
             # Handle commands
             cmd = prompt.lower()
-            if cmd in ("exit", "quit"):
+            if cmd in ("exit", "quit", "q"):
                 break
 
             if cmd in ("/new", "new"):
                 client.new_session()
-                console.print(f"[{Colors.SUCCESS}]{Icons.DONE} New session started[/{Colors.SUCCESS}]")
+                console.print(f"[{Colors.SUCCESS}]New session started[/{Colors.SUCCESS}]")
                 continue
 
-            if cmd in ("/help", "help"):
+            if cmd in ("/help", "help", "?"):
                 _print_help(console)
                 continue
 
@@ -626,9 +552,10 @@ async def run_interactive(config: "CopexConfig") -> None:
                         new_model.value.split("/")[-1],
                         normalized.value,
                     )
-                    console.print(f"[{Colors.SUCCESS}]{Icons.DONE} Switched to {new_model.value}[/{Colors.SUCCESS}]")
+                    console.print(f"[{Colors.SUCCESS}]Switched to {new_model.value}[/{Colors.SUCCESS}]")
                 except ValueError:
                     console.print(f"[{Colors.ERROR}]Unknown model: {model_name}[/{Colors.ERROR}]")
+                    console.print(f"[{Colors.TEXT_DIM}]Use /models to see available options[/{Colors.TEXT_DIM}]")
                 continue
 
             if cmd.startswith("/reasoning "):
@@ -646,18 +573,20 @@ async def run_interactive(config: "CopexConfig") -> None:
                         client.config.model.value.split("/")[-1],
                         normalized.value,
                     )
-                    console.print(f"[{Colors.SUCCESS}]{Icons.DONE} Reasoning set to {normalized.value}[/{Colors.SUCCESS}]")
+                    console.print(f"[{Colors.SUCCESS}]Reasoning set to {normalized.value}[/{Colors.SUCCESS}]")
                 except ValueError:
                     valid = ", ".join(r.value for r in ReasoningEffort)
-                    console.print(f"[{Colors.ERROR}]Invalid level. Valid: {valid}[/{Colors.ERROR}]")
+                    console.print(f"[{Colors.ERROR}]Invalid level: {level}[/{Colors.ERROR}]")
+                    console.print(f"[{Colors.TEXT_DIM}]Valid options: {valid}[/{Colors.TEXT_DIM}]")
                 continue
 
             # Send message
             await _stream_message(console, client, prompt)
 
     except KeyboardInterrupt:
-        console.print(f"\n[{Colors.WARNING}]Goodbye!{Icons.SPARKLE}[/{Colors.WARNING}]")
+        console.print()  # Clean line
     finally:
+        console.print(f"[{Colors.TEXT_MUTED}]Goodbye[/{Colors.TEXT_MUTED}]")
         await client.stop()
 
 
@@ -713,13 +642,7 @@ async def _stream_message(console: Console, client: "Copex", prompt: str) -> Non
             live.update(renderer.build())
             await asyncio.sleep(0.1)
 
-    # Print user prompt
-    console.print()
-    user_text = Text()
-    user_text.append(f"{Icons.PROMPT} ", style=f"bold {Colors.SECONDARY}")
-    display_prompt = prompt[:200] + "..." if len(prompt) > 200 else prompt
-    user_text.append(display_prompt, style="bold")
-    console.print(user_text)
+    # Print user prompt (subtle echo)
     console.print()
 
     # Stream with live display
@@ -739,8 +662,10 @@ async def _stream_message(console: Console, client: "Copex", prompt: str) -> Non
             state.phase = "done"
         except Exception as e:
             state.phase = "error"
-            console.print(f"[{Colors.ERROR}]{Icons.ERROR} Error: {e}[/{Colors.ERROR}]")
-            raise
+            # Don't re-raise - show error and continue session
+            console.print()
+            console.print(f"[{Colors.ERROR}]Error: {e}[/{Colors.ERROR}]")
+            return
         finally:
             refresh_stop.set()
             try:
@@ -753,43 +678,42 @@ async def _stream_message(console: Console, client: "Copex", prompt: str) -> Non
 
 
 def _print_welcome(console: Console, model: str, reasoning: str, version: str) -> None:
-    """Print welcome banner."""
+    """Print welcome banner - clean like Copilot CLI."""
+    from pathlib import Path
+    import os
+    
     console.print()
-    banner = Text()
-    banner.append("  ╭──────────────────────────────────────╮\n", style=Colors.PRIMARY)
-    banner.append("  │ ", style=Colors.PRIMARY)
-    banner.append(f"  {Icons.ROBOT} Copex", style=f"bold {Colors.PRIMARY}")
-    banner.append(" - Copilot Extended", style=Colors.TEXT_MUTED)
-    banner.append("     │\n", style=Colors.PRIMARY)
-    banner.append("  ╰──────────────────────────────────────╯\n", style=Colors.PRIMARY)
-    console.print(banner)
-
-    info = Text()
-    info.append("  Model: ", style=Colors.TEXT_MUTED)
-    info.append(model, style=f"bold {Colors.PRIMARY}")
-    info.append("  │  ", style=Colors.TEXT_DIM)
-    info.append("Reasoning: ", style=Colors.TEXT_MUTED)
-    info.append(reasoning, style=f"bold {Colors.ACCENT}")
-    info.append("  │  ", style=Colors.TEXT_DIM)
-    info.append(f"v{version}", style=Colors.TEXT_MUTED)
-    console.print(info)
+    
+    # Title line - simple and clean
+    title = Text()
+    title.append("copex", style=f"bold {Colors.PRIMARY}")
+    title.append(f" v{version}", style=Colors.TEXT_DIM)
+    console.print(title)
     console.print()
 
-    help_text = Text()
-    help_text.append("  ", style="")
-    for key, desc in [("Esc+Enter", "newline"), ("/help", "commands"), ("exit", "quit")]:
-        help_text.append(key, style="bold")
-        help_text.append(f" {desc}  ", style=Colors.TEXT_MUTED)
-    console.print(help_text)
+    # Working directory (like Copilot CLI)
+    cwd = Path.cwd()
+    home = Path.home()
+    try:
+        display_path = f"~/{cwd.relative_to(home)}"
+    except ValueError:
+        display_path = str(cwd)
+    
+    console.print(f"[{Colors.TEXT_MUTED}]Working in: {display_path}[/{Colors.TEXT_MUTED}]")
+    console.print(f"[{Colors.TEXT_DIM}]Model: {model} · Reasoning: {reasoning}[/{Colors.TEXT_DIM}]")
+    console.print()
+    console.print(f"[{Colors.TEXT_DIM}]Type /help for commands, exit to quit[/{Colors.TEXT_DIM}]")
     console.print()
 
 
 def _print_help(console: Console) -> None:
-    """Print help message."""
+    """Print help message - clean like Copilot CLI."""
+    console.print()
+    console.print(f"[bold]Commands[/bold]")
     console.print()
     cmds = [
         ("/model <name>", "Change model"),
-        ("/reasoning <level>", "Change reasoning (low/medium/high/xhigh)"),
+        ("/reasoning <level>", "Set reasoning (low/medium/high/xhigh)"),
         ("/models", "List available models"),
         ("/new", "Start new session"),
         ("/status", "Show current settings"),
@@ -797,15 +721,39 @@ def _print_help(console: Console) -> None:
         ("exit", "Quit"),
     ]
     for cmd, desc in cmds:
-        console.print(f"  [{Colors.PRIMARY}]{cmd:20}[/{Colors.PRIMARY}] {desc}")
+        console.print(f"  [{Colors.PRIMARY}]{cmd:22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]{desc}[/{Colors.TEXT_MUTED}]")
+    
+    console.print()
+    console.print(f"[bold]Keyboard[/bold]")
+    console.print()
+    console.print(f"  [{Colors.PRIMARY}]{'Enter':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Send message[/{Colors.TEXT_MUTED}]")
+    console.print(f"  [{Colors.PRIMARY}]{'Esc + Enter':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]New line[/{Colors.TEXT_MUTED}]")
+    console.print(f"  [{Colors.PRIMARY}]{'Tab':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Complete command[/{Colors.TEXT_MUTED}]")
+    console.print(f"  [{Colors.PRIMARY}]{'↑ / ↓':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]History navigation[/{Colors.TEXT_MUTED}]")
+    console.print(f"  [{Colors.PRIMARY}]{'Ctrl+L':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Clear screen[/{Colors.TEXT_MUTED}]")
+    console.print(f"  [{Colors.PRIMARY}]{'Ctrl+C':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Cancel/Exit[/{Colors.TEXT_MUTED}]")
     console.print()
 
 
 def _print_status(console: Console, client: "Copex") -> None:
-    """Print current status."""
+    """Print current status - clean format."""
+    from pathlib import Path
+    
     console.print()
-    console.print(f"  Model:     [{Colors.PRIMARY}]{client.config.model.value}[/{Colors.PRIMARY}]")
-    console.print(f"  Reasoning: [{Colors.ACCENT}]{client.config.reasoning_effort.value}[/{Colors.ACCENT}]")
+    console.print(f"[bold]Current Session[/bold]")
+    console.print()
+    
+    # Working directory
+    cwd = Path.cwd()
+    home = Path.home()
+    try:
+        display_path = f"~/{cwd.relative_to(home)}"
+    except ValueError:
+        display_path = str(cwd)
+    
+    console.print(f"  [{Colors.TEXT_DIM}]Directory:[/{Colors.TEXT_DIM}]  [{Colors.TEXT_MUTED}]{display_path}[/{Colors.TEXT_MUTED}]")
+    console.print(f"  [{Colors.TEXT_DIM}]Model:[/{Colors.TEXT_DIM}]      [{Colors.PRIMARY}]{client.config.model.value}[/{Colors.PRIMARY}]")
+    console.print(f"  [{Colors.TEXT_DIM}]Reasoning:[/{Colors.TEXT_DIM}]  [{Colors.ACCENT}]{client.config.reasoning_effort.value}[/{Colors.ACCENT}]")
     console.print()
 
 
@@ -814,8 +762,13 @@ def _print_models(console: Console, current: "Model") -> None:
     from copex.models import Model
 
     console.print()
+    console.print(f"[bold]Available Models[/bold]")
+    console.print()
     for model in Model:
-        marker = f"[{Colors.SUCCESS}]→[/{Colors.SUCCESS}] " if model == current else "  "
-        style = f"bold {Colors.PRIMARY}" if model == current else Colors.TEXT_MUTED
-        console.print(f"  {marker}[{style}]{model.value}[/{style}]")
+        if model == current:
+            console.print(f"  [{Colors.SUCCESS}]→[/{Colors.SUCCESS}] [{Colors.PRIMARY} bold]{model.value}[/{Colors.PRIMARY} bold] [{Colors.TEXT_DIM}](current)[/{Colors.TEXT_DIM}]")
+        else:
+            console.print(f"    [{Colors.TEXT_MUTED}]{model.value}[/{Colors.TEXT_MUTED}]")
+    console.print()
+    console.print(f"[{Colors.TEXT_DIM}]Use /model <name> to switch[/{Colors.TEXT_DIM}]")
     console.print()
