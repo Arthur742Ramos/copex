@@ -6,11 +6,16 @@ __version__ = "1.0.2"
 from .client import Copex
 from .config import CopexConfig, find_copilot_cli
 from .models import Model, ReasoningEffort
+from .skills import SkillDiscovery, SkillInfo, get_skill_content, list_skills
 
 __all__ = [
     "Copex",
     "CopexConfig",
     "Model",
     "ReasoningEffort",
+    "SkillDiscovery",
+    "SkillInfo",
     "find_copilot_cli",
+    "get_skill_content",
+    "list_skills",
 ]
