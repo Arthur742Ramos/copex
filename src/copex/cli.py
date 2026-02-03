@@ -299,7 +299,7 @@ def chat(
     ] = None,
     raw: Annotated[bool, typer.Option("--raw", help="Output raw text without formatting")] = False,
     ui_theme: Annotated[
-        Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
+        Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)")
     ] = None,
     ui_density: Annotated[
         Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
@@ -461,6 +461,7 @@ async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> 
             )
             ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
+            ui.set_usage(response.prompt_tokens, response.completion_tokens)
         finally:
             refresh_stop.set()
             try:
@@ -584,11 +585,14 @@ def interactive(
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
     ui_theme: Annotated[
-        Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset)")
+        Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)")
     ] = None,
     ui_density: Annotated[
         Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
     ] = None,
+    classic: Annotated[
+        bool, typer.Option("--classic", help="Use classic interactive mode (legacy)")
+    ] = False,
 ) -> None:
     """Start an interactive chat session."""
     effective_model = model or _DEFAULT_MODEL.value
@@ -603,18 +607,28 @@ def interactive(
             model=model_enum,
             reasoning_effort=normalized_effort,
         )
+        if ui_theme:
+            config.ui_theme = ui_theme
+        if ui_density:
+            config.ui_density = ui_density
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    print_welcome(
-        console,
-        config.model.value,
-        config.reasoning_effort.value,
-        theme=config.ui_theme,
-        density=config.ui_density,
-    )
-    asyncio.run(_interactive_loop(config))
+    if classic:
+        # Use legacy interactive mode
+        print_welcome(
+            console,
+            config.model.value,
+            config.reasoning_effort.value,
+            theme=config.ui_theme,
+            density=config.ui_density,
+        )
+        asyncio.run(_interactive_loop(config))
+    else:
+        # Use new beautiful interactive mode
+        from copex.interactive import run_interactive
+        asyncio.run(run_interactive(config))
 
 
 async def _interactive_loop(config: CopexConfig) -> None:
@@ -875,6 +889,7 @@ async def _stream_response_interactive(
             final_reasoning = ui.state.reasoning if ui.state.reasoning else response.reasoning
             ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
+            ui.set_usage(response.prompt_tokens, response.completion_tokens)
         finally:
             refresh_stop.set()
             try:
@@ -928,24 +943,7 @@ def ralph_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
-    console.print(
-        Panel(
-            f"[bold]Ralph Wiggum Loop[/bold]\n"
-            f"Model: {config.model.value}\n"
-            f"Reasoning: {config.reasoning_effort.value}\n"
-            f"Max iterations: {max_iterations}\n"
-            f"Completion promise: {completion_promise or '(none)'}",
-            title="🔄 Starting Loop",
-            border_style="yellow",
-        )
-    )
-
-    if completion_promise:
-        console.print(
-            f"\n[dim]To complete, the AI must output: "
-            f"[yellow]<promise>{completion_promise}</promise>[/yellow][/dim]\n"
-        )
-
+    # Use new RalphUI header - displayed in _run_ralph
     asyncio.run(_run_ralph(config, prompt, max_iterations, completion_promise))
 
 
@@ -955,27 +953,38 @@ async def _run_ralph(
     max_iterations: int,
     completion_promise: str | None,
 ) -> None:
-    """Run Ralph loop."""
+    """Run Ralph loop with beautiful UI."""
+    from copex.ui import RalphUI
+
     client = Copex(config)
     await client.start()
 
+    ralph_ui = RalphUI(console)
+    start_time = time.time()
+
+    # Print header
+    ralph_ui.print_header(
+        prompt=prompt,
+        max_iterations=max_iterations,
+        completion_promise=completion_promise,
+        model=config.model.value,
+        reasoning=config.reasoning_effort.value,
+    )
+
     def on_iteration(iteration: int, response: str) -> None:
-        preview = response[:200] + "..." if len(response) > 200 else response
-        console.print(
-            Panel(
-                preview,
-                title=f"[bold]Iteration {iteration}[/bold]",
-                border_style="blue",
-            )
+        ralph_ui.print_iteration(
+            iteration=iteration,
+            max_iterations=max_iterations,
+            response_preview=response,
+            is_complete=False,
         )
 
     def on_complete(state: RalphState) -> None:
-        console.print(
-            Panel(
-                f"Iterations: {state.iteration}\nReason: {state.completion_reason}",
-                title="[bold green]Loop Complete[/bold green]",
-                border_style="green",
-            )
+        total_time = time.time() - start_time
+        ralph_ui.print_complete(
+            iteration=state.iteration,
+            completion_reason=state.completion_reason or "unknown",
+            total_time=total_time,
         )
 
     try:
@@ -1198,9 +1207,13 @@ async def _run_plan(
     load_plan: Path | None,
     max_iterations: int = 10,
 ) -> None:
-    """Run plan generation and optional execution."""
+    """Run plan generation and optional execution with beautiful UI."""
+    from copex.ui import PlanUI, format_duration
+
     client = Copex(config)
     await client.start()
+
+    plan_ui = PlanUI(console)
 
     try:
         # Create Ralph instance for iterative step execution
@@ -1248,8 +1261,9 @@ async def _run_plan(
             plan = await executor.generate_plan(task)
             console.print(f"\n[green]✓ Generated {len(plan.steps)} steps[/green]\n")
 
-        # Display plan
-        _display_plan(plan)
+        # Display plan overview with new UI
+        steps_info = [(s.number, s.description, s.status.value) for s in plan.steps]
+        plan_ui.print_plan_overview(steps_info)
 
         # Save plan if requested
         if output:
@@ -1263,45 +1277,51 @@ async def _run_plan(
                     console.print("[yellow]Execution cancelled[/yellow]")
                     return
 
-            console.print(f"\n[bold blue]Executing from step {from_step}...[/bold blue]\n")
+            # Print plan execution header
+            plan_ui.print_plan_header(
+                task=plan.task,
+                step_count=len(plan.steps),
+                model=config.model.value,
+                reasoning=config.reasoning_effort.value,
+            )
 
             # Track execution timing
             plan_start_time = time.time()
 
             def on_step_start(step: PlanStep) -> None:
-                total = len(plan.steps)
-                console.print(f"[blue]⏳ Step {step.number}/{total}:[/blue] {step.description}")
+                plan_ui.print_step_start(
+                    step_number=step.number,
+                    total_steps=len(plan.steps),
+                    description=step.description,
+                )
 
             def on_step_complete(step: PlanStep) -> None:
-                # Format duration
                 duration = step.duration_seconds or 0
-                duration_str = _format_duration(duration)
-
-                # Get result preview
-                preview = (step.result or "")[:100]
-                if len(step.result or "") > 100:
+                preview = (step.result or "")[:150]
+                if len(step.result or "") > 150:
                     preview += "..."
 
-                console.print(f"[green]✓ Step {step.number} complete ({duration_str})[/green]")
-                if preview:
-                    console.print(f"  [dim]— {preview}[/dim]")
+                # Calculate ETA
+                eta = None
+                if plan.completed_count >= 2:
+                    eta = plan.estimate_remaining_seconds()
 
-                # Show ETA after 2+ steps completed
-                completed_count = plan.completed_count
-                if completed_count >= 2:
-                    remaining_est = plan.estimate_remaining_seconds()
-                    if remaining_est is not None:
-                        console.print(
-                            f"  [dim cyan]Estimated remaining: ~{_format_duration(remaining_est)}[/dim cyan]"
-                        )
-
-                console.print()
+                plan_ui.print_step_complete(
+                    step_number=step.number,
+                    total_steps=len(plan.steps),
+                    duration=duration,
+                    result_preview=preview if preview else None,
+                    eta_remaining=eta,
+                )
 
             def on_error(step: PlanStep, error: Exception) -> bool:
                 duration = step.duration_seconds or 0
-                duration_str = _format_duration(duration)
-                console.print(f"[red]✗ Step {step.number} failed ({duration_str}): {error}[/red]")
-                console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
+                plan_ui.print_step_failed(
+                    step_number=step.number,
+                    total_steps=len(plan.steps),
+                    error=str(error),
+                    duration=duration,
+                )
                 return typer.confirm("Continue with next step?", default=False)
 
             await executor.execute_plan(
@@ -1316,8 +1336,14 @@ async def _run_plan(
             # Calculate total time
             total_time = time.time() - plan_start_time
 
-            # Show enhanced summary
-            _display_plan_summary_enhanced(plan, total_time)
+            # Show enhanced summary with new UI
+            plan_ui.print_plan_complete(
+                completed_steps=plan.completed_count,
+                failed_steps=plan.failed_count,
+                total_steps=len(plan.steps),
+                total_time=total_time,
+                total_tokens=plan.total_tokens,
+            )
 
             # Save updated plan
             if output:

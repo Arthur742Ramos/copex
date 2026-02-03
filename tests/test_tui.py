@@ -342,8 +342,10 @@ class TestKeymap:
         help_items = keymap.get_help_text()
         
         assert len(help_items) > 0
-        # Each item should be (shortcut, description)
-        for shortcut, desc in help_items:
+        # Each item should be (shortcut, description, context)
+        for item in help_items:
+            assert len(item) >= 2  # At least shortcut and description
+            shortcut, desc = item[0], item[1]
             assert isinstance(shortcut, str)
             assert isinstance(desc, str)
             assert len(desc) > 0

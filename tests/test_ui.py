@@ -120,3 +120,115 @@ class TestCopexUIState:
         assert ui.state.reasoning == ""
         assert ui.state.activity == ActivityType.WAITING
         assert ui.state.model == "gpt-4"
+
+
+class TestProgressComponents:
+    """Tests for progress bar and formatting utilities."""
+
+    def test_format_duration_seconds(self):
+        """format_duration should handle seconds."""
+        from copex.ui import format_duration
+
+        assert format_duration(30.5) == "30.5s"
+        assert format_duration(0.5) == "0.5s"
+        assert format_duration(59.9) == "59.9s"
+
+    def test_format_duration_minutes(self):
+        """format_duration should handle minutes."""
+        from copex.ui import format_duration
+
+        assert format_duration(90) == "1m 30s"
+        assert format_duration(3599) == "59m 59s"
+
+    def test_format_duration_hours(self):
+        """format_duration should handle hours."""
+        from copex.ui import format_duration
+
+        assert format_duration(3600) == "1h 0m"
+        assert format_duration(7200) == "2h 0m"
+        assert format_duration(3660) == "1h 1m"
+
+    def test_build_progress_bar_empty(self):
+        """Progress bar at 0% should be all empty chars."""
+        from copex.ui import build_progress_bar
+
+        bar = build_progress_bar(0.0, width=10)
+        bar_str = str(bar)
+        assert "░" * 10 in bar_str
+
+    def test_build_progress_bar_full(self):
+        """Progress bar at 100% should be all filled chars."""
+        from copex.ui import build_progress_bar
+
+        bar = build_progress_bar(1.0, width=10)
+        bar_str = str(bar)
+        assert "━" * 10 in bar_str
+
+    def test_build_progress_bar_half(self):
+        """Progress bar at 50% should be half filled."""
+        from copex.ui import build_progress_bar
+
+        bar = build_progress_bar(0.5, width=10)
+        bar_str = str(bar)
+        assert "━" * 5 in bar_str
+        assert "░" * 5 in bar_str
+
+    def test_build_progress_bar_clamps_values(self):
+        """Progress bar should clamp values to 0.0-1.0."""
+        from copex.ui import build_progress_bar
+
+        # Values > 1.0 should be clamped to 1.0
+        bar = build_progress_bar(1.5, width=10)
+        bar_str = str(bar)
+        assert "━" * 10 in bar_str
+
+        # Values < 0.0 should be clamped to 0.0
+        bar = build_progress_bar(-0.5, width=10)
+        bar_str = str(bar)
+        assert "░" * 10 in bar_str
+
+
+class TestRalphUI:
+    """Tests for RalphUI components."""
+
+    def test_ralph_ui_creation(self):
+        """RalphUI should be creatable."""
+        from copex.ui import RalphUI
+        from rich.console import Console
+
+        ui = RalphUI(Console())
+        assert ui is not None
+
+    def test_ralph_ui_spinner(self):
+        """RalphUI should have spinner functionality."""
+        from copex.ui import RalphUI
+        from rich.console import Console
+
+        ui = RalphUI(Console())
+        spinner1 = ui._get_spinner()
+        spinner2 = ui._get_spinner()
+        # Spinner should cycle
+        assert spinner1 != spinner2 or len(ui._spinners) == 1
+
+
+class TestPlanUI:
+    """Tests for PlanUI components."""
+
+    def test_plan_ui_creation(self):
+        """PlanUI should be creatable."""
+        from copex.ui import PlanUI
+        from rich.console import Console
+
+        ui = PlanUI(Console())
+        assert ui is not None
+
+    def test_plan_ui_spinner(self):
+        """PlanUI should have spinner functionality."""
+        from copex.ui import PlanUI
+        from rich.console import Console
+
+        ui = PlanUI(Console())
+        spinner1 = ui._get_spinner()
+        spinner2 = ui._get_spinner()
+        # Spinner should cycle
+        assert spinner1 != spinner2 or len(ui._spinners) == 1

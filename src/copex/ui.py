@@ -117,6 +117,24 @@ THEME_PRESETS = {
         "HEADER": "bold bright_yellow",
         "SUBHEADER": "bold bright_white",
     },
+    "tokyo": {
+        # Tokyo Night inspired palette - modern and easy on the eyes
+        "PRIMARY": "#7aa2f7",  # Soft blue
+        "SECONDARY": "#9ece6a",  # Green
+        "ACCENT": "#bb9af7",  # Purple
+        "SUCCESS": "#9ece6a",  # Green
+        "WARNING": "#e0af68",  # Orange/Yellow
+        "ERROR": "#f7768e",  # Red/Pink
+        "INFO": "#7dcfff",  # Light blue
+        "REASONING": "italic #565f89",  # Muted italic
+        "MESSAGE": "#c0caf5",  # Light text
+        "CODE": "#a9b1d6",  # Code text
+        "MUTED": "#565f89",  # Muted gray
+        "BORDER": "#3b4261",  # Dark border
+        "BORDER_ACTIVE": "#7aa2f7",  # Active border (primary)
+        "HEADER": "bold #7aa2f7",  # Bold primary
+        "SUBHEADER": "bold #c0caf5",  # Bold text
+    },
 }
 
 
@@ -234,6 +252,9 @@ class UIState:
     retries: int = 0
     last_update: float = field(default_factory=time.time)
     history: list[HistoryEntry] = field(default_factory=list)
+    # Token usage tracking
+    input_tokens: int | None = None
+    output_tokens: int | None = None
 
     @property
     def elapsed(self) -> float:
@@ -820,6 +841,12 @@ class CopexUI:
             )
         self._touch()
 
+    def set_usage(self, input_tokens: int | None, output_tokens: int | None) -> None:
+        """Set token usage counts."""
+        self.state.input_tokens = input_tokens
+        self.state.output_tokens = output_tokens
+        self._touch()
+
     def _touch(self) -> None:
         """Update last activity timestamp."""
         self.state.last_update = time.time()
@@ -830,9 +857,10 @@ class CopexUI:
         summary.add_column(justify="left")
         summary.add_column(justify="right")
 
+        # First row: timing and retries
         elapsed_text = Text()
         elapsed_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
-        elapsed_text.append(f"{self.state.elapsed_str} elapsed", style=Theme.MUTED)
+        elapsed_text.append(f"{self.state.elapsed_str}", style=Theme.MUTED)
 
         retry_text = Text()
         if self.state.retries:
@@ -843,6 +871,22 @@ class CopexUI:
 
         summary.add_row(elapsed_text, retry_text)
 
+        # Second row: token counts (if available)
+        if self.state.input_tokens is not None or self.state.output_tokens is not None:
+            token_left = Text()
+            token_left.append("📊 ", style=Theme.INFO)
+            token_left.append("Tokens: ", style=Theme.MUTED)
+            inp = self.state.input_tokens or 0
+            out = self.state.output_tokens or 0
+            token_left.append(f"{inp:,} in", style=Theme.INFO)
+            token_left.append(" / ", style=Theme.MUTED)
+            token_left.append(f"{out:,} out", style=Theme.INFO)
+
+            total_text = Text()
+            total_text.append(f"Total: {inp + out:,}", style=Theme.MUTED)
+            summary.add_row(token_left, total_text)
+
+        # Third row: tool calls (if any)
         if self.state.tool_calls:
             successful = sum(1 for t in self.state.tool_calls if t.status == "success")
             failed = sum(1 for t in self.state.tool_calls if t.status == "error")
@@ -1016,3 +1060,454 @@ def print_tool_result(
         text.append(f" ({duration:.1f}s)", style=Theme.MUTED)
 
     console.print(text)
+
+
+# ═══════════════════════════════════════════════════════════════════════════════
+# Progress Components for Ralph and Plan
+# ═══════════════════════════════════════════════════════════════════════════════
+
+
+def format_duration(seconds: float) -> str:
+    """Format duration in human-readable form."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes = int(seconds // 60)
+    secs = int(seconds % 60)
+    if minutes < 60:
+        return f"{minutes}m {secs}s"
+    hours = int(minutes // 60)
+    mins = int(minutes % 60)
+    return f"{hours}h {mins}m"
+
+
+def build_progress_bar(
+    progress: float,
+    width: int = 30,
+    filled_char: str = "━",
+    empty_char: str = "░",
+    style_filled: str | None = None,
+    style_empty: str | None = None,
+) -> Text:
+    """
+    Build a progress bar as a Rich Text object.
+
+    Args:
+        progress: Progress fraction (0.0 to 1.0)
+        width: Width of the bar in characters
+        filled_char: Character for filled portion
+        empty_char: Character for empty portion
+        style_filled: Style for filled portion
+        style_empty: Style for empty portion
+
+    Returns:
+        Rich Text object with styled progress bar
+    """
+    progress = max(0.0, min(1.0, progress))
+    filled = int(width * progress)
+    empty = width - filled
+
+    bar = Text()
+    bar.append(filled_char * filled, style=style_filled or Theme.PRIMARY)
+    bar.append(empty_char * empty, style=style_empty or Theme.MUTED)
+    return bar
+
+
+class RalphUI:
+    """
+    Beautiful UI for Ralph Wiggum loops.
+
+    Displays iteration progress, completion promise status, and timing information.
+    """
+
+    def __init__(self, console: Console | None = None):
+        self.console = console or Console()
+        self._spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._spinner_idx = 0
+        self._start_time = time.time()
+
+    def _get_spinner(self) -> str:
+        self._spinner_idx = (self._spinner_idx + 1) % len(self._spinners)
+        return self._spinners[self._spinner_idx]
+
+    def print_header(
+        self,
+        prompt: str,
+        max_iterations: int | None,
+        completion_promise: str | None,
+        model: str = "",
+        reasoning: str = "",
+    ) -> None:
+        """Print the Ralph loop header."""
+        self._start_time = time.time()
+
+        elements = []
+
+        # Title
+        title_text = Text()
+        title_text.append("🔄 ", style=Theme.WARNING)
+        title_text.append("Ralph Wiggum Loop", style=f"bold {Theme.WARNING}")
+        elements.append(title_text)
+        elements.append(Text())
+
+        # Config info
+        info_table = Table.grid(padding=(0, 2))
+        info_table.add_column(style=Theme.MUTED)
+        info_table.add_column(style=Theme.MESSAGE)
+
+        if model:
+            info_table.add_row(f"{Icons.ROBOT} Model:", model)
+        if reasoning:
+            info_table.add_row(f"{Icons.BRAIN} Reasoning:", reasoning)
+        if max_iterations:
+            info_table.add_row("📊 Max iterations:", str(max_iterations))
+        if completion_promise:
+            info_table.add_row("🎯 Completion promise:", f'"{completion_promise}"')
+
+        elements.append(info_table)
+        elements.append(Text())
+
+        # Truncated prompt preview
+        prompt_preview = prompt[:150] + "..." if len(prompt) > 150 else prompt
+        elements.append(Text(f"📝 Task: {prompt_preview}", style=Theme.MUTED))
+
+        self.console.print(
+            Panel(
+                Group(*elements),
+                title=f"[{Theme.WARNING}]🔄 Ralph Loop Starting[/{Theme.WARNING}]",
+                title_align="left",
+                border_style=Theme.WARNING,
+                padding=(0, 1),
+                box=ROUNDED,
+            )
+        )
+        self.console.print()
+
+    def print_iteration(
+        self,
+        iteration: int,
+        max_iterations: int | None,
+        response_preview: str,
+        is_complete: bool = False,
+    ) -> None:
+        """Print iteration progress."""
+        elapsed = time.time() - self._start_time
+
+        # Build progress line
+        progress_line = Text()
+
+        if is_complete:
+            progress_line.append(f"{Icons.DONE} ", style=f"bold {Theme.SUCCESS}")
+            progress_line.append("Complete", style=Theme.SUCCESS)
+        else:
+            progress_line.append(f"{self._get_spinner()} ", style=f"bold {Theme.WARNING}")
+            progress_line.append(f"Iteration {iteration}", style=Theme.WARNING)
+
+        if max_iterations:
+            progress_line.append(f"/{max_iterations}", style=Theme.MUTED)
+
+            # Progress bar
+            progress = iteration / max_iterations
+            progress_line.append("  ")
+            progress_line.append_text(build_progress_bar(progress, width=20))
+            progress_line.append(f"  {int(progress * 100)}%", style=Theme.MUTED)
+
+        # Elapsed time
+        progress_line.append(f"  {Icons.CLOCK} {format_duration(elapsed)}", style=Theme.MUTED)
+
+        self.console.print(progress_line)
+
+        # Response preview (truncated)
+        if response_preview:
+            preview = response_preview[:200] + "..." if len(response_preview) > 200 else response_preview
+            self.console.print(Text(f"  └─ {preview}", style=Theme.MUTED))
+        self.console.print()
+
+    def print_complete(
+        self,
+        iteration: int,
+        completion_reason: str,
+        total_time: float | None = None,
+    ) -> None:
+        """Print loop completion summary."""
+        elapsed = total_time or (time.time() - self._start_time)
+
+        elements = []
+
+        # Summary stats
+        summary = Table.grid(expand=True)
+        summary.add_column(justify="left")
+        summary.add_column(justify="right")
+
+        completed_text = Text()
+        completed_text.append(f"{Icons.DONE} ", style=Theme.SUCCESS)
+        completed_text.append(f"{iteration} iterations", style=Theme.SUCCESS)
+
+        time_text = Text()
+        time_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
+        time_text.append(format_duration(elapsed), style=Theme.MUTED)
+
+        summary.add_row(completed_text, time_text)
+
+        reason_text = Text()
+        reason_text.append("Reason: ", style=Theme.MUTED)
+        reason_text.append(completion_reason, style=Theme.PRIMARY)
+        summary.add_row(reason_text, Text())
+
+        elements.append(summary)
+
+        self.console.print(
+            Panel(
+                Group(*elements),
+                title=f"[{Theme.SUCCESS}]{Icons.DONE} Ralph Loop Complete[/{Theme.SUCCESS}]",
+                title_align="left",
+                border_style=Theme.SUCCESS,
+                padding=(0, 1),
+                box=ROUNDED,
+            )
+        )
+        self.console.print()
+
+
+class PlanUI:
+    """
+    Beautiful UI for Plan execution.
+
+    Displays step-by-step progress, ETA, and execution statistics.
+    """
+
+    def __init__(self, console: Console | None = None):
+        self.console = console or Console()
+        self._spinners = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"]
+        self._spinner_idx = 0
+        self._start_time = time.time()
+
+    def _get_spinner(self) -> str:
+        self._spinner_idx = (self._spinner_idx + 1) % len(self._spinners)
+        return self._spinners[self._spinner_idx]
+
+    def print_plan_header(
+        self,
+        task: str,
+        step_count: int,
+        model: str = "",
+        reasoning: str = "",
+    ) -> None:
+        """Print the plan header."""
+        self._start_time = time.time()
+
+        elements = []
+
+        # Config info
+        info_table = Table.grid(padding=(0, 2))
+        info_table.add_column(style=Theme.MUTED)
+        info_table.add_column(style=Theme.MESSAGE)
+
+        if model:
+            info_table.add_row(f"{Icons.ROBOT} Model:", model)
+        if reasoning:
+            info_table.add_row(f"{Icons.BRAIN} Reasoning:", reasoning)
+        info_table.add_row("📋 Steps:", str(step_count))
+
+        elements.append(info_table)
+        elements.append(Text())
+
+        # Task description
+        task_preview = task[:200] + "..." if len(task) > 200 else task
+        elements.append(Text(f"📝 Task: {task_preview}", style=Theme.MESSAGE))
+
+        self.console.print(
+            Panel(
+                Group(*elements),
+                title=f"[{Theme.PRIMARY}]📋 Plan Execution[/{Theme.PRIMARY}]",
+                title_align="left",
+                border_style=Theme.PRIMARY,
+                padding=(0, 1),
+                box=ROUNDED,
+            )
+        )
+        self.console.print()
+
+    def print_plan_overview(
+        self,
+        steps: list[tuple[int, str, str]],  # (number, description, status)
+    ) -> None:
+        """Print the plan overview with all steps."""
+        elements = []
+
+        for number, description, status in steps:
+            status_icon = {
+                "pending": "⬜",
+                "running": "🔄",
+                "completed": "✅",
+                "failed": "❌",
+                "skipped": "⏭️",
+            }.get(status, "⬜")
+
+            status_style = {
+                "pending": Theme.MUTED,
+                "running": Theme.WARNING,
+                "completed": Theme.SUCCESS,
+                "failed": Theme.ERROR,
+                "skipped": Theme.MUTED,
+            }.get(status, Theme.MUTED)
+
+            line = Text()
+            line.append(f"{status_icon} ", style=status_style)
+            line.append(f"Step {number}: ", style=f"bold {status_style}")
+            line.append(description, style=status_style)
+            elements.append(line)
+
+        self.console.print(
+            Panel(
+                Group(*elements),
+                title=f"[{Theme.MUTED}]Plan Steps[/{Theme.MUTED}]",
+                title_align="left",
+                border_style=Theme.BORDER,
+                padding=(0, 1),
+                box=ROUNDED,
+            )
+        )
+        self.console.print()
+
+    def print_step_start(
+        self,
+        step_number: int,
+        total_steps: int,
+        description: str,
+    ) -> None:
+        """Print step start notification."""
+        progress = (step_number - 1) / total_steps
+
+        line = Text()
+        line.append(f"{self._get_spinner()} ", style=f"bold {Theme.WARNING}")
+        line.append(f"Step {step_number}/{total_steps}: ", style=f"bold {Theme.WARNING}")
+        line.append(description, style=Theme.MESSAGE)
+
+        self.console.print(line)
+
+        # Progress bar
+        bar_line = Text()
+        bar_line.append("  ")
+        bar_line.append_text(build_progress_bar(progress, width=30))
+        bar_line.append(f"  {int(progress * 100)}%", style=Theme.MUTED)
+        self.console.print(bar_line)
+        self.console.print()
+
+    def print_step_complete(
+        self,
+        step_number: int,
+        total_steps: int,
+        duration: float,
+        result_preview: str | None = None,
+        eta_remaining: float | None = None,
+    ) -> None:
+        """Print step completion notification."""
+        line = Text()
+        line.append(f"{Icons.DONE} ", style=f"bold {Theme.SUCCESS}")
+        line.append(f"Step {step_number}/{total_steps} complete ", style=Theme.SUCCESS)
+        line.append(f"({format_duration(duration)})", style=Theme.MUTED)
+
+        self.console.print(line)
+
+        if result_preview:
+            preview = result_preview[:150] + "..." if len(result_preview) > 150 else result_preview
+            self.console.print(Text(f"  └─ {preview}", style=Theme.MUTED))
+
+        if eta_remaining is not None:
+            eta_line = Text()
+            eta_line.append("  ", style="")
+            eta_line.append(f"{Icons.CLOCK} ", style=Theme.INFO)
+            eta_line.append(f"Estimated remaining: ~{format_duration(eta_remaining)}", style=Theme.INFO)
+            self.console.print(eta_line)
+
+        self.console.print()
+
+    def print_step_failed(
+        self,
+        step_number: int,
+        total_steps: int,
+        error: str,
+        duration: float,
+    ) -> None:
+        """Print step failure notification."""
+        line = Text()
+        line.append(f"{Icons.ERROR} ", style=f"bold {Theme.ERROR}")
+        line.append(f"Step {step_number}/{total_steps} failed ", style=Theme.ERROR)
+        line.append(f"({format_duration(duration)})", style=Theme.MUTED)
+
+        self.console.print(line)
+
+        error_preview = error[:200] + "..." if len(error) > 200 else error
+        self.console.print(Text(f"  └─ {error_preview}", style=Theme.ERROR))
+        self.console.print(Text("  └─ Checkpoint saved. Resume with: copex plan --resume", style=Theme.MUTED))
+        self.console.print()
+
+    def print_plan_complete(
+        self,
+        completed_steps: int,
+        failed_steps: int,
+        total_steps: int,
+        total_time: float,
+        total_tokens: int = 0,
+    ) -> None:
+        """Print plan completion summary."""
+        elements = []
+
+        # Status line
+        if failed_steps == 0 and completed_steps == total_steps:
+            status_line = Text()
+            status_line.append(f"{Icons.DONE} ", style=f"bold {Theme.SUCCESS}")
+            status_line.append(f"{completed_steps}/{total_steps} steps completed successfully!", style=Theme.SUCCESS)
+            border_style = Theme.SUCCESS
+            title_style = Theme.SUCCESS
+        elif failed_steps > 0:
+            status_line = Text()
+            status_line.append(f"{Icons.WARNING} ", style=f"bold {Theme.WARNING}")
+            status_line.append(f"{completed_steps}/{total_steps} completed, {failed_steps} failed", style=Theme.WARNING)
+            border_style = Theme.WARNING
+            title_style = Theme.WARNING
+        else:
+            status_line = Text()
+            status_line.append(f"{Icons.INFO} ", style=f"bold {Theme.INFO}")
+            status_line.append(f"{completed_steps}/{total_steps} steps completed", style=Theme.INFO)
+            border_style = Theme.INFO
+            title_style = Theme.INFO
+
+        elements.append(status_line)
+        elements.append(Text())
+
+        # Stats table
+        stats = Table.grid(expand=True)
+        stats.add_column(justify="left")
+        stats.add_column(justify="right")
+
+        time_text = Text()
+        time_text.append(f"{Icons.CLOCK} ", style=Theme.MUTED)
+        time_text.append(f"Total time: {format_duration(total_time)}", style=Theme.MUTED)
+
+        avg_text = Text()
+        if completed_steps > 0:
+            avg = total_time / completed_steps
+            avg_text.append(f"Avg: {format_duration(avg)}/step", style=Theme.MUTED)
+
+        stats.add_row(time_text, avg_text)
+
+        if total_tokens > 0:
+            token_text = Text()
+            token_text.append(f"{Icons.LIGHTNING} ", style=Theme.INFO)
+            token_text.append(f"Tokens: {total_tokens:,}", style=Theme.INFO)
+            stats.add_row(token_text, Text())
+
+        elements.append(stats)
+
+        self.console.print(
+            Panel(
+                Group(*elements),
+                title=f"[{title_style}]{Icons.DONE} Plan Complete[/{title_style}]",
+                title_align="left",
+                border_style=border_style,
+                padding=(0, 1),
+                box=ROUNDED,
+            )
+        )
+        self.console.print()
