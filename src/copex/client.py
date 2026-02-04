@@ -10,7 +10,6 @@ from dataclasses import dataclass, field
 from typing import Any
 
 from copilot import CopilotClient
-from copilot.session import CopilotSession
 
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
