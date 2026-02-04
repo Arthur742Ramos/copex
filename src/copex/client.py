@@ -356,81 +356,9 @@ class Copex:
         if not self._started:
             await self.start()
         if self._session is None:
-            self._session = await self._create_session_with_reasoning()
+            # github-copilot-sdk >= 0.1.21 supports reasoning_effort natively
+            self._session = await self._client.create_session(self.config.to_session_options())
         return self._session
-
-    async def _create_session_with_reasoning(self) -> CopilotSession:
-        """Create a session with reasoning effort support.
-
-        The GitHub Copilot SDK's create_session() ignores model_reasoning_effort,
-        so we bypass it and call the JSON-RPC directly to inject this parameter.
-
-        Falls back to SDK's create_session() in test environments where the
-        internal JSON-RPC client isn't accessible.
-        """
-        opts = self.config.to_session_options()
-
-        # Check if we can access the internal JSON-RPC client
-        # If not (e.g., in tests with mocked clients), fall back to SDK's create_session
-        if not hasattr(self._client, "_client") or self._client._client is None:
-            return await self._client.create_session(opts)
-
-        # Build the wire payload with proper camelCase keys
-        payload: dict[str, Any] = {}
-
-        if opts.get("model"):
-            payload["model"] = opts["model"]
-        if opts.get("streaming") is not None:
-            payload["streaming"] = opts["streaming"]
-
-        # The key fix: inject modelReasoningEffort directly into the wire payload
-        # The SDK's create_session() drops this, but the server accepts it!
-        reasoning_effort = opts.get("model_reasoning_effort")
-        if reasoning_effort and reasoning_effort != "none":
-            payload["modelReasoningEffort"] = reasoning_effort
-
-        # Map other session options
-        if opts.get("system_message"):
-            payload["systemMessage"] = opts["system_message"]
-        if opts.get("available_tools"):
-            payload["availableTools"] = opts["available_tools"]
-        if opts.get("excluded_tools"):
-            payload["excludedTools"] = opts["excluded_tools"]
-        if opts.get("working_directory"):
-            payload["workingDirectory"] = opts["working_directory"]
-        if opts.get("mcp_servers"):
-            payload["mcpServers"] = opts["mcp_servers"]
-        if opts.get("skill_directories"):
-            payload["skillDirectories"] = opts["skill_directories"]
-        if opts.get("disabled_skills"):
-            payload["disabledSkills"] = opts["disabled_skills"]
-        if opts.get("skills"):
-            payload["skills"] = opts["skills"]
-        if opts.get("instructions"):
-            # Instructions go into system message
-            if "systemMessage" not in payload:
-                payload["systemMessage"] = {"mode": "append", "content": opts["instructions"]}
-            elif isinstance(payload["systemMessage"], dict):
-                existing = payload["systemMessage"].get("content", "")
-                payload["systemMessage"]["content"] = (
-                    f"{existing}\n\n{opts['instructions']}" if existing else opts["instructions"]
-                )
-
-        # Call the JSON-RPC directly, bypassing the SDK's create_session
-        response = await self._client._client.request("session.create", payload)
-
-        session_id = response["sessionId"]
-        workspace_path = response.get("workspacePath")
-
-        # Create a CopilotSession using the SDK's class
-        session = CopilotSession(session_id, self._client._client, workspace_path)
-
-        # Register the session with the client for event dispatch
-        # Note: we access the internal _sessions dict since we bypassed create_session
-        with self._client._sessions_lock:
-            self._client._sessions[session_id] = session
-
-        return session
 
     async def _get_session_context(self, session: Any) -> str | None:
         """Extract conversation context from session for recovery."""

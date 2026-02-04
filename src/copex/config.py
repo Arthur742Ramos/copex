@@ -312,7 +312,7 @@ class CopexConfig(BaseModel):
 
         opts: dict[str, Any] = {
             "model": self.model.value,
-            "model_reasoning_effort": self.reasoning_effort.value,
+            "reasoning_effort": self.reasoning_effort.value,
             "streaming": self.streaming,
         }
 
