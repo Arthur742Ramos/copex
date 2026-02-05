@@ -35,6 +35,7 @@ from .templates import (
     get_registry,
     test_workflow,
 )
+from .fleet import Fleet, FleetConfig, FleetCoordinator, FleetResult, FleetTask
 from .visualization import render_ascii, render_mermaid, visualize_plan
 
 __all__ = [
@@ -89,4 +90,10 @@ __all__ = [
     "visualize_plan",
     "render_ascii",
     "render_mermaid",
+    # Fleet
+    "Fleet",
+    "FleetConfig",
+    "FleetCoordinator",
+    "FleetResult",
+    "FleetTask",
 ]

@@ -1632,5 +1632,230 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
     )
 
 
+@app.command("fleet")
+def fleet_command(
+    prompts: Annotated[
+        Optional[list[str]], typer.Argument(help="Task prompts to run in parallel")
+    ] = None,
+    file: Annotated[
+        Optional[Path], typer.Option("--file", "-f", help="TOML file with task definitions")
+    ] = None,
+    max_concurrent: Annotated[
+        int, typer.Option("--max-concurrent", help="Max concurrent tasks")
+    ] = 5,
+    fail_fast: Annotated[
+        bool, typer.Option("--fail-fast", help="Stop all tasks on first failure")
+    ] = False,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
+    reasoning: Annotated[
+        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH.value,
+    shared_context: Annotated[
+        Optional[str], typer.Option("--shared-context", help="Context prepended to all tasks")
+    ] = None,
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Per-task timeout in seconds")
+    ] = 600.0,
+) -> None:
+    """
+    Run multiple tasks in parallel with fleet execution.
+
+    Examples:
+        copex fleet "Write tests" "Fix linting" "Update docs"
+        copex fleet --file tasks.toml
+        copex fleet "Task A" "Task B" --max-concurrent 3 --fail-fast
+    """
+    if not prompts and not file:
+        console.print("[red]Error: Provide task prompts or --file[/red]")
+        raise typer.Exit(1)
+
+    effective_model = model or _DEFAULT_MODEL.value
+    try:
+        model_enum = Model(effective_model)
+        requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+
+        config = CopexConfig(
+            model=model_enum,
+            reasoning_effort=normalized_effort,
+        )
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1)
+
+    asyncio.run(
+        _run_fleet(
+            config=config,
+            prompts=prompts or [],
+            file=file,
+            max_concurrent=max_concurrent,
+            fail_fast=fail_fast,
+            shared_context=shared_context,
+            timeout=timeout,
+        )
+    )
+
+
+async def _run_fleet(
+    config: CopexConfig,
+    prompts: list[str],
+    file: Path | None,
+    max_concurrent: int,
+    fail_fast: bool,
+    shared_context: str | None,
+    timeout: float,
+) -> None:
+    """Run fleet tasks with live progress display."""
+    from rich.table import Table
+
+    from copex.fleet import Fleet, FleetConfig, FleetTask
+
+    fleet_config = FleetConfig(
+        max_concurrent=max_concurrent,
+        timeout=timeout,
+        fail_fast=fail_fast,
+        shared_context=shared_context,
+    )
+
+    tasks: list[FleetTask] = []
+
+    # Load tasks from TOML file
+    if file:
+        try:
+            import tomllib  # Python 3.11+
+        except Exception:
+            import tomli as tomllib  # type: ignore
+
+        if not file.exists():
+            console.print(f"[red]File not found: {file}[/red]")
+            raise typer.Exit(1)
+
+        with open(file, "rb") as f:
+            data = tomllib.load(f)
+
+        # Apply fleet-level config from file
+        fleet_section = data.get("fleet", {})
+        if "max_concurrent" in fleet_section:
+            fleet_config.max_concurrent = fleet_section["max_concurrent"]
+        if "shared_context" in fleet_section:
+            fleet_config.shared_context = fleet_section["shared_context"]
+        if "timeout" in fleet_section:
+            fleet_config.timeout = fleet_section["timeout"]
+        if "fail_fast" in fleet_section:
+            fleet_config.fail_fast = fleet_section["fail_fast"]
+
+        for task_data in data.get("task", []):
+            tasks.append(
+                FleetTask(
+                    id=task_data["id"],
+                    prompt=task_data["prompt"],
+                    depends_on=task_data.get("depends_on", []),
+                )
+            )
+
+    # Add CLI prompt tasks
+    for i, prompt in enumerate(prompts):
+        tasks.append(FleetTask(id=f"task-{i + 1}", prompt=prompt))
+
+    if not tasks:
+        console.print("[red]No tasks to run[/red]")
+        raise typer.Exit(1)
+
+    # Track statuses for live display
+    statuses: dict[str, str] = {t.id: "pending" for t in tasks}
+
+    def on_status(task_id: str, status: str) -> None:
+        statuses[task_id] = status
+
+    def build_table() -> Table:
+        table = Table(title="Fleet Progress", expand=True)
+        table.add_column("Task", style="cyan", no_wrap=True)
+        table.add_column("Status", justify="center")
+        table.add_column("Prompt", max_width=60)
+
+        task_map = {t.id: t for t in tasks}
+        for task_id, status in statuses.items():
+            if status == "pending":
+                badge = "[dim]⏳ pending[/dim]"
+            elif status == "running":
+                badge = "[yellow]⚡ running[/yellow]"
+            elif status == "done":
+                badge = "[green]✅ done[/green]"
+            elif status == "failed":
+                badge = "[red]❌ failed[/red]"
+            elif status == "skipped":
+                badge = "[dim]⏭️  skipped[/dim]"
+            else:
+                badge = f"[dim]{status}[/dim]"
+            prompt_text = task_map[task_id].prompt[:60]
+            table.add_row(task_id, badge, prompt_text)
+        return table
+
+    console.print(
+        Panel(
+            f"[bold]Running {len(tasks)} task(s)[/bold] • "
+            f"max concurrent: {fleet_config.max_concurrent} • "
+            f"timeout: {fleet_config.timeout:.0f}s",
+            title="🚀 Fleet",
+            border_style="blue",
+        )
+    )
+
+    start_time = time.time()
+
+    async with Fleet(config, fleet_config) as fleet:
+        for task in tasks:
+            fleet.add(
+                task.prompt,
+                task_id=task.id,
+                depends_on=task.depends_on if task.depends_on else None,
+            )
+
+        with Live(build_table(), console=console, refresh_per_second=4) as live:
+
+            async def _run_with_updates() -> list:
+                from copex.fleet import FleetResult
+
+                results = await fleet.run(on_status=on_status)
+                # Mark final statuses
+                for r in results:
+                    statuses[r.task_id] = "done" if r.success else "failed"
+                live.update(build_table())
+                return results
+
+            results = await _run_with_updates()
+
+    total_time = time.time() - start_time
+    successes = sum(1 for r in results if r.success)
+    failures = len(results) - successes
+
+    # Summary
+    summary_lines = [
+        f"[green]✅ Succeeded: {successes}[/green]",
+        f"[red]❌ Failed:    {failures}[/red]",
+        f"[blue]⏱  Duration:  {_format_duration(total_time)}[/blue]",
+    ]
+
+    if failures > 0:
+        summary_lines.append("")
+        for r in results:
+            if not r.success:
+                err = str(r.error) if r.error else "unknown error"
+                summary_lines.append(f"  [red]• {r.task_id}: {err}[/red]")
+
+    console.print(
+        Panel(
+            "\n".join(summary_lines),
+            title="📊 Fleet Summary",
+            border_style="green" if failures == 0 else "red",
+        )
+    )
+
+    if failures > 0:
+        raise typer.Exit(1)
+
+
 if __name__ == "__main__":
     app()
