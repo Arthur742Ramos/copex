@@ -142,6 +142,7 @@ TOKEN_COSTS = {
     "claude-sonnet-4": {"input": 3.00, "output": 15.00},
     "claude-haiku-4.5": {"input": 0.80, "output": 4.00},
     "claude-opus-4.5": {"input": 15.00, "output": 75.00},
+    "claude-opus-4.6": {"input": 15.00, "output": 75.00},
     "gemini-3-pro-preview": {"input": 1.25, "output": 5.00},
 }
 

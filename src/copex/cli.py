@@ -94,12 +94,41 @@ def main(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
+    prompt: Annotated[
+        str | None, typer.Option("--prompt", "-p", help="Execute a prompt in non-interactive mode")
+    ] = None,
+    non_interactive: Annotated[
+        bool, typer.Option("--non-interactive", "-s", help="Non-interactive mode (exit after completion)")
+    ] = False,
+    allow_all: Annotated[
+        bool, typer.Option("--allow-all", help="Enable all permissions (tools, paths, URLs)")
+    ] = False,
 ) -> None:
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
     if ctx.invoked_subcommand is None:
-        # No command provided - launch interactive mode
         effective_model = model or _DEFAULT_MODEL.value
-        interactive(model=effective_model, reasoning=reasoning)
+        
+        # If -p/--prompt provided, run in non-interactive/chat mode
+        if prompt is not None:
+            try:
+                config = CopexConfig()
+                config.model = Model(effective_model)
+                requested_effort = parse_reasoning_effort(reasoning)
+                if requested_effort is None:
+                    requested_effort = ReasoningEffort.HIGH
+                normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
+                if warning:
+                    console.print(f"[yellow]{warning}[/yellow]")
+                config.reasoning_effort = normalized_effort
+                
+                # Run chat with the prompt
+                asyncio.run(_run_chat(config, prompt, show_reasoning=True, raw=non_interactive))
+            except ValueError as e:
+                console.print(f"[red]Invalid model: {effective_model}[/red]")
+                raise typer.Exit(1)
+        else:
+            # No prompt provided - launch interactive mode
+            interactive(model=effective_model, reasoning=reasoning)
 
 
 class SlashCompleter(Completer):

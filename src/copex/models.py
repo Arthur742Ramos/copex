@@ -27,6 +27,7 @@ class Model(str, Enum):
     CLAUDE_SONNET_4 = "claude-sonnet-4"
     CLAUDE_HAIKU_4_5 = "claude-haiku-4.5"
     CLAUDE_OPUS_4_5 = "claude-opus-4.5"
+    CLAUDE_OPUS_4_6 = "claude-opus-4.6"
     GEMINI_3_PRO = "gemini-3-pro-preview"
 
 
