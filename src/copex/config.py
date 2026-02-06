@@ -158,7 +158,7 @@ def save_last_model(model: Model) -> None:
 class CopexConfig(BaseModel):
     """Main configuration for Copex client."""
 
-    model: Model = Field(default=Model.CLAUDE_OPUS_4_5, description="Model to use")
+    model: Model = Field(default=Model.CLAUDE_OPUS_4_6, description="Model to use")
     reasoning_effort: ReasoningEffort = Field(
         default=ReasoningEffort.XHIGH, description="Reasoning effort level"
     )
