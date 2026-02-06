@@ -33,9 +33,14 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-from copex.client import Copex, Response
+from copex.client import Copex, Response, SessionPool
 from copex.config import CopexConfig
 from copex.models import Model, ReasoningEffort
+
+try:
+    from copilot import CopilotClient
+except ImportError:
+    CopilotClient = None  # type: ignore[misc,assignment]
 
 
 class FleetEventType(Enum):
@@ -520,6 +525,8 @@ class FleetCoordinator:
         Tasks are prioritized by dependency depth (shallowest first)
         and prompt length (shortest first) to maximize throughput.
 
+        Sessions are reused via SessionPool for efficiency (new in v1.9.0).
+
         Args:
             tasks: Tasks to execute.
             config: Fleet configuration.
@@ -546,104 +553,142 @@ class FleetCoordinator:
         work_available = asyncio.Event()
         work_available.set()  # Initial work available
 
-        async def _run_task(task: FleetTask) -> FleetResult:
-            if on_status:
-                on_status(task.id, "queued")
+        # Create shared client and session pool for efficiency (v1.9.0)
+        client = None
+        pool = None
+        if CopilotClient is not None:
+            client = CopilotClient(self._base_config.to_client_options())
+            await client.start()
+            pool = SessionPool(
+                max_sessions=config.max_concurrent,
+                max_idle_time=300.0,
+            )
+            await pool.start()
 
-            # Wait for all dependencies to finish
-            for dep in task.depends_on:
-                await done_events[dep].wait()
-                if not finished.get(dep, False):
-                    failed_deps = [
-                        d for d in task.depends_on if not finished.get(d, False)
-                    ]
+        try:
+            async def _run_task(task: FleetTask) -> FleetResult:
+                if on_status:
+                    on_status(task.id, "queued")
+
+                # Wait for all dependencies to finish
+                for dep in task.depends_on:
+                    await done_events[dep].wait()
+                    if not finished.get(dep, False):
+                        failed_deps = [
+                            d for d in task.depends_on if not finished.get(d, False)
+                        ]
+                        result = FleetResult(
+                            task_id=task.id,
+                            success=False,
+                            error=RuntimeError(
+                                f"Dependency failed for task '{task.id}': "
+                                f"upstream {failed_deps!r} did not succeed"
+                            ),
+                        )
+                        results[task.id] = result
+                        finished[task.id] = False
+                        done_events[task.id].set()
+                        if on_status:
+                            on_status(task.id, "blocked")
+                        return result
+
+                if cancel_event.is_set():
                     result = FleetResult(
                         task_id=task.id,
                         success=False,
-                        error=RuntimeError(
-                            f"Dependency failed for task '{task.id}': "
-                            f"upstream {failed_deps!r} did not succeed"
-                        ),
+                        error=asyncio.CancelledError("Fleet cancelled due to fail-fast"),
                     )
                     results[task.id] = result
                     finished[task.id] = False
                     done_events[task.id].set()
-                    if on_status:
-                        on_status(task.id, "blocked")
                     return result
 
-            if cancel_event.is_set():
-                result = FleetResult(
-                    task_id=task.id,
-                    success=False,
-                    error=asyncio.CancelledError("Fleet cancelled due to fail-fast"),
-                )
+                if on_status:
+                    on_status(task.id, "running")
+
+                start = time.monotonic()
+                task_config = self._task_config(task, config)
+
+                try:
+                    async with semaphore:
+                        if cancel_event.is_set():
+                            raise asyncio.CancelledError("Fleet cancelled")
+
+                        # Use session pool if available (v1.9.0)
+                        if pool is not None and client is not None:
+                            async with pool.acquire(client, task_config) as session:
+                                copex = Copex(task_config)
+                                copex._started = True
+                                copex._client = client
+                                copex._session = session
+                                try:
+                                    response = await asyncio.wait_for(
+                                        copex.send(task.prompt),
+                                        timeout=config.timeout,
+                                    )
+                                finally:
+                                    # Don't let Copex destroy the pooled session
+                                    copex._session = None
+                                    copex._client = None
+                        else:
+                            # Fallback to creating new Copex per task
+                            async with Copex(task_config) as copex:
+                                response = await asyncio.wait_for(
+                                    copex.send(task.prompt),
+                                    timeout=config.timeout,
+                                )
+
+                    elapsed = (time.monotonic() - start) * 1000
+                    result = FleetResult(
+                        task_id=task.id,
+                        success=True,
+                        response=response,
+                        duration_ms=elapsed,
+                    )
+                except Exception as exc:
+                    elapsed = (time.monotonic() - start) * 1000
+                    result = FleetResult(
+                        task_id=task.id,
+                        success=False,
+                        error=exc,
+                        duration_ms=elapsed,
+                    )
+                    if config.fail_fast:
+                        cancel_event.set()
+
                 results[task.id] = result
-                finished[task.id] = False
+                finished[task.id] = result.success
                 done_events[task.id].set()
+                if result.success:
+                    if on_status:
+                        on_status(task.id, "done")
+                else:
+                    if on_status:
+                        on_status(task.id, "failed")
                 return result
 
-            if on_status:
-                on_status(task.id, "running")
+            async def _worker() -> None:
+                """Worker that pulls tasks from the shared deque."""
+                while True:
+                    # Try to steal from left (highest priority) first
+                    task: FleetTask | None = None
+                    try:
+                        task = work_deque.popleft()
+                    except IndexError:
+                        break
+                    await _run_task(task)
 
-            start = time.monotonic()
-            task_config = self._task_config(task, config)
+            # Launch worker pool sized to concurrency limit
+            n_workers = min(config.max_concurrent, len(tasks))
+            workers = [asyncio.create_task(_worker()) for _ in range(n_workers)]
+            await asyncio.gather(*workers, return_exceptions=True)
 
-            try:
-                async with semaphore:
-                    if cancel_event.is_set():
-                        raise asyncio.CancelledError("Fleet cancelled")
-
-                    async with Copex(task_config) as copex:
-                        response = await asyncio.wait_for(
-                            copex.send(task.prompt),
-                            timeout=config.timeout,
-                        )
-
-                elapsed = (time.monotonic() - start) * 1000
-                result = FleetResult(
-                    task_id=task.id,
-                    success=True,
-                    response=response,
-                    duration_ms=elapsed,
-                )
-            except Exception as exc:
-                elapsed = (time.monotonic() - start) * 1000
-                result = FleetResult(
-                    task_id=task.id,
-                    success=False,
-                    error=exc,
-                    duration_ms=elapsed,
-                )
-                if config.fail_fast:
-                    cancel_event.set()
-
-            results[task.id] = result
-            finished[task.id] = result.success
-            done_events[task.id].set()
-            if result.success:
-                if on_status:
-                    on_status(task.id, "done")
-            else:
-                if on_status:
-                    on_status(task.id, "failed")
-            return result
-
-        async def _worker() -> None:
-            """Worker that pulls tasks from the shared deque."""
-            while True:
-                # Try to steal from left (highest priority) first
-                task: FleetTask | None = None
-                try:
-                    task = work_deque.popleft()
-                except IndexError:
-                    break
-                await _run_task(task)
-
-        # Launch worker pool sized to concurrency limit
-        n_workers = min(config.max_concurrent, len(tasks))
-        workers = [asyncio.create_task(_worker()) for _ in range(n_workers)]
-        await asyncio.gather(*workers, return_exceptions=True)
+        finally:
+            # Clean up shared resources
+            if pool is not None:
+                await pool.stop()
+            if client is not None:
+                await client.stop()
 
         return [results[t.id] for t in tasks]
 

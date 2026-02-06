@@ -17,6 +17,7 @@ logger = logging.getLogger(__name__)
 
 from copilot import CopilotClient
 
+from copex.backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, categorize_error
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
@@ -218,6 +219,68 @@ class ModelAwareBreaker:
             }
             for model, breaker in self._breakers.items()
         }
+
+    def is_open(self, model: str) -> bool:
+        """Check if circuit is open for a model (without raising)."""
+        breaker = self._breakers.get(model)
+        return breaker.is_open if breaker else False
+
+    def get_available_model(
+        self,
+        preferred: str,
+        fallback_chain: list[str] | None = None,
+    ) -> str | None:
+        """Get the first available model from the fallback chain.
+
+        If the preferred model's circuit is open, returns the first
+        model in the fallback chain whose circuit is closed or
+        half-open. Returns None if all circuits are open.
+
+        Args:
+            preferred: The preferred model to use
+            fallback_chain: Optional list of fallback models in order
+
+        Returns:
+            The model to use, or None if all are unavailable
+
+        Example:
+            model = breaker.get_available_model(
+                "claude-opus-4.5",
+                fallback_chain=["claude-sonnet-4.5", "claude-haiku-4.5"]
+            )
+        """
+        # Check preferred model first
+        if not self.is_open(preferred):
+            return preferred
+
+        # Try fallback chain
+        if fallback_chain:
+            for fallback in fallback_chain:
+                if not self.is_open(fallback):
+                    logger.info(
+                        "Circuit open for %s, falling back to %s",
+                        preferred,
+                        fallback,
+                    )
+                    return fallback
+
+        return None
+
+
+# Default fallback chains for common model families
+DEFAULT_FALLBACK_CHAINS: dict[str, list[str]] = {
+    # Claude family: opus -> sonnet -> haiku
+    "claude-opus-4.6": ["claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
+    "claude-opus-4.5": ["claude-sonnet-4.5", "claude-haiku-4.5"],
+    "claude-sonnet-4.5": ["claude-sonnet-4", "claude-haiku-4.5"],
+    "claude-sonnet-4": ["claude-haiku-4.5"],
+    # GPT family: codex -> codex-max -> regular
+    "gpt-5.2-codex": ["gpt-5.1-codex", "gpt-5.2", "gpt-5.1"],
+    "gpt-5.1-codex": ["gpt-5.1-codex-max", "gpt-5.1", "gpt-5"],
+    "gpt-5.2": ["gpt-5.1", "gpt-5"],
+    "gpt-5.1": ["gpt-5", "gpt-5-mini"],
+    "gpt-5": ["gpt-5-mini", "gpt-4.1"],
+}
 
 
 class SessionPool:
@@ -662,15 +725,34 @@ class _SendState:
 class Copex:
     """Copilot Extended - Resilient wrapper with automatic retry and stuck detection."""
 
-    def __init__(self, config: CopexConfig | None = None):
+    # Shared model-aware circuit breaker for fallback support (v1.9.0)
+    _model_breaker: ModelAwareBreaker | None = None
+
+    @classmethod
+    def get_model_breaker(cls) -> ModelAwareBreaker:
+        """Get the shared model-aware circuit breaker instance."""
+        if cls._model_breaker is None:
+            cls._model_breaker = ModelAwareBreaker()
+        return cls._model_breaker
+
+    def __init__(
+        self,
+        config: CopexConfig | None = None,
+        *,
+        fallback_chain: list[str] | None = None,
+    ):
         self.config = config or CopexConfig()
         self._client: CopilotClient | None = None
         self._session: Any = None
         self._started = False
-        # Circuit breaker state
+        # Circuit breaker state (legacy per-instance breaker)
         self._cb_failures = 0
         self._cb_opened_at: float | None = None
         self._destroy_tasks: set[asyncio.Task[None]] = set()
+        # Model fallback chain (v1.9.0)
+        self._fallback_chain = fallback_chain
+        # Track current model (may differ from config if fallback is active)
+        self._current_model: str | None = None
 
     async def start(self) -> None:
         """Start the Copilot client."""
@@ -717,9 +799,30 @@ class Copex:
         await self.stop()
 
     def _should_retry(self, error: str | Exception) -> bool:
-        """Check if error should trigger a retry."""
+        """Check if error should trigger a retry using AdaptiveRetry categorization.
+
+        Uses the AdaptiveRetry error categorization system for consistent
+        retry behavior across the codebase (v1.9.0).
+        """
         if self.config.retry.retry_on_any_error:
             return True
+
+        # Use AdaptiveRetry's error categorization
+        if isinstance(error, Exception):
+            category = categorize_error(error)
+            # Non-retryable categories
+            if category in (ErrorCategory.AUTH, ErrorCategory.CLIENT):
+                return False
+            # Retryable categories (rate limit, network, server, transient)
+            if category in (
+                ErrorCategory.RATE_LIMIT,
+                ErrorCategory.NETWORK,
+                ErrorCategory.SERVER,
+                ErrorCategory.TRANSIENT,
+            ):
+                return True
+
+        # Fallback to pattern matching for string errors
         error_str = str(error).lower()
         return any(pattern.lower() in error_str for pattern in self.config.retry.retry_on_errors)
 
@@ -728,8 +831,21 @@ class Copex:
         error_str = str(error).lower()
         return "tool_use_id" in error_str and "tool_result" in error_str
 
-    def _calculate_delay(self, attempt: int) -> float:
-        """Calculate delay with exponential backoff and jitter."""
+    def _calculate_delay(self, attempt: int, error: Exception | None = None) -> float:
+        """Calculate delay with exponential backoff and jitter using AdaptiveRetry.
+
+        Uses the AdaptiveRetry BackoffStrategy for consistent delay calculation
+        across the codebase. If an error is provided, uses error-category-specific
+        strategy for smarter backoff (e.g., longer delays for rate limits).
+        """
+        # Get error-specific strategy if available
+        if error is not None:
+            category = categorize_error(error)
+            retry = AdaptiveRetry()
+            strategy = retry.get_strategy(category)
+            return strategy.compute_delay(attempt + 1)  # +1 because BackoffStrategy is 1-indexed
+
+        # Fallback to config-based calculation with jitter
         delay = self.config.retry.base_delay * (self.config.retry.exponential_base**attempt)
         delay = min(delay, self.config.retry.max_delay)
         # Add jitter (±25%)
@@ -753,6 +869,9 @@ class Copex:
         """Record a successful request, resetting circuit breaker."""
         self._cb_failures = 0
         self._cb_opened_at = None
+        # Also record to model-aware breaker (v1.9.0)
+        if self._current_model:
+            self.get_model_breaker().record_success(self._current_model)
 
     def _cb_record_failure(self) -> None:
         """Record a failed request; open circuit if threshold exceeded."""
@@ -762,6 +881,9 @@ class Copex:
             logger.warning(
                 "Circuit breaker opened after %d consecutive failures", self._cb_failures
             )
+        # Also record to model-aware breaker (v1.9.0)
+        if self._current_model:
+            self.get_model_breaker().record_failure(self._current_model)
 
     def _handle_message_delta(
         self,
@@ -972,7 +1094,11 @@ class Copex:
             await self.start()
         if self._session is None:
             # github-copilot-sdk >= 0.1.21 supports reasoning_effort natively
-            self._session = await self._client.create_session(self.config.to_session_options())
+            # Use current model (may be fallback) if set (v1.9.0)
+            session_options = self.config.to_session_options()
+            if self._current_model and self._current_model != self.config.model.value:
+                session_options["model"] = self._current_model
+            self._session = await self._client.create_session(session_options)
         return self._session
 
     async def _get_session_context(self, session: Any) -> str | None:
@@ -1066,18 +1192,50 @@ class Copex:
         Returns:
             Response object with content and metadata
         """
+        # Check model fallback (v1.9.0)
+        model_breaker = self.get_model_breaker()
+        original_model = self.config.model.value
+        fallback_chain = self._fallback_chain or DEFAULT_FALLBACK_CHAINS.get(original_model)
+
+        available_model = model_breaker.get_available_model(original_model, fallback_chain)
+        if available_model is None:
+            raise RuntimeError(
+                f"All models in fallback chain are unavailable. "
+                f"Primary: {original_model}, Fallback: {fallback_chain}"
+            )
+
+        # Switch to fallback model if needed
+        if available_model != original_model:
+            self._current_model = available_model
+            if on_chunk:
+                on_chunk(
+                    StreamChunk(
+                        type="system",
+                        delta=f"\n[Model {original_model} unavailable, using fallback {available_model}]\n",
+                    )
+                )
+            # Create new session with fallback model
+            if self._session:
+                try:
+                    await self._session.destroy()
+                except Exception:
+                    pass
+                self._session = None
+        else:
+            self._current_model = original_model
+
         session = await self._ensure_session()
         retries = 0
         auto_continues = 0
         last_error: Exception | None = None
         collector = metrics or get_collector()
         request = collector.start_request(
-            model=self.config.model.value,
+            model=self._current_model or self.config.model.value,
             reasoning_effort=self.config.reasoning_effort.value,
             prompt=prompt,
         )
 
-        # Circuit breaker gate
+        # Circuit breaker gate (legacy per-instance check)
         self._cb_check()
 
         while True:
@@ -1126,7 +1284,7 @@ class Copex:
                                 delta="\n[Tool state mismatch detected; recovered session]\n",
                             )
                         )
-                    delay = self._calculate_delay(0)
+                    delay = self._calculate_delay(0, error=e)
                     await asyncio.sleep(delay)
                     continue
 
@@ -1143,7 +1301,8 @@ class Copex:
                 retries += 1
                 if retries <= self.config.retry.max_retries:
                     # Normal retry with exponential backoff (same session)
-                    delay = self._calculate_delay(retries - 1)
+                    # Use AdaptiveRetry's error-aware delay calculation
+                    delay = self._calculate_delay(retries - 1, error=e)
                     if on_chunk:
                         on_chunk(
                             StreamChunk(
@@ -1161,7 +1320,7 @@ class Copex:
                     auto_continues += 1
                     retries = 0
                     session, prompt = await self._recover_session(on_chunk)
-                    delay = self._calculate_delay(0)
+                    delay = self._calculate_delay(0, error=e)
                     if on_chunk:
                         on_chunk(
                             StreamChunk(

@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -119,8 +120,44 @@ DEFAULT_STRATEGIES: dict[ErrorCategory, BackoffStrategy] = {
 }
 
 
+# Compiled regex patterns for efficient error categorization (v1.9.0)
+# Using context-aware patterns to avoid false positives (e.g., "line 500" won't match)
+_RE_RATE_LIMIT = re.compile(
+    r"\brate\s*limit|(?:^|http\s*|status\s*|code\s*|error\s*)429\b|too many requests",
+    re.IGNORECASE
+)
+_RE_NETWORK = re.compile(
+    r"\b(connection|timeout|network|refused|socket)\b",
+    re.IGNORECASE
+)
+_RE_AUTH = re.compile(
+    r"(?:^|http\s*|status\s*|code\s*|error\s*)(401|403)\b|\bunauthorized\b|\bforbidden\b",
+    re.IGNORECASE
+)
+# Match HTTP 5xx status codes in HTTP context (not just any "500")
+_RE_SERVER = re.compile(
+    r"(?:^|http\s*|status\s*|code\s*|error\s*)(5\d{2})\b|internal server|service unavailable|bad gateway",
+    re.IGNORECASE
+)
+# Match HTTP 4xx status codes (excluding 401, 403, 429) in HTTP context
+# Note: "not found" and "bad request" only match if they appear as HTTP error descriptions
+_RE_CLIENT = re.compile(
+    r"(?:^|http\s*|status\s*|code\s*|error\s*)(4(?:0[02-8]|1[0-79]|[2-9]\d))\b|"
+    r"(?:^|http\s*|error\s*)(?:bad request|not found)\b",
+    re.IGNORECASE
+)
+
+# Sets for O(1) type name lookups
+_NETWORK_TYPES = frozenset(["connection", "timeout", "network", "socket"])
+_AUTH_TYPES = frozenset(["auth", "permission", "forbidden"])
+
+
 def categorize_error(error: Exception) -> ErrorCategory:
     """Categorize an exception for backoff strategy selection.
+
+    Uses compiled regex patterns for efficient matching and avoids
+    false positives (e.g., "error at line 500" won't match SERVER).
+    Optimized from O(100) iteration to O(1) regex matching (v1.9.0).
 
     Args:
         error: The exception to categorize
@@ -128,37 +165,37 @@ def categorize_error(error: Exception) -> ErrorCategory:
     Returns:
         The error category
     """
+    # Fast path: check exception type first
+    if isinstance(error, RateLimitError):
+        return ErrorCategory.RATE_LIMIT
+
     error_type = type(error).__name__.lower()
     error_msg = str(error).lower()
 
-    # Check for rate limit errors
-    if isinstance(error, RateLimitError):
-        return ErrorCategory.RATE_LIMIT
-    if "rate" in error_msg and ("limit" in error_msg or "exceeded" in error_msg):
-        return ErrorCategory.RATE_LIMIT
-    if "429" in error_msg or "too many requests" in error_msg:
-        return ErrorCategory.RATE_LIMIT
-
-    # Check for network errors
-    if any(x in error_type for x in ["connection", "timeout", "network", "socket"]):
+    # Check type name for network/auth errors (O(1) set lookup)
+    if any(x in error_type for x in _NETWORK_TYPES):
         return ErrorCategory.NETWORK
-    if any(x in error_msg for x in ["connection", "timeout", "network", "refused"]):
-        return ErrorCategory.NETWORK
-
-    # Check for auth errors
-    if any(x in error_type for x in ["auth", "permission", "forbidden"]):
-        return ErrorCategory.AUTH
-    if any(x in error_msg for x in ["401", "403", "unauthorized", "forbidden"]):
+    if any(x in error_type for x in _AUTH_TYPES):
         return ErrorCategory.AUTH
 
-    # Check for server errors
-    if any(f"{code}" in error_msg for code in range(500, 600)):
-        return ErrorCategory.SERVER
-    if any(x in error_msg for x in ["internal server", "service unavailable", "502", "503", "504"]):
+    # Check for rate limit patterns
+    if _RE_RATE_LIMIT.search(error_msg):
+        return ErrorCategory.RATE_LIMIT
+
+    # Check for network errors in message
+    if _RE_NETWORK.search(error_msg):
+        return ErrorCategory.NETWORK
+
+    # Check for auth errors in message
+    if _RE_AUTH.search(error_msg):
+        return ErrorCategory.AUTH
+
+    # Check for server errors (5xx)
+    if _RE_SERVER.search(error_msg):
         return ErrorCategory.SERVER
 
-    # Check for client errors
-    if any(f"{code}" in error_msg for code in range(400, 500) if code not in [401, 403, 429]):
+    # Check for client errors (4xx excluding 401, 403, 429)
+    if _RE_CLIENT.search(error_msg):
         return ErrorCategory.CLIENT
 
     # Default to unknown

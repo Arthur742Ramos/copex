@@ -5,6 +5,28 @@ All notable changes to Copex will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.9.0] - 2026-02-06
+
+### Added
+
+- **SessionPool integration in Fleet**: Fleet now reuses sessions from the SessionPool instead of creating new Copex clients per task, improving performance for parallel task execution
+- **AdaptiveRetry integration in client**: Core client now uses AdaptiveRetry's error categorization and backoff strategies for smarter retry behavior
+- **Model fallback on circuit break**: When a model's circuit breaker opens, automatically falls back to the next model in the fallback chain (e.g., opus → sonnet → haiku)
+- `DEFAULT_FALLBACK_CHAINS`: Pre-defined fallback chains for Claude and GPT model families
+- `ModelAwareBreaker.get_available_model()`: Get first available model from fallback chain
+- `ModelAwareBreaker.is_open()`: Check if circuit is open without raising
+- `Copex(fallback_chain=[...])`: Custom fallback chain parameter
+
+### Changed
+
+- `categorize_error()` now uses compiled regex patterns with context-aware matching (O(1) instead of O(100) for status code checks)
+- `_calculate_delay()` now accepts optional `error` parameter for error-aware backoff delays
+- `_should_retry()` now uses AdaptiveRetry's error categorization for consistent behavior
+
+### Fixed
+
+- `categorize_error()` no longer has false positives for messages containing "500" (e.g., "Error at line 500" is now correctly categorized as UNKNOWN, not SERVER)
+
 ## [1.6.0] - 2026-02-06
 
 ### Added
