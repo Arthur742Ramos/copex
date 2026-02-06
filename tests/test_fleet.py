@@ -525,3 +525,111 @@ class TestRunStreaming:
         # Mailbox inboxes should have been created for both tasks
         assert mbox.pending_count("t1") == 0  # exists but empty
         assert mbox.pending_count("t2") == 0
+
+
+# ---------------------------------------------------------------------------
+# TestFleetPromptImmutability
+# ---------------------------------------------------------------------------
+
+
+class TestFleetPromptImmutability:
+    @pytest.mark.asyncio
+    async def test_shared_context_does_not_mutate_tasks(self):
+        """Shared context should be prepended without modifying original tasks."""
+        shared = "Context prefix."
+        cfg = FleetConfig(shared_context=shared)
+        mock_copex = _make_mock_copex()
+
+        fleet = Fleet(fleet_config=cfg)
+        fleet.add("Original prompt", task_id="t1")
+
+        # Save original prompt
+        original_prompt = fleet._tasks[0].prompt
+        assert original_prompt == "Original prompt"
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            await fleet.run()
+
+        # Task prompt should NOT have been modified
+        assert fleet._tasks[0].prompt == "Original prompt"
+
+        # But the sent prompt should have the context
+        sent_prompt = mock_copex.send.call_args[0][0]
+        assert sent_prompt.startswith(shared)
+
+    @pytest.mark.asyncio
+    async def test_double_run_no_double_prepend(self):
+        """Calling run() twice should not double-prepend shared context."""
+        shared = "PREFIX"
+        cfg = FleetConfig(shared_context=shared)
+        mock_copex = _make_mock_copex()
+
+        fleet = Fleet(fleet_config=cfg)
+        fleet.add("My prompt", task_id="t1")
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            await fleet.run()
+            # Reset mock for second call
+            mock_copex.send.reset_mock()
+            await fleet.run()
+
+        sent_prompt = mock_copex.send.call_args[0][0]
+        # Should start with PREFIX exactly once, not "PREFIX\n\nPREFIX\n\n..."
+        assert sent_prompt == "PREFIX\n\nMy prompt"
+        # Count occurrences of PREFIX
+        assert sent_prompt.count("PREFIX") == 1
+
+    @pytest.mark.asyncio
+    async def test_streaming_shared_context_does_not_mutate_tasks(self):
+        """Streaming run should also not mutate original tasks."""
+        shared = "Stream context."
+        cfg = FleetConfig(shared_context=shared)
+        mock_copex = _make_mock_copex()
+
+        fleet = Fleet(fleet_config=cfg)
+        fleet.add("Stream prompt", task_id="s1")
+
+        original_prompt = fleet._tasks[0].prompt
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            _ = [e async for e in fleet.run_streaming()]
+
+        assert fleet._tasks[0].prompt == original_prompt
+
+
+# ---------------------------------------------------------------------------
+# TestFleetDepErrorMessage
+# ---------------------------------------------------------------------------
+
+
+class TestFleetDepErrorMessage:
+    @pytest.mark.asyncio
+    async def test_streaming_dep_error_matches_format(self):
+        """Streaming path should use same error format as non-streaming."""
+        async def _fail_on_a(prompt, **kwargs):
+            if "A" in prompt:
+                raise RuntimeError("A failed")
+            return Response(content="ok")
+
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_fail_on_a)
+
+        fleet = Fleet()
+        fleet.add("A", task_id="a")
+        fleet.add("B", task_id="b", depends_on=["a"])
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            events = [e async for e in fleet.run_streaming()]
+
+        blocked = [e for e in events if e.event_type == FleetEventType.TASK_BLOCKED]
+        assert len(blocked) == 1
+
+        # Error message should include task ID and upstream info
+        error_msg = blocked[0].error
+        assert "b" in error_msg
+
+        # The FleetResult for the blocked task should have the
+        # "Dependency failed" error with upstream details
+        failed_events = [e for e in events if e.event_type == FleetEventType.TASK_FAILED and e.task_id == "a"]
+        assert len(failed_events) == 1
+        assert "A failed" in (failed_events[0].error or "")

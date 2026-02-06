@@ -1,6 +1,6 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
-__version__ = "1.5.0"
+__version__ = "1.6.0"
 
 # Re-export core components for convenience
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
@@ -36,6 +36,7 @@ from .templates import (
     test_workflow,
 )
 from .fleet import Fleet, FleetConfig, FleetCoordinator, FleetResult, FleetTask
+from .fleet_store import FleetStore, RunRecord, TaskRecord
 from .visualization import render_ascii, render_mermaid, visualize_plan
 
 __all__ = [
@@ -96,4 +97,7 @@ __all__ = [
     "FleetCoordinator",
     "FleetResult",
     "FleetTask",
+    "FleetStore",
+    "RunRecord",
+    "TaskRecord",
 ]

@@ -327,6 +327,7 @@ class SessionPool:
                     break
 
         # No available session - create new one
+        is_pooled = False
         if session is None:
             session = await client.create_session(config.to_session_options())
             pooled = SessionPool._PooledSession(
@@ -340,14 +341,22 @@ class SessionPool:
                 pool = self._pools.setdefault(model, [])
                 if len(pool) < self.max_sessions:
                     pool.append(pooled)
+                    is_pooled = True
+        else:
+            is_pooled = True
 
         try:
             yield session
         finally:
-            # Return session to pool
+            # Return session to pool or destroy if not pooled
             if pooled is not None:
                 pooled.in_use = False
                 pooled.last_used = time.monotonic()
+            if not is_pooled and session is not None:
+                try:
+                    await session.destroy()
+                except Exception:
+                    pass
 
     def stats(self) -> dict[str, dict[str, int]]:
         """Get pool statistics."""

@@ -28,6 +28,7 @@ import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import Enum
+from pathlib import Path
 from typing import Any
 
 from copex.client import Copex, Response
@@ -580,17 +581,24 @@ class Fleet:
         self,
         config: CopexConfig | None = None,
         fleet_config: FleetConfig | None = None,
+        db_path: str | Path | None = None,
     ):
         self._config = config or CopexConfig()
         self._fleet_config = fleet_config or FleetConfig()
         self._tasks: list[FleetTask] = []
         self._coordinator = FleetCoordinator(self._config)
+        self._store: FleetStore | None = None
+        self._run_id: str | None = None
+        if db_path is not None:
+            from copex.fleet_store import FleetStore
+            self._store = FleetStore(db_path)
 
     async def __aenter__(self) -> Fleet:
         return self
 
     async def __aexit__(self, *args: Any) -> None:
-        pass
+        if self._store is not None:
+            self._store.close()
 
     def add(
         self,
@@ -626,6 +634,91 @@ class Fleet:
         self._tasks.append(task)
         return tid
 
+    @classmethod
+    async def resume(
+        cls,
+        db_path: str | Path,
+        run_id: str,
+        config: CopexConfig | None = None,
+        fleet_config: FleetConfig | None = None,
+        on_status: Callable[[str, str], None] | None = None,
+    ) -> list[FleetResult]:
+        """Resume an interrupted fleet run from the database.
+
+        Loads task state from a previous run, skips already-completed tasks,
+        and re-runs only pending/failed/blocked tasks.
+
+        Args:
+            db_path: Path to the SQLite database.
+            run_id: ID of the run to resume.
+            config: Copex configuration (uses defaults if not provided).
+            fleet_config: Fleet configuration (loaded from DB if not provided).
+
+        Returns:
+            List of FleetResult for re-run tasks only.
+
+        Example:
+            results = await Fleet.resume("fleet.db", "abc123def456")
+        """
+        from copex.fleet_store import FleetStore
+
+        store = FleetStore(db_path)
+        fleet = None
+        try:
+            run = store.get_run(run_id)
+            if run is None:
+                raise ValueError(f"Run not found: {run_id}")
+
+            all_tasks = store.get_tasks(run_id)
+            if not all_tasks:
+                return []
+
+            completed_ids = store.get_completed_task_ids(run_id)
+            incomplete = [t for t in all_tasks if t.task_id not in completed_ids]
+
+            if not incomplete:
+                return []
+
+            # Reconstruct FleetConfig from stored config if not provided
+            if fleet_config is None:
+                import json
+                stored_config = json.loads(run.config_json) if run.config_json else {}
+                fleet_config = FleetConfig(
+                    max_concurrent=stored_config.get("max_concurrent", 5),
+                    timeout=stored_config.get("timeout", 600.0),
+                    fail_fast=stored_config.get("fail_fast", False),
+                )
+
+            # Build Fleet with the remaining tasks
+            fleet = cls(config=config, fleet_config=fleet_config, db_path=db_path)
+            fleet._run_id = run_id  # Reuse existing run_id
+
+            for task_rec in incomplete:
+                # Filter depends_on to only include deps that aren't already done
+                remaining_deps = [d for d in task_rec.depends_on if d not in completed_ids]
+                fleet._tasks.append(FleetTask(
+                    id=task_rec.task_id,
+                    prompt=task_rec.prompt,
+                    depends_on=remaining_deps,
+                ))
+
+            # Reset task statuses in the store for re-run
+            for task_rec in incomplete:
+                store.update_task_status(run_id, task_rec.task_id, "pending")
+
+            results = await fleet.run(on_status=on_status)
+
+            # run() already calls complete_run via fleet._store,
+            # so no need to call it again here.
+
+            return results
+        finally:
+            store.close()
+            # Also close the fleet's own store (opened by __init__)
+            if fleet is not None and fleet._store is not None:
+                fleet._store.close()
+                fleet._store = None
+
     async def run(
         self,
         on_status: Callable[[str, str], None] | None = None,
@@ -634,17 +727,66 @@ class Fleet:
         if not self._tasks:
             return []
 
-        # Prepend shared context to each task's prompt
+        # Prepend shared context without mutating original tasks
+        tasks = self._tasks
         if self._fleet_config.shared_context:
             ctx = self._fleet_config.shared_context
-            for task in self._tasks:
-                task.prompt = f"{ctx}\n\n{task.prompt}"
+            tasks = [
+                FleetTask(
+                    id=t.id,
+                    prompt=f"{ctx}\n\n{t.prompt}",
+                    depends_on=t.depends_on,
+                    model=t.model,
+                    reasoning_effort=t.reasoning_effort,
+                )
+                for t in self._tasks
+            ]
 
-        return await self._coordinator.run(
-            self._tasks,
+        # Persist to store if configured (skip if resuming an existing run)
+        if self._store is not None and self._run_id is None:
+            self._run_id = self._store.create_run(
+                config={
+                    "max_concurrent": self._fleet_config.max_concurrent,
+                    "timeout": self._fleet_config.timeout,
+                    "fail_fast": self._fleet_config.fail_fast,
+                }
+            )
+            for task in tasks:
+                self._store.add_task(
+                    self._run_id, task.id, task.prompt, depends_on=task.depends_on
+                )
+
+        # Wrap on_status to also update store
+        original_on_status = on_status
+        store = self._store
+        run_id = self._run_id
+
+        def _tracking_on_status(task_id: str, status: str) -> None:
+            if store is not None and run_id is not None:
+                store.update_task_status(run_id, task_id, status)
+            if original_on_status:
+                original_on_status(task_id, status)
+
+        results = await self._coordinator.run(
+            tasks,
             self._fleet_config,
-            on_status=on_status,
+            on_status=_tracking_on_status,
         )
+
+        # Record results in store
+        if store is not None and run_id is not None:
+            for result in results:
+                store.record_result(
+                    run_id,
+                    result.task_id,
+                    success=result.success,
+                    content=result.response.content if result.response else None,
+                    error=str(result.error) if result.error else None,
+                    duration_ms=result.duration_ms,
+                )
+            store.complete_run(run_id)
+
+        return results
 
     async def run_streaming(
         self,
@@ -686,28 +828,53 @@ class Fleet:
         for task in self._tasks:
             mbox.create_inbox(task.id)
 
-        # Prepend shared context to each task's prompt
+        # Prepend shared context without mutating original tasks
+        tasks = self._tasks
         if self._fleet_config.shared_context:
             shared_ctx = self._fleet_config.shared_context
-            for task in self._tasks:
-                task.prompt = f"{shared_ctx}\n\n{task.prompt}"
+            tasks = [
+                FleetTask(
+                    id=t.id,
+                    prompt=f"{shared_ctx}\n\n{t.prompt}",
+                    depends_on=t.depends_on,
+                    model=t.model,
+                    reasoning_effort=t.reasoning_effort,
+                )
+                for t in self._tasks
+            ]
+
+        # Persist to store if configured (skip if resuming an existing run)
+        if self._store is not None and self._run_id is None:
+            self._run_id = self._store.create_run(
+                config={
+                    "max_concurrent": self._fleet_config.max_concurrent,
+                    "timeout": self._fleet_config.timeout,
+                    "fail_fast": self._fleet_config.fail_fast,
+                }
+            )
+            for task in tasks:
+                self._store.add_task(
+                    self._run_id, task.id, task.prompt, depends_on=task.depends_on
+                )
+        store = self._store
+        run_id = self._run_id
 
         # Emit fleet start event
         yield FleetEvent(
             event_type=FleetEventType.FLEET_START,
             data={
-                "total_tasks": len(self._tasks),
+                "total_tasks": len(tasks),
                 "max_concurrent": self._fleet_config.max_concurrent,
-                "task_ids": [t.id for t in self._tasks],
+                "task_ids": [t.id for t in tasks],
             },
         )
 
         # Bounded event queue for streaming – backpressure under load
-        event_queue: asyncio.Queue[FleetEvent | None] = asyncio.Queue(maxsize=4096)
+        event_queue: asyncio.Queue[FleetEvent | None] = asyncio.Queue(maxsize=10000)
         results: dict[str, FleetResult] = {}
         semaphore = asyncio.Semaphore(self._fleet_config.max_concurrent)
         cancel_event = asyncio.Event()
-        done_events: dict[str, asyncio.Event] = {t.id: asyncio.Event() for t in self._tasks}
+        done_events: dict[str, asyncio.Event] = {t.id: asyncio.Event() for t in tasks}
         finished: dict[str, bool] = {}
 
         async def _run_task(task: FleetTask) -> FleetResult:
@@ -717,6 +884,8 @@ class Fleet:
                 task_id=task.id,
                 data={"prompt_preview": task.prompt[:100]},
             ))
+            if store is not None and run_id is not None:
+                store.update_task_status(run_id, task.id, "pending")
 
             # Wait for dependencies
             if task.depends_on:
@@ -733,7 +902,10 @@ class Fleet:
                     result = FleetResult(
                         task_id=task.id,
                         success=False,
-                        error=RuntimeError(f"Dependency failed: {failed_deps}"),
+                        error=RuntimeError(
+                            f"Dependency failed for task '{task.id}': "
+                            f"upstream {failed_deps!r} did not succeed"
+                        ),
                     )
                     results[task.id] = result
                     finished[task.id] = False
@@ -743,6 +915,8 @@ class Fleet:
                         task_id=task.id,
                         error=f"Blocked by failed dependencies: {failed_deps}",
                     ))
+                    if store is not None and run_id is not None:
+                        store.update_task_status(run_id, task.id, "blocked")
                     return result
 
             if cancel_event.is_set():
@@ -765,6 +939,8 @@ class Fleet:
                 event_type=FleetEventType.TASK_RUNNING,
                 task_id=task.id,
             ))
+            if store is not None and run_id is not None:
+                store.update_task_status(run_id, task.id, "running")
 
             start = time.monotonic()
             task_config = self._coordinator._task_config(task, self._fleet_config)
@@ -796,10 +972,7 @@ class Fleet:
                                     try:
                                         event_queue.put_nowait(evt)
                                     except asyncio.QueueFull:
-                                        # Backpressure: schedule with await so
-                                        # producer blocks until consumer drains
-                                        loop = asyncio.get_event_loop()
-                                        loop.create_task(event_queue.put(evt))
+                                        pass  # Drop delta events under backpressure
 
                         response = await asyncio.wait_for(
                             copex.send(task.prompt, on_chunk=on_chunk if include_deltas else None),
@@ -854,6 +1027,14 @@ class Fleet:
                         "content_preview": (result.response.content[:200] if result.response else "")[:200],
                     },
                 ))
+                if store is not None and run_id is not None:
+                    store.record_result(
+                        run_id,
+                        task.id,
+                        success=True,
+                        content=result.response.content if result.response else None,
+                        duration_ms=result.duration_ms,
+                    )
             else:
                 await event_queue.put(FleetEvent(
                     event_type=FleetEventType.TASK_FAILED,
@@ -861,11 +1042,19 @@ class Fleet:
                     error=str(result.error) if result.error else "Unknown error",
                     data={"duration_ms": result.duration_ms},
                 ))
+                if store is not None and run_id is not None:
+                    store.record_result(
+                        run_id,
+                        task.id,
+                        success=False,
+                        error=str(result.error) if result.error else None,
+                        duration_ms=result.duration_ms,
+                    )
 
             return result
 
         # Start all tasks
-        task_futures = [asyncio.ensure_future(_run_task(task)) for task in self._tasks]
+        task_futures = [asyncio.ensure_future(_run_task(task)) for task in tasks]
 
         # Collector task that signals completion
         async def _wait_all() -> None:
@@ -891,12 +1080,14 @@ class Fleet:
         # Emit fleet complete event
         success_count = sum(1 for r in results.values() if r.success)
         total_duration = sum(r.duration_ms for r in results.values())
+        if store is not None and run_id is not None:
+            store.complete_run(run_id)
         yield FleetEvent(
             event_type=FleetEventType.FLEET_COMPLETE,
             data={
-                "total_tasks": len(self._tasks),
+                "total_tasks": len(tasks),
                 "succeeded": success_count,
-                "failed": len(self._tasks) - success_count,
+                "failed": len(tasks) - success_count,
                 "total_duration_ms": total_duration,
             },
         )

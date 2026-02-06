@@ -22,6 +22,10 @@ from typing import Any, Awaitable, Callable
 # Allowlist pattern for MCP server commands: alphanumeric, hyphens, underscores, dots, slashes
 _ALLOWED_COMMAND_RE = re.compile(r"^[a-zA-Z0-9_./@-]+$")
 
+# Arg allowlist: block shell metacharacters but allow filesystem path characters
+# (spaces, backslashes, colons, etc. are safe since we use subprocess exec, not shell)
+_BLOCKED_ARG_CHARS_RE = re.compile(r'[\x00;|&$`(){}<>\n\r]')
+
 # Maximum size for MCP config files (1 MB)
 _MAX_CONFIG_SIZE = 1_048_576
 
@@ -114,9 +118,10 @@ class StdioTransport(MCPTransport):
         """Start the MCP server process."""
         _validate_command(self.config.command)
         for arg in self.config.args:
-            if not isinstance(arg, str) or not _ALLOWED_COMMAND_RE.match(arg):
+            if not isinstance(arg, str) or _BLOCKED_ARG_CHARS_RE.search(arg):
                 raise ValueError(
-                    f"MCP server argument contains disallowed characters: {arg!r}"
+                    f"MCP server argument contains disallowed characters: {arg!r}. "
+                    f"Shell metacharacters (;|&$`(){{}}<>) are not allowed."
                 )
 
         cmd = self.config.command
@@ -204,6 +209,15 @@ class StdioTransport(MCPTransport):
                 break
             except Exception:
                 continue
+
+        # Fail all pending futures since transport is closed
+        pending = dict(self._pending)
+        self._pending.clear()
+        for future in pending.values():
+            if not future.done():
+                future.set_exception(
+                    ConnectionError("MCP transport closed unexpectedly")
+                )
 
     async def _write(self, message: dict[str, Any]) -> None:
         """Write a message to the server."""

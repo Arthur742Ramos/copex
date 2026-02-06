@@ -12,6 +12,15 @@ from pydantic import BaseModel, Field, field_validator, model_validator
 from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
 
 
+def _parse_node_version(path: Path) -> tuple[int, ...]:
+    """Parse a Node version directory name (e.g. 'v18.17.0') into a sortable tuple."""
+    name = path.name.lstrip("v")
+    try:
+        return tuple(int(x) for x in name.split("."))
+    except (ValueError, AttributeError):
+        return (0,)
+
+
 def find_copilot_cli() -> str | None:
     """Auto-detect the Copilot CLI path across platforms.
 
@@ -72,7 +81,7 @@ def find_copilot_cli() -> str | None:
         nvm_dir = Path.home() / ".nvm" / "versions" / "node"
         if nvm_dir.exists():
             # Find latest node version
-            versions = sorted(nvm_dir.iterdir(), reverse=True)
+            versions = sorted(nvm_dir.iterdir(), key=_parse_node_version, reverse=True)
             for version in versions:
                 copilot_path = version / "bin" / "copilot"
                 if copilot_path.exists():
