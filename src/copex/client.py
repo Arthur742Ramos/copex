@@ -27,6 +27,22 @@ _CB_COOLDOWN_SECONDS = 60.0
 
 MAX_RAW_EVENTS = 10_000
 
+# Pre-cached EventType values to avoid repeated .value attribute access in the
+# hot path (on_event is called for every single streaming token).
+_ET_MSG_DELTA = EventType.ASSISTANT_MESSAGE_DELTA.value
+_ET_REASON_DELTA = EventType.ASSISTANT_REASONING_DELTA.value
+_ET_MSG = EventType.ASSISTANT_MESSAGE.value
+_ET_REASON = EventType.ASSISTANT_REASONING.value
+_ET_TOOL_START = EventType.TOOL_EXECUTION_START.value
+_ET_TOOL_PARTIAL = EventType.TOOL_EXECUTION_PARTIAL_RESULT.value
+_ET_TOOL_COMPLETE = EventType.TOOL_EXECUTION_COMPLETE.value
+_ET_ERROR = EventType.ERROR.value
+_ET_SESSION_ERROR = EventType.SESSION_ERROR.value
+_ET_TOOL_CALL = EventType.TOOL_CALL.value
+_ET_TURN_END = EventType.ASSISTANT_TURN_END.value
+_ET_SESSION_IDLE = EventType.SESSION_IDLE.value
+_ET_USAGE = "assistant.usage"
+
 
 class SlidingWindowBreaker:
     """Circuit breaker using a sliding window of recent request outcomes.
@@ -209,11 +225,13 @@ class SessionPool:
 
     Maintains a pool of reusable sessions to reduce connection overhead.
     Sessions are model-specific since different models require different
-    session configurations.
+    session configurations.  Uses LRU eviction when pool is full and
+    tracks hit/miss metrics.
 
     Args:
         max_sessions: Maximum sessions per model (default: 5)
         max_idle_time: Seconds before idle session is evicted (default: 300)
+        pre_warm: Number of sessions to pre-create per model on warm-up (default: 0)
 
     Example:
         pool = SessionPool()
@@ -233,12 +251,66 @@ class SessionPool:
         self,
         max_sessions: int = 5,
         max_idle_time: float = 300.0,
+        pre_warm: int = 0,
     ) -> None:
         self.max_sessions = max_sessions
         self.max_idle_time = max_idle_time
+        self.pre_warm = pre_warm
+        # Per-model pools keyed by model name
         self._pools: dict[str, list[SessionPool._PooledSession]] = {}
-        self._lock = asyncio.Lock()
+        # Per-model locks to reduce contention
+        self._model_locks: dict[str, asyncio.Lock] = {}
+        # Global lock only for creating new model entries
+        self._global_lock = asyncio.Lock()
         self._cleanup_task: asyncio.Task[None] | None = None
+        # Pool hit/miss metrics
+        self._hits: int = 0
+        self._misses: int = 0
+        self._evictions: int = 0
+
+    async def _get_model_lock(self, model: str) -> asyncio.Lock:
+        """Get or create a per-model lock."""
+        if model not in self._model_locks:
+            async with self._global_lock:
+                if model not in self._model_locks:
+                    self._model_locks[model] = asyncio.Lock()
+        return self._model_locks[model]
+
+    async def warm(
+        self,
+        client: Any,
+        configs: list[CopexConfig],
+    ) -> None:
+        """Pre-warm the pool by creating sessions for the given configs.
+
+        Args:
+            client: CopilotClient instance
+            configs: List of configs whose models should be pre-warmed
+        """
+        if self.pre_warm <= 0:
+            return
+        for config in configs:
+            model = config.model.value
+            lock = await self._get_model_lock(model)
+            async with lock:
+                pool = self._pools.setdefault(model, [])
+                needed = min(self.pre_warm, self.max_sessions) - len(pool)
+                for _ in range(needed):
+                    try:
+                        session = await client.create_session(
+                            config.to_session_options()
+                        )
+                        pool.append(
+                            SessionPool._PooledSession(
+                                session=session,
+                                model=model,
+                                created_at=time.monotonic(),
+                                last_used=time.monotonic(),
+                            )
+                        )
+                    except Exception:
+                        logger.debug("Failed to pre-warm session", exc_info=True)
+                        break
 
     async def start(self) -> None:
         """Start the pool cleanup task."""
@@ -256,7 +328,7 @@ class SessionPool:
             self._cleanup_task = None
 
         # Destroy all pooled sessions
-        async with self._lock:
+        async with self._global_lock:
             for pool in self._pools.values():
                 for ps in pool:
                     try:
@@ -264,6 +336,7 @@ class SessionPool:
                     except Exception:
                         logger.debug("Failed to destroy pooled session", exc_info=True)
             self._pools.clear()
+            self._model_locks.clear()
 
     async def _cleanup_loop(self) -> None:
         """Periodically clean up idle sessions."""
@@ -274,8 +347,12 @@ class SessionPool:
     async def _evict_idle(self) -> None:
         """Evict sessions that have been idle too long."""
         now = time.monotonic()
-        async with self._lock:
-            for model, pool in list(self._pools.items()):
+        for model in list(self._pools.keys()):
+            lock = await self._get_model_lock(model)
+            async with lock:
+                pool = self._pools.get(model)
+                if pool is None:
+                    continue
                 to_remove = []
                 for ps in pool:
                     if not ps.in_use and (now - ps.last_used) > self.max_idle_time:
@@ -283,6 +360,7 @@ class SessionPool:
 
                 for ps in to_remove:
                     pool.remove(ps)
+                    self._evictions += 1
                     try:
                         await ps.session.destroy()
                     except Exception:
@@ -290,6 +368,15 @@ class SessionPool:
 
                 if not pool:
                     del self._pools[model]
+
+    def _evict_lru(self, pool: list[SessionPool._PooledSession]) -> _PooledSession | None:
+        """Find the least-recently-used idle session for eviction."""
+        lru: SessionPool._PooledSession | None = None
+        for ps in pool:
+            if not ps.in_use:
+                if lru is None or ps.last_used < lru.last_used:
+                    lru = ps
+        return lru
 
     @asynccontextmanager
     async def acquire(
@@ -314,21 +401,27 @@ class SessionPool:
         session = None
         pooled: SessionPool._PooledSession | None = None
 
-        async with self._lock:
+        lock = await self._get_model_lock(model)
+        async with lock:
             pool = self._pools.setdefault(model, [])
 
-            # Try to find an available session
+            # LRU: pick the most-recently-used idle session for best reuse
+            best: SessionPool._PooledSession | None = None
             for ps in pool:
                 if not ps.in_use:
-                    ps.in_use = True
-                    ps.last_used = time.monotonic()
-                    session = ps.session
-                    pooled = ps
-                    break
+                    if best is None or ps.last_used > best.last_used:
+                        best = ps
+            if best is not None:
+                best.in_use = True
+                best.last_used = time.monotonic()
+                session = best.session
+                pooled = best
+                self._hits += 1
 
         # No available session - create new one
         is_pooled = False
         if session is None:
+            self._misses += 1
             session = await client.create_session(config.to_session_options())
             pooled = SessionPool._PooledSession(
                 session=session,
@@ -337,11 +430,25 @@ class SessionPool:
                 last_used=time.monotonic(),
                 in_use=True,
             )
-            async with self._lock:
+            async with lock:
                 pool = self._pools.setdefault(model, [])
                 if len(pool) < self.max_sessions:
                     pool.append(pooled)
                     is_pooled = True
+                else:
+                    # LRU eviction: replace least-recently-used idle session
+                    lru = self._evict_lru(pool)
+                    if lru is not None:
+                        pool.remove(lru)
+                        self._evictions += 1
+                        pool.append(pooled)
+                        is_pooled = True
+                        try:
+                            await lru.session.destroy()
+                        except Exception:
+                            logger.debug(
+                                "Failed to destroy evicted session", exc_info=True
+                            )
         else:
             is_pooled = True
 
@@ -358,9 +465,20 @@ class SessionPool:
                 except Exception:
                     pass
 
-    def stats(self) -> dict[str, dict[str, int]]:
-        """Get pool statistics."""
-        result = {}
+    def stats(self) -> dict[str, Any]:
+        """Get pool statistics including hit/miss metrics."""
+        result: dict[str, Any] = {
+            "_pool_metrics": {
+                "hits": self._hits,
+                "misses": self._misses,
+                "evictions": self._evictions,
+                "hit_rate": (
+                    self._hits / (self._hits + self._misses)
+                    if (self._hits + self._misses) > 0
+                    else 0.0
+                ),
+            },
+        }
         for model, pool in self._pools.items():
             result[model] = {
                 "total": len(pool),
@@ -385,6 +503,7 @@ class Response:
 
     retries: int = 0
     auto_continues: int = 0
+    streaming_metrics: StreamingMetrics | None = None
 
     @property
     def usage(self) -> dict[str, int] | None:
@@ -415,6 +534,106 @@ class StreamChunk:
 
 
 @dataclass
+class StreamingMetrics:
+    """Lightweight metrics captured during a single streaming response."""
+
+    first_chunk_time: float | None = None
+    last_chunk_time: float | None = None
+    total_chunks: int = 0
+    total_bytes: int = 0
+    message_chunks: int = 0
+    reasoning_chunks: int = 0
+    tool_chunks: int = 0
+    _start_time: float = 0.0
+
+    @property
+    def time_to_first_chunk_ms(self) -> float | None:
+        if self._start_time and self.first_chunk_time is not None:
+            return (self.first_chunk_time - self._start_time) * 1000
+        return None
+
+    @property
+    def chunks_per_second(self) -> float:
+        if self.first_chunk_time is None or self.last_chunk_time is None:
+            return 0.0
+        elapsed = self.last_chunk_time - self.first_chunk_time
+        if elapsed <= 0:
+            return float(self.total_chunks)
+        return self.total_chunks / elapsed
+
+    @property
+    def throughput_bytes_per_second(self) -> float:
+        if self.first_chunk_time is None or self.last_chunk_time is None:
+            return 0.0
+        elapsed = self.last_chunk_time - self.first_chunk_time
+        if elapsed <= 0:
+            return float(self.total_bytes)
+        return self.total_bytes / elapsed
+
+    def record_chunk(self, chunk: StreamChunk) -> None:
+        now = time.monotonic()
+        if self.first_chunk_time is None:
+            self.first_chunk_time = now
+        self.last_chunk_time = now
+        self.total_chunks += 1
+        self.total_bytes += len(chunk.delta)
+        if chunk.type == "message":
+            self.message_chunks += 1
+        elif chunk.type == "reasoning":
+            self.reasoning_chunks += 1
+        elif chunk.type in ("tool_call", "tool_result"):
+            self.tool_chunks += 1
+
+
+class ChunkBatcher:
+    """Batches rapid-fire delta chunks to reduce callback overhead.
+
+    For high-throughput streaming, invoking the on_chunk callback for
+    every single token is expensive. ChunkBatcher accumulates delta
+    chunks of the same type and flushes them when the type changes,
+    a non-delta chunk arrives, or a size threshold is reached.
+    """
+
+    __slots__ = ("_callback", "_max_bytes", "_pending_type", "_pending_parts", "_pending_bytes")
+
+    def __init__(
+        self,
+        callback: Callable[[StreamChunk], None],
+        max_bytes: int = 4096,
+    ) -> None:
+        self._callback = callback
+        self._max_bytes = max_bytes
+        self._pending_type: str | None = None
+        self._pending_parts: list[str] = []
+        self._pending_bytes = 0
+
+    def push(self, chunk: StreamChunk) -> None:
+        is_delta = chunk.delta and not chunk.is_final and chunk.type in ("message", "reasoning")
+        if is_delta:
+            if self._pending_type == chunk.type:
+                self._pending_parts.append(chunk.delta)
+                self._pending_bytes += len(chunk.delta)
+                if self._pending_bytes >= self._max_bytes:
+                    self.flush()
+            else:
+                self.flush()
+                self._pending_type = chunk.type
+                self._pending_parts.append(chunk.delta)
+                self._pending_bytes = len(chunk.delta)
+        else:
+            self.flush()
+            self._callback(chunk)
+
+    def flush(self) -> None:
+        if self._pending_parts:
+            merged = "".join(self._pending_parts)
+            self._callback(StreamChunk(type=self._pending_type or "message", delta=merged))
+            self._pending_parts.clear()
+            self._pending_bytes = 0
+            self._pending_type = None
+
+
+@dataclass
 class _SendState:
     """State for handling a single send call."""
 
@@ -435,6 +654,9 @@ class _SendState:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     cost: float | None = None
+
+    # Streaming performance tracking
+    streaming_metrics: StreamingMetrics = field(default_factory=StreamingMetrics)
 
 
 class Copex:
@@ -460,6 +682,10 @@ class Copex:
 
     async def stop(self) -> None:
         """Stop the Copilot client."""
+        # Await any pending destroy tasks from new_session() before tearing down
+        if self._destroy_tasks:
+            await asyncio.gather(*self._destroy_tasks, return_exceptions=True)
+            self._destroy_tasks.clear()
         if self._session:
             try:
                 await self._session.destroy()
@@ -543,12 +769,11 @@ class Copex:
         state: _SendState,
         on_chunk: Callable[[StreamChunk], None] | None,
     ) -> None:
-        delta = getattr(event.data, "delta_content", "") or ""
-        if not delta:
-            delta = getattr(event.data, "transformed_content", "") or ""
+        data = event.data
+        delta = getattr(data, "delta_content", None) or getattr(data, "transformed_content", None) or ""
         if delta:
             state.received_content = True
-        state.content_parts.append(delta)
+            state.content_parts.append(delta)
         if (
             state.awaiting_post_tool_response
             and state.tool_execution_seen
@@ -556,7 +781,9 @@ class Copex:
         ):
             state.awaiting_post_tool_response = False
         if on_chunk:
-            on_chunk(StreamChunk(type="message", delta=delta))
+            chunk = StreamChunk(type="message", delta=delta)
+            state.streaming_metrics.record_chunk(chunk)
+            on_chunk(chunk)
 
     def _handle_reasoning_delta(
         self,
@@ -564,10 +791,13 @@ class Copex:
         state: _SendState,
         on_chunk: Callable[[StreamChunk], None] | None,
     ) -> None:
-        delta = getattr(event.data, "delta_content", "") or ""
-        state.reasoning_parts.append(delta)
+        delta = getattr(event.data, "delta_content", None) or ""
+        if delta:
+            state.reasoning_parts.append(delta)
         if on_chunk:
-            on_chunk(StreamChunk(type="reasoning", delta=delta))
+            chunk = StreamChunk(type="reasoning", delta=delta)
+            state.streaming_metrics.record_chunk(chunk)
+            on_chunk(chunk)
 
     def _handle_message(
         self,
@@ -711,6 +941,7 @@ class Copex:
         tool_args = getattr(data, "arguments", None) or getattr(data, "args", {})
         tool_id = self._extract_tool_id(data)
         state.awaiting_post_tool_response = True
+        state.tool_execution_seen = True
         if isinstance(tool_args, str):
             import json
 
@@ -790,7 +1021,11 @@ class Copex:
             self._session = None
 
         # Create fresh session
-        session = await self._ensure_session()
+        try:
+            session = await self._ensure_session()
+        except Exception:
+            logger.error("Failed to create fresh session during recovery", exc_info=True)
+            raise
 
         # Build recovery prompt with context
         if context:
@@ -954,16 +1189,71 @@ class Copex:
     ) -> Response:
         """Send a single prompt and collect the response."""
         state = _SendState(done=asyncio.Event())
-        state.last_activity = asyncio.get_running_loop().time()
+        loop = asyncio.get_running_loop()
+        state.last_activity = loop.time()
+        state.streaming_metrics._start_time = time.monotonic()
+
+        def _handle_usage(event: Any, st: _SendState, _oc: Any) -> None:
+            data = event.data
+            inp = getattr(data, "input_tokens", None)
+            out = getattr(data, "output_tokens", None)
+            cost = getattr(data, "cost", None)
+            if inp is not None:
+                try:
+                    st.prompt_tokens = int(inp)
+                except Exception:
+                    pass
+            if out is not None:
+                try:
+                    st.completion_tokens = int(out)
+                except Exception:
+                    pass
+            if cost is not None:
+                try:
+                    st.cost = float(cost)
+                except Exception:
+                    pass
+
+        def _handle_turn_end(_e: Any, st: _SendState, _oc: Any) -> None:
+            self._handle_assistant_turn_end(st)
+
+        def _handle_idle(_e: Any, st: _SendState, _oc: Any) -> None:
+            self._handle_session_idle(st)
+
+        def _handle_error(ev: Any, st: _SendState, _oc: Any) -> None:
+            self._handle_error_event(ev, st)
+
+        # O(1) dispatch table — avoids the if/elif chain on the hot path.
+        dispatch: dict[str, Callable[..., None]] = {
+            _ET_MSG_DELTA: self._handle_message_delta,
+            _ET_REASON_DELTA: self._handle_reasoning_delta,
+            _ET_MSG: self._handle_message,
+            _ET_REASON: self._handle_reasoning,
+            _ET_TOOL_START: self._handle_tool_execution_start,
+            _ET_TOOL_PARTIAL: self._handle_tool_execution_partial_result,
+            _ET_TOOL_COMPLETE: self._handle_tool_execution_complete,
+            _ET_ERROR: _handle_error,
+            _ET_SESSION_ERROR: _handle_error,
+            _ET_TOOL_CALL: self._handle_tool_call,
+            _ET_USAGE: _handle_usage,
+            _ET_TURN_END: _handle_turn_end,
+            _ET_SESSION_IDLE: _handle_idle,
+        }
+
+        raw_events = state.raw_events
+        raw_events_len = 0
 
         def on_event(event: Any) -> None:
-            state.last_activity = asyncio.get_running_loop().time()
+            nonlocal raw_events_len
+            state.last_activity = loop.time()
             try:
-                event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
-                if len(state.raw_events) < MAX_RAW_EVENTS:
-                    state.raw_events.append({"type": event_type, "data": getattr(event, "data", None)})
-                elif len(state.raw_events) == MAX_RAW_EVENTS:
-                    # Emit warning once when limit is reached
+                etype = event.type
+                event_type = etype.value if hasattr(etype, "value") else str(etype)
+
+                if raw_events_len < MAX_RAW_EVENTS:
+                    raw_events.append({"type": event_type, "data": getattr(event, "data", None)})
+                    raw_events_len += 1
+                elif raw_events_len == MAX_RAW_EVENTS:
                     warnings.warn(
                         f"raw_events limit ({MAX_RAW_EVENTS}) reached. "
                         "Additional events will not be captured. "
@@ -971,65 +1261,12 @@ class Copex:
                         ResourceWarning,
                         stacklevel=2,
                     )
-                    state.raw_events.append({"type": "_limit_warning", "data": None})
+                    raw_events.append({"type": "_limit_warning", "data": None})
+                    raw_events_len += 1
 
-                if event_type == EventType.ASSISTANT_MESSAGE_DELTA.value:
-                    self._handle_message_delta(event, state, on_chunk)
-
-                elif event_type == EventType.ASSISTANT_REASONING_DELTA.value:
-                    self._handle_reasoning_delta(event, state, on_chunk)
-
-                elif event_type == EventType.ASSISTANT_MESSAGE.value:
-                    self._handle_message(event, state, on_chunk)
-
-                elif event_type == EventType.ASSISTANT_REASONING.value:
-                    self._handle_reasoning(event, state, on_chunk)
-
-                elif event_type == EventType.TOOL_EXECUTION_START.value:
-                    self._handle_tool_execution_start(event, state, on_chunk)
-
-                elif event_type == EventType.TOOL_EXECUTION_PARTIAL_RESULT.value:
-                    self._handle_tool_execution_partial_result(event, state, on_chunk)
-
-                elif event_type == EventType.TOOL_EXECUTION_COMPLETE.value:
-                    self._handle_tool_execution_complete(event, state, on_chunk)
-
-                elif event_type == EventType.ERROR.value:
-                    self._handle_error_event(event, state)
-
-                elif event_type == EventType.SESSION_ERROR.value:
-                    self._handle_error_event(event, state)
-
-                elif event_type == EventType.TOOL_CALL.value:
-                    self._handle_tool_call(event, state, on_chunk)
-
-                elif event_type == "assistant.usage":
-                    # Capture real token usage/cost when the SDK provides it.
-                    inp = getattr(event.data, "input_tokens", None)
-                    out = getattr(event.data, "output_tokens", None)
-                    cost = getattr(event.data, "cost", None)
-
-                    if inp is not None:
-                        try:
-                            state.prompt_tokens = int(inp)
-                        except Exception:
-                            pass
-                    if out is not None:
-                        try:
-                            state.completion_tokens = int(out)
-                        except Exception:
-                            pass
-                    if cost is not None:
-                        try:
-                            state.cost = float(cost)
-                        except Exception:
-                            pass
-
-                elif event_type == EventType.ASSISTANT_TURN_END.value:
-                    self._handle_assistant_turn_end(state)
-
-                elif event_type == EventType.SESSION_IDLE.value:
-                    self._handle_session_idle(state)
+                handler = dispatch.get(event_type)
+                if handler is not None:
+                    handler(event, state, on_chunk)
 
             except Exception as e:
                 logger.warning("Unhandled exception in on_event callback: %s", e, exc_info=True)
@@ -1046,7 +1283,7 @@ class Copex:
                     await asyncio.wait_for(state.done.wait(), timeout=self.config.timeout)
                 except asyncio.TimeoutError:
                     # Check if we've had activity within the timeout window
-                    idle_time = asyncio.get_running_loop().time() - state.last_activity
+                    idle_time = loop.time() - state.last_activity
                     if idle_time >= self.config.timeout:
                         raise TimeoutError(
                             f"Response timed out after {idle_time:.1f}s of inactivity"
@@ -1069,7 +1306,7 @@ class Copex:
                     message_value = (
                         message_type.value if hasattr(message_type, "value") else str(message_type)
                     )
-                    if message_value == EventType.ASSISTANT_MESSAGE.value:
+                    if message_value == _ET_MSG:
                         state.final_content = (
                             getattr(message.data, "content", "") or state.final_content
                         )
@@ -1085,10 +1322,11 @@ class Copex:
             content=state.final_content or "".join(state.content_parts),
             reasoning=state.final_reasoning
             or ("".join(state.reasoning_parts) if state.reasoning_parts else None),
-            raw_events=state.raw_events,
+            raw_events=raw_events,
             prompt_tokens=state.prompt_tokens,
             completion_tokens=state.completion_tokens,
             cost=state.cost,
+            streaming_metrics=state.streaming_metrics,
         )
 
     async def stream(
@@ -1102,7 +1340,7 @@ class Copex:
 
         Yields StreamChunk objects as they arrive.
         """
-        queue: asyncio.Queue[StreamChunk | None | Exception] = asyncio.Queue()
+        queue: asyncio.Queue[StreamChunk | None | BaseException] = asyncio.Queue()
 
         def on_chunk(chunk: StreamChunk) -> None:
             queue.put_nowait(chunk)
@@ -1111,7 +1349,7 @@ class Copex:
             try:
                 await self.send(prompt, tools=tools, on_chunk=on_chunk)
                 queue.put_nowait(None)  # Signal completion
-            except Exception as e:
+            except BaseException as e:
                 queue.put_nowait(e)
 
         task = asyncio.create_task(sender())
@@ -1121,7 +1359,7 @@ class Copex:
                 item = await queue.get()
                 if item is None:
                     break
-                if isinstance(item, Exception):
+                if isinstance(item, BaseException):
                     raise item
                 yield item
         finally:
@@ -1144,7 +1382,10 @@ class Copex:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
-                asyncio.run(session.destroy())
+                try:
+                    asyncio.run(session.destroy())
+                except Exception:
+                    logger.debug("Failed to destroy session in new_session (sync)", exc_info=True)
             else:
 
                 async def _destroy_with_logging() -> None:

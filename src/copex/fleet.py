@@ -26,6 +26,7 @@ import asyncio
 import re
 import subprocess
 import time
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -74,7 +75,7 @@ class FleetEvent:
     error: str | None = None
 
     def __post_init__(self) -> None:
-        if self.timestamp == 0:
+        if self.timestamp <= 0:
             self.timestamp = time.time()
 
 
@@ -98,7 +99,6 @@ class FleetMailbox:
 
     def __init__(self) -> None:
         self._inboxes: dict[str, asyncio.Queue[dict[str, Any]]] = {}
-        self._lock = asyncio.Lock()
 
     def create_inbox(self, task_id: str) -> None:
         """Create an inbox for a task."""
@@ -310,9 +310,20 @@ class FleetContext:
             return aggregator(self._results.copy())
 
     def clear(self) -> None:
-        """Clear all state and results."""
+        """Clear all state and results.
+
+        Note: This is a synchronous method. If called concurrently with
+        async get/set/add_result, prefer ``aclear()`` instead.
+        """
         self._state.clear()
         self._results.clear()
+
+    async def aclear(self) -> None:
+        """Clear all state and results (async, lock-safe)."""
+        async with self._lock:
+            self._state.clear()
+        async with self._result_lock:
+            self._results.clear()
 
     @property
     def state(self) -> dict[str, Any]:
@@ -359,6 +370,7 @@ class FleetTask:
     depends_on: list[str] = field(default_factory=list)
     model: Model | None = None
     reasoning_effort: ReasoningEffort | None = None
+    priority: int = 0  # Lower = higher priority; set by _prioritize_tasks
 
 
 @dataclass
@@ -430,7 +442,8 @@ class GitFinalizer:
 
     async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
         if exc_type is None and self._modified and not self._finalized:
-            self.finalize()
+            loop = asyncio.get_running_loop()
+            await loop.run_in_executor(None, self.finalize)
 
     def finalize(self) -> None:
         """Stage tracked files, commit, and optionally push.
@@ -468,6 +481,33 @@ class FleetCoordinator:
     def __init__(self, base_config: CopexConfig):
         self._base_config = base_config
 
+    @staticmethod
+    def _compute_depth(tasks: list[FleetTask]) -> dict[str, int]:
+        """Compute dependency depth for each task (0 = no deps)."""
+        depth: dict[str, int] = {}
+        task_map = {t.id: t for t in tasks}
+
+        def _get_depth(tid: str) -> int:
+            if tid in depth:
+                return depth[tid]
+            task = task_map.get(tid)
+            if not task or not task.depends_on:
+                depth[tid] = 0
+                return 0
+            d = 1 + max(_get_depth(dep) for dep in task.depends_on)
+            depth[tid] = d
+            return d
+
+        for t in tasks:
+            _get_depth(t.id)
+        return depth
+
+    @staticmethod
+    def _prioritize_tasks(tasks: list[FleetTask]) -> list[FleetTask]:
+        """Sort tasks for optimal execution: shallowest deps first, then shortest prompt."""
+        depth = FleetCoordinator._compute_depth(tasks)
+        return sorted(tasks, key=lambda t: (depth.get(t.id, 0), len(t.prompt)))
+
     async def run(
         self,
         tasks: list[FleetTask],
@@ -476,10 +516,9 @@ class FleetCoordinator:
     ) -> list[FleetResult]:
         """Execute fleet tasks respecting dependencies.
 
-        Uses a task queue pattern: each task is launched immediately and
-        awaits its own dependencies, rather than waiting for entire waves
-        to complete. This improves throughput when tasks have varying
-        durations.
+        Uses a worker-pool pattern with a shared work-stealing deque.
+        Tasks are prioritized by dependency depth (shallowest first)
+        and prompt length (shortest first) to maximize throughput.
 
         Args:
             tasks: Tasks to execute.
@@ -500,6 +539,12 @@ class FleetCoordinator:
         # Each task gets an event that is set when it finishes
         done_events: dict[str, asyncio.Event] = {t.id: asyncio.Event() for t in tasks}
         finished: dict[str, bool] = {}  # task_id -> success
+
+        # Work-stealing deque: workers pop from left, steal from right
+        prioritized = self._prioritize_tasks(tasks)
+        work_deque: deque[FleetTask] = deque(prioritized)
+        work_available = asyncio.Event()
+        work_available.set()  # Initial work available
 
         async def _run_task(task: FleetTask) -> FleetResult:
             if on_status:
@@ -584,9 +629,21 @@ class FleetCoordinator:
                     on_status(task.id, "failed")
             return result
 
-        # Launch all tasks concurrently; each awaits its own dependencies
-        aws = [asyncio.ensure_future(_run_task(task_map[t.id])) for t in tasks]
-        await asyncio.gather(*aws, return_exceptions=True)
+        async def _worker() -> None:
+            """Worker that pulls tasks from the shared deque."""
+            while True:
+                # Try to steal from left (highest priority) first
+                task: FleetTask | None = None
+                try:
+                    task = work_deque.popleft()
+                except IndexError:
+                    break
+                await _run_task(task)
+
+        # Launch worker pool sized to concurrency limit
+        n_workers = min(config.max_concurrent, len(tasks))
+        workers = [asyncio.create_task(_worker()) for _ in range(n_workers)]
+        await asyncio.gather(*workers, return_exceptions=True)
 
         return [results[t.id] for t in tasks]
 
@@ -641,10 +698,10 @@ class FleetCoordinator:
                 adjacency[dep].append(task.id)
                 in_degree[task.id] += 1
 
-        queue = [tid for tid, deg in in_degree.items() if deg == 0]
+        queue = deque(tid for tid, deg in in_degree.items() if deg == 0)
         visited = 0
         while queue:
-            node = queue.pop(0)
+            node = queue.popleft()
             visited += 1
             for neighbor in adjacency[node]:
                 in_degree[neighbor] -= 1
@@ -704,7 +761,8 @@ class Fleet:
             self._store.close()
         if self._git_finalizer is not None and not self._git_finalizer.finalized:
             try:
-                self._git_finalizer.finalize()
+                loop = asyncio.get_running_loop()
+                await loop.run_in_executor(None, self._git_finalizer.finalize)
             except (subprocess.CalledProcessError, RuntimeError):
                 pass  # Best-effort on context exit
 
@@ -992,6 +1050,9 @@ class Fleet:
         done_events: dict[str, asyncio.Event] = {t.id: asyncio.Event() for t in tasks}
         finished: dict[str, bool] = {}
 
+        # Prioritize: shallowest deps first, shortest prompt first
+        prioritized = FleetCoordinator._prioritize_tasks(tasks)
+
         async def _run_task(task: FleetTask) -> FleetResult:
             # Emit queued event
             await event_queue.put(FleetEvent(
@@ -1069,14 +1130,7 @@ class Fleet:
                         # Build streaming callback if needed
                         on_chunk = None
                         if include_deltas:
-                            async def _emit_delta(delta: str) -> None:
-                                await event_queue.put(FleetEvent(
-                                    event_type=FleetEventType.MESSAGE_DELTA,
-                                    task_id=task.id,
-                                    delta=delta,
-                                ))
-
-                            # Sync wrapper for the async callback
+                            # Sync wrapper for the streaming callback
                             def on_chunk(chunk: Any) -> None:
                                 if hasattr(chunk, "delta") and chunk.delta:
                                     evt = FleetEvent(
@@ -1168,15 +1222,15 @@ class Fleet:
 
             return result
 
-        # Start all tasks
-        task_futures = [asyncio.ensure_future(_run_task(task)) for task in tasks]
+        # Start all tasks in priority order
+        task_futures = [asyncio.create_task(_run_task(task)) for task in prioritized]
 
         # Collector task that signals completion
         async def _wait_all() -> None:
             await asyncio.gather(*task_futures, return_exceptions=True)
             await event_queue.put(None)  # Signal end
 
-        collector = asyncio.ensure_future(_wait_all())
+        collector = asyncio.create_task(_wait_all())
 
         # Yield events as they arrive
         try:
@@ -1186,6 +1240,9 @@ class Fleet:
                     break
                 yield event
         finally:
+            # Cancel all individual task futures on early exit
+            for fut in task_futures:
+                fut.cancel()
             collector.cancel()
             try:
                 await collector
@@ -1197,6 +1254,14 @@ class Fleet:
         total_duration = sum(r.duration_ms for r in results.values())
         if store is not None and run_id is not None:
             store.complete_run(run_id)
+
+        # Git finalize: track modified files from successful responses
+        if self._git_finalizer is not None:
+            for result in results.values():
+                if result.success and result.response:
+                    for path in _extract_paths(result.response.content):
+                        self._git_finalizer.track(path)
+
         yield FleetEvent(
             event_type=FleetEventType.FLEET_COMPLETE,
             data={

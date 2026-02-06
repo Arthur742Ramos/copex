@@ -73,7 +73,7 @@ class GitFinalizer:
 
         Runs git operations in a thread to avoid blocking the event loop.
         """
-        loop = asyncio.get_event_loop()
+        loop = asyncio.get_running_loop()
         try:
             has_changes = await loop.run_in_executor(None, self._has_changes)
             if not has_changes:
