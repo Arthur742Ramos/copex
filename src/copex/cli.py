@@ -49,6 +49,121 @@ app = typer.Typer(
 console = Console()
 
 
+# Shell completion scripts
+BASH_COMPLETION = '''
+_copex_completion() {
+    local cur prev opts
+    COMPREPLY=()
+    cur="${COMP_WORDS[COMP_CWORD]}"
+    prev="${COMP_WORDS[COMP_CWORD-1]}"
+    opts="chat plan ralph fleet interactive models skills status config init login logout tui completions"
+
+    case "${prev}" in
+        -m|--model)
+            local models="claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini"
+            COMPREPLY=( $(compgen -W "${models}" -- ${cur}) )
+            return 0
+            ;;
+        -r|--reasoning)
+            COMPREPLY=( $(compgen -W "low medium high xhigh" -- ${cur}) )
+            return 0
+            ;;
+        copex)
+            COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+            return 0
+            ;;
+    esac
+
+    if [[ ${cur} == -* ]]; then
+        COMPREPLY=( $(compgen -W "--model -m --reasoning -r --help -h" -- ${cur}) )
+        return 0
+    fi
+
+    COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
+}
+complete -F _copex_completion copex
+'''
+
+ZSH_COMPLETION = '''
+#compdef copex
+
+_copex() {
+    local -a commands models reasoning_levels
+    commands=(
+        'chat:Send a prompt to Copilot'
+        'plan:Generate and execute step-by-step plans'
+        'ralph:Start a Ralph Wiggum loop'
+        'fleet:Run multiple tasks in parallel'
+        'interactive:Start interactive chat session'
+        'models:List available models'
+        'skills:Manage skills'
+        'status:Check Copilot status'
+        'config:Show configuration'
+        'init:Create default config'
+        'login:Login to GitHub'
+        'logout:Logout from GitHub'
+        'tui:Start the TUI'
+        'completions:Generate shell completions'
+    )
+    models=(
+        'claude-opus-4.5'
+        'claude-sonnet-4.1'
+        'gpt-5.2-codex'
+        'gpt-5.1-codex'
+        'o3'
+        'o3-mini'
+        'o1'
+        'o1-mini'
+    )
+    reasoning_levels=('low' 'medium' 'high' 'xhigh')
+
+    _arguments -C \\
+        '1:command:->command' \\
+        '*::arg:->args'
+
+    case "$state" in
+        command)
+            _describe 'command' commands
+            ;;
+        args)
+            case "$words[1]" in
+                chat|plan|ralph|fleet|interactive)
+                    _arguments \\
+                        '(-m --model)'{-m,--model}'[Model to use]:model:($models)' \\
+                        '(-r --reasoning)'{-r,--reasoning}'[Reasoning effort]:level:($reasoning_levels)' \\
+                        '*:prompt:'
+                    ;;
+                completions)
+                    _arguments '1:shell:(bash zsh fish)'
+                    ;;
+            esac
+            ;;
+    esac
+}
+
+_copex "$@"
+'''
+
+FISH_COMPLETION = '''
+# copex fish completion
+
+set -l commands chat plan ralph fleet interactive models skills status config init login logout tui completions
+set -l models claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini
+set -l reasoning low medium high xhigh
+
+complete -c copex -f
+complete -c copex -n "not __fish_seen_subcommand_from $commands" -a "$commands"
+
+# Model option
+complete -c copex -s m -l model -d "Model to use" -xa "$models"
+# Reasoning option
+complete -c copex -s r -l reasoning -d "Reasoning effort" -xa "$reasoning"
+
+# Completions subcommand
+complete -c copex -n "__fish_seen_subcommand_from completions" -a "bash zsh fish"
+'''
+
+
 def version_callback(value: bool) -> None:
     """Print version and exit."""
     if value:
@@ -349,6 +464,19 @@ def chat(
     quiet: Annotated[
         bool, typer.Option("--quiet", "-q", help="Minimal output (content only, no panels or formatting)")
     ] = False,
+    # New options
+    stdin: Annotated[
+        bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")
+    ] = False,
+    context: Annotated[
+        Optional[list[Path]], typer.Option("--context", "-C", help="Include file(s) as context (can be repeated)")
+    ] = None,
+    template: Annotated[
+        Optional[str], typer.Option("--template", "-T", help="Jinja2 template for output formatting")
+    ] = None,
+    output: Annotated[
+        Optional[Path], typer.Option("--output", "-o", help="Write response to file")
+    ] = None,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors."""
     # Load config: explicit flag wins; otherwise auto-load from ~/.config/copex/config.toml if present
@@ -396,16 +524,49 @@ def chat(
     if no_auto_skills:
         config.auto_discover_skills = False
 
-    # Get prompt from stdin if not provided
-    if prompt is None:
+    # Handle stdin flag
+    if stdin:
+        if not sys.stdin.isatty():
+            prompt = sys.stdin.read().strip()
+        else:
+            console.print("[yellow]Enter prompt (Ctrl+D to submit):[/yellow]")
+            prompt = sys.stdin.read().strip()
+
+    # Get prompt from stdin if not provided and -i not used
+    if prompt is None and not stdin:
         if sys.stdin.isatty():
             console.print("[yellow]Enter prompt (Ctrl+D to submit):[/yellow]")
         prompt = sys.stdin.read().strip()
-        if not prompt:
-            console.print("[red]No prompt provided[/red]")
-            raise typer.Exit(1)
 
-    asyncio.run(_run_chat(config, prompt, show_reasoning, raw, json_output=json_output, quiet=quiet))
+    if not prompt:
+        console.print("[red]No prompt provided[/red]")
+        raise typer.Exit(1)
+
+    # Handle context files
+    context_content = ""
+    if context:
+        context_parts = []
+        for ctx_path in context:
+            if not ctx_path.exists():
+                console.print(f"[red]Context file not found: {ctx_path}[/red]")
+                raise typer.Exit(1)
+            try:
+                content = ctx_path.read_text()
+                # Format with filename header
+                context_parts.append(f"<file path=\"{ctx_path}\">\n{content}\n</file>")
+            except Exception as e:
+                console.print(f"[red]Error reading {ctx_path}: {e}[/red]")
+                raise typer.Exit(1)
+
+        if context_parts:
+            context_content = "\n\n".join(context_parts)
+            prompt = f"Context files:\n{context_content}\n\nPrompt: {prompt}"
+
+    asyncio.run(_run_chat(
+        config, prompt, show_reasoning, raw,
+        json_output=json_output, quiet=quiet,
+        template=template, output_path=output,
+    ))
 
 
 async def _run_chat(
@@ -416,6 +577,8 @@ async def _run_chat(
     *,
     json_output: bool = False,
     quiet: bool = False,
+    template: str | None = None,
+    output_path: Path | None = None,
 ) -> None:
     """Run the chat command."""
     client = Copex(config)
@@ -435,16 +598,74 @@ async def _run_chat(
                 result["reasoning"] = response.reasoning
             if response.usage:
                 result["usage"] = response.usage
-            print(json.dumps(result, indent=2))
+            output_text = json.dumps(result, indent=2)
+
+            if output_path:
+                output_path.write_text(output_text)
+                console.print(f"[green]✓ Output saved to {output_path}[/green]")
+            else:
+                print(output_text)
+
+        elif template:
+            # Jinja2 template formatting
+            try:
+                from jinja2 import Template
+            except ImportError:
+                console.print("[red]Jinja2 not installed. Run: pip install jinja2[/red]")
+                raise typer.Exit(1)
+
+            response = await client.send(prompt)
+
+            # Build template context
+            template_ctx = {
+                "content": response.content,
+                "reasoning": response.reasoning,
+                "model": config.model.value,
+                "retries": response.retries,
+                "usage": response.usage,
+                "prompt_tokens": response.prompt_tokens,
+                "completion_tokens": response.completion_tokens,
+            }
+
+            try:
+                tmpl = Template(template)
+                output_text = tmpl.render(**template_ctx)
+            except Exception as e:
+                console.print(f"[red]Template error: {e}[/red]")
+                raise typer.Exit(1)
+
+            if output_path:
+                output_path.write_text(output_text)
+                console.print(f"[green]✓ Output saved to {output_path}[/green]")
+            else:
+                print(output_text)
+
         elif quiet:
             # Minimal output: content only, no panels
             response = await client.send(prompt)
-            print(response.content)
+            output_text = response.content
+
+            if output_path:
+                output_path.write_text(output_text)
+                console.print(f"[green]✓ Output saved to {output_path}[/green]")
+            else:
+                print(output_text)
+
         elif config.streaming and not raw:
-            await _stream_response(client, prompt, show_reasoning)
+            response_content = await _stream_response(client, prompt, show_reasoning)
+
+            # Save to file if requested
+            if output_path and response_content:
+                output_path.write_text(response_content)
+                console.print(f"[green]✓ Output saved to {output_path}[/green]")
+
         else:
             response = await client.send(prompt)
-            if raw:
+
+            if output_path:
+                output_path.write_text(response.content)
+                console.print(f"[green]✓ Output saved to {output_path}[/green]")
+            elif raw:
                 print(response.content)
             else:
                 if show_reasoning and response.reasoning:
@@ -469,8 +690,8 @@ async def _run_chat(
         await client.stop()
 
 
-async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> None:
-    """Stream response with beautiful live updates."""
+async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> str:
+    """Stream response with beautiful live updates. Returns the final content."""
     ui = CopexUI(
         console, theme=client.config.ui_theme, density=client.config.ui_density, show_all_tools=True
     )
@@ -479,6 +700,7 @@ async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> 
 
     live_display: Live | None = None
     refresh_stop = asyncio.Event()
+    final_content = ""
 
     def on_chunk(chunk: StreamChunk) -> None:
         if chunk.type == "message":
@@ -540,6 +762,7 @@ async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> 
             ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
             ui.set_usage(response.prompt_tokens, response.completion_tokens)
+            final_content = final_message
         finally:
             refresh_stop.set()
             try:
@@ -549,6 +772,7 @@ async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> 
 
     # Print final beautiful output
     console.print(ui.build_final_display())
+    return final_content
 
 
 async def _stream_response_plain(client: Copex, prompt: str) -> None:
@@ -1964,6 +2188,33 @@ async def _run_fleet(
     )
 
     if failures > 0:
+        raise typer.Exit(1)
+
+
+@app.command("completions")
+def completions_command(
+    shell: Annotated[
+        str, typer.Argument(help="Shell to generate completions for (bash, zsh, fish)")
+    ],
+) -> None:
+    """Generate shell completion scripts.
+
+    Examples:
+        copex completions bash >> ~/.bashrc
+        copex completions zsh >> ~/.zshrc
+        copex completions fish > ~/.config/fish/completions/copex.fish
+    """
+    shell = shell.lower()
+
+    if shell == "bash":
+        print(BASH_COMPLETION)
+    elif shell == "zsh":
+        print(ZSH_COMPLETION)
+    elif shell == "fish":
+        print(FISH_COMPLETION)
+    else:
+        console.print(f"[red]Unknown shell: {shell}[/red]")
+        console.print("Supported shells: bash, zsh, fish")
         raise typer.Exit(1)
 
 

@@ -49,6 +49,8 @@ class PlanStep:
     started_at: datetime | None = None
     completed_at: datetime | None = None
     tokens_used: int = 0  # Track tokens for this step
+    skip_condition: str | None = None  # Condition expression to skip this step
+    depends_on: list[int] | None = None  # Step numbers this step depends on
 
     @property
     def duration_seconds(self) -> float | None:
@@ -57,6 +59,77 @@ class PlanStep:
             return None
         end = self.completed_at or datetime.now()
         return (end - self.started_at).total_seconds()
+
+    async def should_skip(
+        self,
+        context: dict[str, Any] | None = None,
+        evaluator: Callable[[str, dict[str, Any]], bool] | None = None,
+    ) -> bool:
+        """Evaluate whether this step should be skipped.
+
+        Args:
+            context: Dictionary of context variables for evaluation
+            evaluator: Optional custom evaluator function(condition, context) -> bool
+
+        Returns:
+            True if the step should be skipped, False otherwise
+
+        The skip_condition can be:
+        - A simple expression like "step_3_completed"
+        - A comparison like "error_count > 5"
+        - A function call reference that the evaluator handles
+        """
+        if not self.skip_condition:
+            return False
+
+        ctx = context or {}
+
+        # Use custom evaluator if provided
+        if evaluator:
+            try:
+                return evaluator(self.skip_condition, ctx)
+            except Exception:
+                return False
+
+        # Default simple evaluation
+        condition = self.skip_condition.strip()
+
+        # Check for simple boolean context key
+        if condition in ctx:
+            return bool(ctx[condition])
+
+        # Check for "not X" pattern
+        if condition.startswith("not "):
+            key = condition[4:].strip()
+            if key in ctx:
+                return not bool(ctx[key])
+
+        # Check for comparison patterns
+        for op, func in [
+            (">=", lambda a, b: a >= b),
+            ("<=", lambda a, b: a <= b),
+            ("!=", lambda a, b: a != b),
+            ("==", lambda a, b: a == b),
+            (">", lambda a, b: a > b),
+            ("<", lambda a, b: a < b),
+        ]:
+            if op in condition:
+                parts = condition.split(op, 1)
+                if len(parts) == 2:
+                    left_key = parts[0].strip()
+                    right_val = parts[1].strip()
+                    if left_key in ctx:
+                        try:
+                            # Try numeric comparison
+                            left = float(ctx[left_key])
+                            right = float(right_val)
+                            return func(left, right)
+                        except (ValueError, TypeError):
+                            # Fall back to string comparison
+                            return func(str(ctx[left_key]), right_val)
+                break
+
+        return False
 
     def to_dict(self) -> dict[str, Any]:
         """Convert step to dictionary for serialization."""
@@ -69,6 +142,8 @@ class PlanStep:
             "started_at": self.started_at.isoformat() if self.started_at else None,
             "completed_at": self.completed_at.isoformat() if self.completed_at else None,
             "tokens_used": self.tokens_used,
+            "skip_condition": self.skip_condition,
+            "depends_on": self.depends_on,
         }
 
     @classmethod
@@ -87,6 +162,8 @@ class PlanStep:
             if data.get("completed_at")
             else None,
             tokens_used=data.get("tokens_used", 0),
+            skip_condition=data.get("skip_condition"),
+            depends_on=data.get("depends_on"),
         )
 
 
@@ -469,6 +546,7 @@ class PlanExecutor:
         on_error: Callable[[PlanStep, Exception], bool] | None = None,
         save_checkpoints: bool = True,
         state_path: Path | None = None,
+        skip_context: dict[str, Any] | None = None,
     ) -> Plan:
         """
         Execute a plan step by step.
@@ -481,12 +559,14 @@ class PlanExecutor:
             on_error: Called on error, return True to continue, False to stop
             save_checkpoints: Whether to save state after each step (for resume)
             state_path: Path for state file (defaults to .copex-state.json in cwd)
+            skip_context: Context dict for evaluating skip conditions
 
         Returns:
             The updated plan with execution results
         """
         self._cancelled = False
         self._state_path = state_path
+        ctx = skip_context or {}
 
         # Initialize state for checkpointing
         if save_checkpoints:
@@ -503,6 +583,18 @@ class PlanExecutor:
                 continue
 
             if step.status in (StepStatus.COMPLETED, StepStatus.SKIPPED):
+                continue
+
+            # Check skip condition
+            if await step.should_skip(context=ctx):
+                step.status = StepStatus.SKIPPED
+                step.completed_at = datetime.now()
+                if save_checkpoints and self._state:
+                    self._state.update_step(step)
+                    self._state.plan = plan
+                    self._state.save(self._state_path)
+                if on_step_complete:
+                    on_step_complete(step)
                 continue
 
             step.status = StepStatus.RUNNING
@@ -553,6 +645,10 @@ class PlanExecutor:
                 step.status = StepStatus.COMPLETED
                 step.completed_at = datetime.now()
 
+                # Update skip context with completion
+                ctx[f"step_{step.number}_completed"] = True
+                ctx[f"step_{step.number}_result"] = step.result
+
                 # Save checkpoint after step completion
                 if save_checkpoints and self._state:
                     self._state.update_step(step)
@@ -566,6 +662,10 @@ class PlanExecutor:
                 step.status = StepStatus.FAILED
                 step.error = str(e)
                 step.completed_at = datetime.now()
+
+                # Update skip context with failure
+                ctx[f"step_{step.number}_failed"] = True
+                ctx[f"step_{step.number}_error"] = str(e)
 
                 # Save checkpoint on failure too
                 if save_checkpoints and self._state:
@@ -601,3 +701,348 @@ class PlanExecutor:
 
         await self.execute_plan(plan, from_step=step_number)
         return step
+
+
+class PlanEditor:
+    """Editor for modifying plan steps.
+
+    Provides methods to edit, remove, insert, and reorder steps in a plan.
+
+    Usage:
+        editor = PlanEditor(plan)
+        editor.edit_step(2, description="New description")
+        editor.remove_step(3)
+        editor.insert_step(2, "New step after step 2")
+        editor.reorder([3, 1, 2])  # New order
+    """
+
+    def __init__(self, plan: Plan) -> None:
+        self.plan = plan
+
+    def edit_step(
+        self,
+        step_number: int,
+        *,
+        description: str | None = None,
+        skip_condition: str | None = None,
+        depends_on: list[int] | None = None,
+    ) -> PlanStep:
+        """Edit an existing step.
+
+        Args:
+            step_number: The step number to edit
+            description: New description (if provided)
+            skip_condition: New skip condition (if provided)
+            depends_on: New dependencies (if provided)
+
+        Returns:
+            The edited step
+
+        Raises:
+            ValueError: If step not found
+        """
+        step = self._get_step(step_number)
+
+        if description is not None:
+            step.description = description
+        if skip_condition is not None:
+            step.skip_condition = skip_condition
+        if depends_on is not None:
+            step.depends_on = depends_on
+
+        return step
+
+    def remove_step(self, step_number: int) -> PlanStep:
+        """Remove a step from the plan.
+
+        Args:
+            step_number: The step number to remove
+
+        Returns:
+            The removed step
+
+        Raises:
+            ValueError: If step not found
+        """
+        step = self._get_step(step_number)
+        self.plan.steps.remove(step)
+
+        # Renumber remaining steps
+        for i, s in enumerate(self.plan.steps, 1):
+            s.number = i
+
+        # Update dependencies that referenced the removed step
+        for s in self.plan.steps:
+            if s.depends_on:
+                s.depends_on = [
+                    d - 1 if d > step_number else d
+                    for d in s.depends_on
+                    if d != step_number
+                ]
+
+        return step
+
+    def insert_step(
+        self,
+        after_step: int,
+        description: str,
+        *,
+        skip_condition: str | None = None,
+        depends_on: list[int] | None = None,
+    ) -> PlanStep:
+        """Insert a new step after the specified step.
+
+        Args:
+            after_step: Insert after this step number (0 to insert at beginning)
+            description: Description for the new step
+            skip_condition: Optional skip condition
+            depends_on: Optional dependencies
+
+        Returns:
+            The newly inserted step
+
+        Raises:
+            ValueError: If after_step is invalid
+        """
+        if after_step < 0 or after_step > len(self.plan.steps):
+            raise ValueError(f"Invalid position: {after_step}")
+
+        new_step = PlanStep(
+            number=after_step + 1,
+            description=description,
+            skip_condition=skip_condition,
+            depends_on=depends_on,
+        )
+
+        # Insert at the correct position
+        self.plan.steps.insert(after_step, new_step)
+
+        # Renumber steps after the insertion
+        for i, s in enumerate(self.plan.steps, 1):
+            s.number = i
+
+        # Update dependencies to account for the new step
+        for s in self.plan.steps:
+            if s.depends_on and s != new_step:
+                s.depends_on = [
+                    d + 1 if d > after_step else d
+                    for d in s.depends_on
+                ]
+
+        return new_step
+
+    def reorder(self, new_order: list[int]) -> None:
+        """Reorder steps according to the given order.
+
+        Args:
+            new_order: List of step numbers in desired order
+
+        Raises:
+            ValueError: If new_order doesn't contain all step numbers
+        """
+        current_numbers = {s.number for s in self.plan.steps}
+        if set(new_order) != current_numbers:
+            raise ValueError(
+                f"new_order must contain exactly the current step numbers: {sorted(current_numbers)}"
+            )
+
+        # Build mapping from old to new position
+        old_to_new = {old: new_pos + 1 for new_pos, old in enumerate(new_order)}
+
+        # Sort steps by new order
+        step_map = {s.number: s for s in self.plan.steps}
+        self.plan.steps = [step_map[num] for num in new_order]
+
+        # Update dependencies to reflect new numbering
+        for step in self.plan.steps:
+            if step.depends_on:
+                step.depends_on = [old_to_new[d] for d in step.depends_on]
+
+        # Renumber steps
+        for i, s in enumerate(self.plan.steps, 1):
+            s.number = i
+
+    def duplicate_step(self, step_number: int) -> PlanStep:
+        """Duplicate a step, inserting the copy after the original.
+
+        Args:
+            step_number: The step number to duplicate
+
+        Returns:
+            The new duplicated step
+        """
+        original = self._get_step(step_number)
+        return self.insert_step(
+            step_number,
+            description=f"{original.description} (copy)",
+            skip_condition=original.skip_condition,
+            depends_on=original.depends_on.copy() if original.depends_on else None,
+        )
+
+    def clear_results(self) -> None:
+        """Reset all steps to pending status, clearing results."""
+        for step in self.plan.steps:
+            step.status = StepStatus.PENDING
+            step.result = None
+            step.error = None
+            step.started_at = None
+            step.completed_at = None
+            step.tokens_used = 0
+
+    def _get_step(self, step_number: int) -> PlanStep:
+        """Get a step by number."""
+        for step in self.plan.steps:
+            if step.number == step_number:
+                return step
+        raise ValueError(f"Step {step_number} not found in plan")
+
+
+@dataclass
+class PlanCheckpoint:
+    """Checkpoint for step-level resume with context preservation.
+
+    Extends PlanState with methods for checking resume capability
+    and extracting step context for continuation.
+
+    Usage:
+        checkpoint = PlanCheckpoint.from_state(state)
+        if checkpoint.can_resume_from(step_number):
+            context = checkpoint.get_step_context(step_number)
+            # Resume with context
+    """
+
+    state: PlanState
+    step_contexts: dict[int, dict[str, Any]] = field(default_factory=dict)
+
+    @classmethod
+    def from_state(cls, state: PlanState) -> "PlanCheckpoint":
+        """Create a checkpoint from a PlanState."""
+        # Build step contexts from completed steps
+        step_contexts: dict[int, dict[str, Any]] = {}
+        for step in state.plan.steps:
+            if step.status == StepStatus.COMPLETED:
+                step_contexts[step.number] = {
+                    "description": step.description,
+                    "result": step.result,
+                    "duration": step.duration_seconds,
+                    "tokens": step.tokens_used,
+                }
+        return cls(state=state, step_contexts=step_contexts)
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> "PlanCheckpoint | None":
+        """Load checkpoint from state file."""
+        state = PlanState.load(path)
+        if state is None:
+            return None
+        return cls.from_state(state)
+
+    def save(self, path: Path | None = None) -> Path:
+        """Save the checkpoint."""
+        return self.state.save(path)
+
+    def can_resume_from(self, step_number: int) -> bool:
+        """Check if execution can resume from the given step.
+
+        Args:
+            step_number: The step to check
+
+        Returns:
+            True if:
+            - All steps before step_number are completed or skipped
+            - The step exists in the plan
+            - The step is not already completed
+        """
+        plan = self.state.plan
+
+        # Check step exists
+        step = next((s for s in plan.steps if s.number == step_number), None)
+        if step is None:
+            return False
+
+        # Already completed - no need to resume from here
+        if step.status == StepStatus.COMPLETED:
+            return False
+
+        # Check all prior steps are done
+        for s in plan.steps:
+            if s.number < step_number:
+                if s.status not in (StepStatus.COMPLETED, StepStatus.SKIPPED):
+                    return False
+
+        return True
+
+    def get_step_context(self, step_number: int) -> dict[str, Any]:
+        """Get context for resuming from a specific step.
+
+        Args:
+            step_number: The step to get context for
+
+        Returns:
+            Dictionary containing:
+            - task: The overall plan task
+            - prior_steps: List of completed step summaries
+            - current_step: The step to resume
+            - skip_context: Context dict for skip evaluation
+        """
+        plan = self.state.plan
+
+        step = next((s for s in plan.steps if s.number == step_number), None)
+        if step is None:
+            raise ValueError(f"Step {step_number} not found")
+
+        prior_steps = []
+        skip_context: dict[str, Any] = {}
+
+        for s in plan.steps:
+            if s.number < step_number and s.status == StepStatus.COMPLETED:
+                prior_steps.append({
+                    "number": s.number,
+                    "description": s.description,
+                    "result_preview": (s.result or "")[:200],
+                })
+                skip_context[f"step_{s.number}_completed"] = True
+                skip_context[f"step_{s.number}_result"] = s.result
+
+        return {
+            "task": plan.task,
+            "prior_steps": prior_steps,
+            "current_step": {
+                "number": step.number,
+                "description": step.description,
+                "skip_condition": step.skip_condition,
+                "depends_on": step.depends_on,
+            },
+            "skip_context": skip_context,
+            "total_completed": len(self.state.completed),
+            "total_steps": len(plan.steps),
+        }
+
+    def get_resume_prompt(self, step_number: int) -> str:
+        """Generate a prompt for resuming from a step with context.
+
+        Args:
+            step_number: The step to resume from
+
+        Returns:
+            A formatted prompt string with context
+        """
+        ctx = self.get_step_context(step_number)
+
+        prior_summary = ""
+        if ctx["prior_steps"]:
+            lines = []
+            for ps in ctx["prior_steps"]:
+                lines.append(f"Step {ps['number']}: {ps['description']}")
+                if ps["result_preview"]:
+                    lines.append(f"  → {ps['result_preview']}")
+            prior_summary = "\n".join(lines)
+        else:
+            prior_summary = "(none)"
+
+        return STEP_EXECUTION_PROMPT.format(
+            step_number=ctx["current_step"]["number"],
+            task=ctx["task"],
+            completed_steps=prior_summary,
+            current_step=ctx["current_step"]["description"],
+        )

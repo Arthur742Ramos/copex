@@ -6,6 +6,8 @@ import asyncio
 import logging
 import random
 import time
+import warnings
+from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -24,6 +26,339 @@ _CB_FAILURE_THRESHOLD = 5
 _CB_COOLDOWN_SECONDS = 60.0
 
 MAX_RAW_EVENTS = 10_000
+
+
+class SlidingWindowBreaker:
+    """Circuit breaker using a sliding window of recent request outcomes.
+
+    Unlike simple consecutive failure counting, this tracks a window of
+    the last N requests and opens the circuit when the failure rate
+    exceeds a threshold.
+
+    Args:
+        window_size: Number of recent requests to track (default: 10)
+        threshold: Failure rate threshold to open circuit (default: 0.5 = 50%)
+        cooldown_seconds: Seconds to wait before half-open state (default: 60)
+
+    Example:
+        breaker = SlidingWindowBreaker(window_size=10, threshold=0.5)
+        breaker.check()  # Raises if circuit is open
+        breaker.record_success()
+        breaker.record_failure()
+    """
+
+    def __init__(
+        self,
+        window_size: int = 10,
+        threshold: float = 0.5,
+        cooldown_seconds: float = 60.0,
+    ) -> None:
+        if not 0 < threshold <= 1:
+            raise ValueError("threshold must be between 0 and 1")
+        if window_size < 1:
+            raise ValueError("window_size must be >= 1")
+
+        self.window_size = window_size
+        self.threshold = threshold
+        self.cooldown_seconds = cooldown_seconds
+
+        # Sliding window: True = success, False = failure
+        self._window: deque[bool] = deque(maxlen=window_size)
+        self._opened_at: float | None = None
+        self._lock = asyncio.Lock()
+
+    @property
+    def failure_rate(self) -> float:
+        """Current failure rate in the sliding window."""
+        if not self._window:
+            return 0.0
+        failures = sum(1 for success in self._window if not success)
+        return failures / len(self._window)
+
+    @property
+    def is_open(self) -> bool:
+        """Check if circuit is currently open."""
+        if self._opened_at is None:
+            return False
+        elapsed = time.monotonic() - self._opened_at
+        return elapsed < self.cooldown_seconds
+
+    @property
+    def is_half_open(self) -> bool:
+        """Check if circuit is in half-open state (cooldown elapsed)."""
+        if self._opened_at is None:
+            return False
+        elapsed = time.monotonic() - self._opened_at
+        return elapsed >= self.cooldown_seconds
+
+    def check(self) -> None:
+        """Check circuit state; raise RuntimeError if open."""
+        if self._opened_at is not None:
+            elapsed = time.monotonic() - self._opened_at
+            if elapsed < self.cooldown_seconds:
+                remaining = self.cooldown_seconds - elapsed
+                raise RuntimeError(
+                    f"Circuit breaker open (failure rate {self.failure_rate:.0%}). "
+                    f"Retry in {remaining:.0f}s."
+                )
+            # Cooldown elapsed - half-open: reset for retry
+            self._opened_at = None
+            self._window.clear()
+
+    def record_success(self) -> None:
+        """Record a successful request."""
+        self._window.append(True)
+        if self._opened_at is not None:
+            # Successful request in half-open state closes the circuit
+            self._opened_at = None
+
+    def record_failure(self) -> None:
+        """Record a failed request, potentially opening the circuit."""
+        self._window.append(False)
+        # Only evaluate after window has enough samples
+        if len(self._window) >= self.window_size // 2:
+            if self.failure_rate >= self.threshold:
+                if self._opened_at is None:
+                    self._opened_at = time.monotonic()
+                    logger.warning(
+                        "Circuit breaker opened: failure rate %.0f%% "
+                        "exceeds threshold %.0f%%",
+                        self.failure_rate * 100,
+                        self.threshold * 100,
+                    )
+
+    def reset(self) -> None:
+        """Reset the circuit breaker to closed state."""
+        self._window.clear()
+        self._opened_at = None
+
+
+class ModelAwareBreaker:
+    """Per-model circuit breakers for granular failure isolation.
+
+    Different models may have different reliability characteristics.
+    This class maintains separate circuit breakers per model.
+
+    Args:
+        window_size: Window size for each breaker
+        threshold: Failure threshold for each breaker
+        cooldown_seconds: Cooldown for each breaker
+
+    Example:
+        breakers = ModelAwareBreaker()
+        breakers.check("gpt-5.2-codex")
+        breakers.record_success("gpt-5.2-codex")
+        breakers.record_failure("claude-opus-4.5")
+    """
+
+    def __init__(
+        self,
+        window_size: int = 10,
+        threshold: float = 0.5,
+        cooldown_seconds: float = 60.0,
+    ) -> None:
+        self.window_size = window_size
+        self.threshold = threshold
+        self.cooldown_seconds = cooldown_seconds
+        self._breakers: dict[str, SlidingWindowBreaker] = {}
+
+    def _get_breaker(self, model: str) -> SlidingWindowBreaker:
+        """Get or create a circuit breaker for a model."""
+        if model not in self._breakers:
+            self._breakers[model] = SlidingWindowBreaker(
+                window_size=self.window_size,
+                threshold=self.threshold,
+                cooldown_seconds=self.cooldown_seconds,
+            )
+        return self._breakers[model]
+
+    def check(self, model: str) -> None:
+        """Check if circuit is open for a model."""
+        self._get_breaker(model).check()
+
+    def record_success(self, model: str) -> None:
+        """Record a successful request for a model."""
+        self._get_breaker(model).record_success()
+
+    def record_failure(self, model: str) -> None:
+        """Record a failed request for a model."""
+        self._get_breaker(model).record_failure()
+
+    def reset(self, model: str | None = None) -> None:
+        """Reset breaker(s). If model is None, reset all."""
+        if model is None:
+            self._breakers.clear()
+        elif model in self._breakers:
+            self._breakers[model].reset()
+
+    def get_status(self) -> dict[str, dict[str, Any]]:
+        """Get status of all breakers."""
+        return {
+            model: {
+                "failure_rate": breaker.failure_rate,
+                "is_open": breaker.is_open,
+                "is_half_open": breaker.is_half_open,
+                "window_size": len(breaker._window),
+            }
+            for model, breaker in self._breakers.items()
+        }
+
+
+class SessionPool:
+    """Connection pool for Copex sessions.
+
+    Maintains a pool of reusable sessions to reduce connection overhead.
+    Sessions are model-specific since different models require different
+    session configurations.
+
+    Args:
+        max_sessions: Maximum sessions per model (default: 5)
+        max_idle_time: Seconds before idle session is evicted (default: 300)
+
+    Example:
+        pool = SessionPool()
+        async with pool.acquire(client, config) as session:
+            await session.send({"prompt": "Hello"})
+    """
+
+    @dataclass
+    class _PooledSession:
+        session: Any
+        model: str
+        created_at: float
+        last_used: float
+        in_use: bool = False
+
+    def __init__(
+        self,
+        max_sessions: int = 5,
+        max_idle_time: float = 300.0,
+    ) -> None:
+        self.max_sessions = max_sessions
+        self.max_idle_time = max_idle_time
+        self._pools: dict[str, list[SessionPool._PooledSession]] = {}
+        self._lock = asyncio.Lock()
+        self._cleanup_task: asyncio.Task[None] | None = None
+
+    async def start(self) -> None:
+        """Start the pool cleanup task."""
+        if self._cleanup_task is None:
+            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
+
+    async def stop(self) -> None:
+        """Stop the pool and destroy all sessions."""
+        if self._cleanup_task:
+            self._cleanup_task.cancel()
+            try:
+                await self._cleanup_task
+            except asyncio.CancelledError:
+                pass
+            self._cleanup_task = None
+
+        # Destroy all pooled sessions
+        async with self._lock:
+            for pool in self._pools.values():
+                for ps in pool:
+                    try:
+                        await ps.session.destroy()
+                    except Exception:
+                        logger.debug("Failed to destroy pooled session", exc_info=True)
+            self._pools.clear()
+
+    async def _cleanup_loop(self) -> None:
+        """Periodically clean up idle sessions."""
+        while True:
+            await asyncio.sleep(60)  # Check every minute
+            await self._evict_idle()
+
+    async def _evict_idle(self) -> None:
+        """Evict sessions that have been idle too long."""
+        now = time.monotonic()
+        async with self._lock:
+            for model, pool in list(self._pools.items()):
+                to_remove = []
+                for ps in pool:
+                    if not ps.in_use and (now - ps.last_used) > self.max_idle_time:
+                        to_remove.append(ps)
+
+                for ps in to_remove:
+                    pool.remove(ps)
+                    try:
+                        await ps.session.destroy()
+                    except Exception:
+                        logger.debug("Failed to destroy idle session", exc_info=True)
+
+                if not pool:
+                    del self._pools[model]
+
+    @asynccontextmanager
+    async def acquire(
+        self,
+        client: Any,
+        config: CopexConfig,
+    ) -> AsyncIterator[Any]:
+        """Acquire a session from the pool.
+
+        Args:
+            client: CopilotClient instance
+            config: CopexConfig for session creation
+
+        Yields:
+            A session to use
+
+        Example:
+            async with pool.acquire(client, config) as session:
+                await session.send({"prompt": "Hello"})
+        """
+        model = config.model.value
+        session = None
+        pooled: SessionPool._PooledSession | None = None
+
+        async with self._lock:
+            pool = self._pools.setdefault(model, [])
+
+            # Try to find an available session
+            for ps in pool:
+                if not ps.in_use:
+                    ps.in_use = True
+                    ps.last_used = time.monotonic()
+                    session = ps.session
+                    pooled = ps
+                    break
+
+        # No available session - create new one
+        if session is None:
+            session = await client.create_session(config.to_session_options())
+            pooled = SessionPool._PooledSession(
+                session=session,
+                model=model,
+                created_at=time.monotonic(),
+                last_used=time.monotonic(),
+                in_use=True,
+            )
+            async with self._lock:
+                pool = self._pools.setdefault(model, [])
+                if len(pool) < self.max_sessions:
+                    pool.append(pooled)
+
+        try:
+            yield session
+        finally:
+            # Return session to pool
+            if pooled is not None:
+                pooled.in_use = False
+                pooled.last_used = time.monotonic()
+
+    def stats(self) -> dict[str, dict[str, int]]:
+        """Get pool statistics."""
+        result = {}
+        for model, pool in self._pools.items():
+            result[model] = {
+                "total": len(pool),
+                "in_use": sum(1 for ps in pool if ps.in_use),
+                "available": sum(1 for ps in pool if not ps.in_use),
+            }
+        return result
 
 
 @dataclass
@@ -618,6 +953,16 @@ class Copex:
                 event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
                 if len(state.raw_events) < MAX_RAW_EVENTS:
                     state.raw_events.append({"type": event_type, "data": getattr(event, "data", None)})
+                elif len(state.raw_events) == MAX_RAW_EVENTS:
+                    # Emit warning once when limit is reached
+                    warnings.warn(
+                        f"raw_events limit ({MAX_RAW_EVENTS}) reached. "
+                        "Additional events will not be captured. "
+                        "Consider streaming or processing events incrementally.",
+                        ResourceWarning,
+                        stacklevel=2,
+                    )
+                    state.raw_events.append({"type": "_limit_warning", "data": None})
 
                 if event_type == EventType.ASSISTANT_MESSAGE_DELTA.value:
                     self._handle_message_delta(event, state, on_chunk)
