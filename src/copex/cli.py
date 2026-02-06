@@ -1997,6 +1997,17 @@ def fleet_command(
         Optional[Path],
         typer.Option("--output-dir", "-o", help="Directory to save each task result as a file"),
     ] = None,
+    git_finalize: Annotated[
+        bool,
+        typer.Option(
+            "--git-finalize/--no-git-finalize",
+            help="Stage and commit all changes after fleet completes (auto-detected, enabled by default)",
+        ),
+    ] = True,
+    git_message: Annotated[
+        Optional[str],
+        typer.Option("--git-message", help="Commit message for git finalize"),
+    ] = None,
 ) -> None:
     """
     Run multiple tasks in parallel with fleet execution.
@@ -2037,6 +2048,8 @@ def fleet_command(
             timeout=timeout,
             verbose=verbose,
             output_dir=output_dir,
+            git_finalize=git_finalize,
+            git_message=git_message,
         )
     )
 
@@ -2051,6 +2064,8 @@ async def _run_fleet(
     timeout: float,
     verbose: bool = False,
     output_dir: Path | None = None,
+    git_finalize: bool = True,
+    git_message: str | None = None,
 ) -> None:
     """Run fleet tasks with live progress display."""
     from rich.table import Table
@@ -2062,6 +2077,7 @@ async def _run_fleet(
         timeout=timeout,
         fail_fast=fail_fast,
         shared_context=shared_context,
+        git_auto_finalize=git_finalize,
     )
 
     tasks: list[FleetTask] = []
@@ -2219,6 +2235,43 @@ async def _run_fleet(
             out_file = output_dir / f"{r.task_id}.md"
             out_file.write_text(content or f"Error: {r.error}")
         console.print(f"[blue]Results saved to {output_dir}/[/blue]")
+
+    # Git finalize: stage and commit all changes
+    if git_finalize:
+        from copex.git import GitFinalizer
+
+        if not GitFinalizer.is_git_repo():
+            console.print("[dim]Not a git repository — skipping git finalize[/dim]")
+        else:
+            # Auto-generate commit message from task descriptions if not provided
+            if git_message:
+                message = git_message
+            else:
+                task_summaries = [t.prompt[:50] for t in tasks[:5]]
+                desc = "; ".join(task_summaries)
+                if len(tasks) > 5:
+                    desc += f" (+{len(tasks) - 5} more)"
+                message = f"fleet: {desc}"
+
+            console.print("[dim]Detecting changes…[/dim]")
+            finalizer = GitFinalizer(message=message)
+            git_result = await finalizer.finalize()
+
+            if git_result.success and git_result.commit_hash:
+                console.print(
+                    Panel(
+                        f"[green]Committed {git_result.files_staged} file(s)[/green]\n"
+                        f"[dim]{git_result.commit_hash}[/dim] {message}",
+                        title="🔒 Git Finalize",
+                        border_style="green",
+                    )
+                )
+            elif git_result.success:
+                console.print("[dim]No changes to commit[/dim]")
+            else:
+                console.print(
+                    f"[red]Git finalize failed: {git_result.error}[/red]"
+                )
 
     if failures > 0:
         raise typer.Exit(1)

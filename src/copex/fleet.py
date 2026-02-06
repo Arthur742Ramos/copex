@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import subprocess
 import time
 from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
@@ -333,6 +334,22 @@ def _slugify(text: str) -> str:
     return slug[:64] or "task"
 
 
+def _extract_paths(content: str) -> list[str]:
+    """Extract file paths from response content that were likely modified."""
+    paths: list[str] = []
+    for line in content.splitlines():
+        m = re.match(
+            r"^\s*(?:Created|Modified|Updated|Wrote|Saved)\s*:?\s+(.+\.\w+)",
+            line,
+            re.IGNORECASE,
+        )
+        if m:
+            path = m.group(1).strip().strip("`'\"")
+            if path and not path.startswith("http"):
+                paths.append(path)
+    return paths
+
+
 @dataclass
 class FleetTask:
     """A single task to be executed by a fleet agent."""
@@ -363,6 +380,86 @@ class FleetConfig:
     timeout: float = 600.0
     fail_fast: bool = False
     shared_context: str | None = None
+    git_finalize: bool = False
+    git_auto_finalize: bool = True
+    git_message: str | None = None
+
+
+class GitFinalizer:
+    """Tracks modified paths during a fleet run and commits changes to git.
+
+    Used as a context manager around fleet execution. When finalize() is
+    called (or the context manager exits after a successful run), it stages
+    all tracked paths, commits with the configured message, and pushes.
+    """
+
+    def __init__(
+        self,
+        *,
+        message: str | None = None,
+        cwd: str | Path | None = None,
+        push: bool = True,
+    ) -> None:
+        self._message = message or "fleet: apply changes"
+        self._cwd = str(cwd) if cwd else None
+        self._push = push
+        self._modified: set[str] = set()
+        self._finalized = False
+
+    def track(self, path: str | Path) -> None:
+        """Record a path as modified during the fleet run."""
+        self._modified.add(str(path))
+
+    def track_many(self, paths: list[str] | list[Path]) -> None:
+        """Record multiple paths as modified."""
+        for p in paths:
+            self._modified.add(str(p))
+
+    @property
+    def modified_paths(self) -> list[str]:
+        """Return sorted list of tracked modified paths."""
+        return sorted(self._modified)
+
+    @property
+    def finalized(self) -> bool:
+        """Whether finalize() has been called."""
+        return self._finalized
+
+    async def __aenter__(self) -> GitFinalizer:
+        return self
+
+    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
+        if exc_type is None and self._modified and not self._finalized:
+            self.finalize()
+
+    def finalize(self) -> None:
+        """Stage tracked files, commit, and optionally push.
+
+        Raises:
+            subprocess.CalledProcessError: If any git command fails.
+            RuntimeError: If no modified paths to commit.
+        """
+        if self._finalized:
+            return
+        if not self._modified:
+            raise RuntimeError("GitFinalizer: no modified paths to commit")
+
+        run_kwargs: dict = {"check": True, "capture_output": True, "text": True}
+        if self._cwd:
+            run_kwargs["cwd"] = self._cwd
+
+        subprocess.run(
+            ["git", "add", "--", *sorted(self._modified)],
+            **run_kwargs,
+        )
+        subprocess.run(
+            ["git", "commit", "-m", self._message],
+            **run_kwargs,
+        )
+        if self._push:
+            subprocess.run(["git", "push"], **run_kwargs)
+
+        self._finalized = True
 
 
 class FleetCoordinator:
@@ -592,6 +689,12 @@ class Fleet:
         if db_path is not None:
             from copex.fleet_store import FleetStore
             self._store = FleetStore(db_path)
+        self._git_finalizer: GitFinalizer | None = None
+        if self._fleet_config.git_finalize:
+            self._git_finalizer = GitFinalizer(
+                message=self._fleet_config.git_message,
+                cwd=self._config.cwd,
+            )
 
     async def __aenter__(self) -> Fleet:
         return self
@@ -599,6 +702,11 @@ class Fleet:
     async def __aexit__(self, *args: Any) -> None:
         if self._store is not None:
             self._store.close()
+        if self._git_finalizer is not None and not self._git_finalizer.finalized:
+            try:
+                self._git_finalizer.finalize()
+            except (subprocess.CalledProcessError, RuntimeError):
+                pass  # Best-effort on context exit
 
     def add(
         self,
@@ -785,6 +893,13 @@ class Fleet:
                     duration_ms=result.duration_ms,
                 )
             store.complete_run(run_id)
+
+        # Git finalize: track modified files from successful responses
+        if self._git_finalizer is not None:
+            for result in results:
+                if result.success and result.response:
+                    for path in _extract_paths(result.response.content):
+                        self._git_finalizer.track(path)
 
         return results
 
