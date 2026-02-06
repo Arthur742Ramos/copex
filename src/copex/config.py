@@ -249,6 +249,42 @@ class CopexConfig(BaseModel):
             self.reasoning_effort = normalized
         return self
 
+    @field_validator("skill_directories", mode="after")
+    @classmethod
+    def _warn_nonexistent_skill_dirs(cls, value: list[str]) -> list[str]:
+        for d in value:
+            p = Path(d)
+            if not p.exists():
+                warnings.warn(f"Skill directory does not exist: {d}", UserWarning)
+        return value
+
+    @model_validator(mode="after")
+    def _apply_env_overrides(self) -> "CopexConfig":
+        env_model = os.environ.get("COPEX_MODEL")
+        if env_model:
+            try:
+                self.model = Model(env_model)
+            except ValueError:
+                valid = ", ".join(m.value for m in Model)
+                warnings.warn(
+                    f"COPEX_MODEL='{env_model}' is not valid. Valid: {valid}",
+                    UserWarning,
+                )
+
+        env_reasoning = os.environ.get("COPEX_REASONING")
+        if env_reasoning:
+            try:
+                parsed = parse_reasoning_effort(env_reasoning)
+                if parsed is not None:
+                    self.reasoning_effort = parsed
+            except ValueError:
+                valid = ", ".join(r.value for r in ReasoningEffort)
+                warnings.warn(
+                    f"COPEX_REASONING='{env_reasoning}' is not valid. Valid: {valid}",
+                    UserWarning,
+                )
+        return self
+
     @field_validator("ui_theme")
     @classmethod
     def _validate_ui_theme(cls, value: str) -> str:

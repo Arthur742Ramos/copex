@@ -3,10 +3,11 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import sys
 import time
 from pathlib import Path
-from typing import Annotated, Optional
+from typing import Annotated, Any, Optional
 
 import typer
 from prompt_toolkit import PromptSession
@@ -342,6 +343,12 @@ def chat(
     no_auto_skills: Annotated[
         bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
     ] = False,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Output response as machine-readable JSON")
+    ] = False,
+    quiet: Annotated[
+        bool, typer.Option("--quiet", "-q", help="Minimal output (content only, no panels or formatting)")
+    ] = False,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors."""
     # Load config: explicit flag wins; otherwise auto-load from ~/.config/copex/config.toml if present
@@ -398,17 +405,42 @@ def chat(
             console.print("[red]No prompt provided[/red]")
             raise typer.Exit(1)
 
-    asyncio.run(_run_chat(config, prompt, show_reasoning, raw))
+    asyncio.run(_run_chat(config, prompt, show_reasoning, raw, json_output=json_output, quiet=quiet))
 
 
-async def _run_chat(config: CopexConfig, prompt: str, show_reasoning: bool, raw: bool) -> None:
+async def _run_chat(
+    config: CopexConfig,
+    prompt: str,
+    show_reasoning: bool,
+    raw: bool,
+    *,
+    json_output: bool = False,
+    quiet: bool = False,
+) -> None:
     """Run the chat command."""
     client = Copex(config)
 
     try:
         await client.start()
 
-        if config.streaming and not raw:
+        if json_output:
+            # Machine-readable JSON output (no streaming UI)
+            response = await client.send(prompt)
+            result: dict[str, Any] = {
+                "content": response.content,
+                "model": config.model.value,
+                "retries": response.retries,
+            }
+            if show_reasoning and response.reasoning:
+                result["reasoning"] = response.reasoning
+            if response.usage:
+                result["usage"] = response.usage
+            print(json.dumps(result, indent=2))
+        elif quiet:
+            # Minimal output: content only, no panels
+            response = await client.send(prompt)
+            print(response.content)
+        elif config.streaming and not raw:
             await _stream_response(client, prompt, show_reasoning)
         else:
             response = await client.send(prompt)
@@ -1247,6 +1279,77 @@ def status() -> None:
         console.print("Install: [bold]https://cli.github.com/[/bold]")
 
 
+@app.command("config")
+def config_cmd(
+    config_file: Annotated[
+        Optional[Path], typer.Option("--config", "-c", help="Config file path")
+    ] = None,
+) -> None:
+    """Validate and display the current Copex configuration."""
+    import warnings as _warnings
+
+    config_path = Path(config_file) if config_file else CopexConfig.default_path()
+    source = str(config_path) if config_path.exists() else "defaults"
+
+    caught_warnings: list[_warnings.WarningMessage] = []
+    with _warnings.catch_warnings(record=True) as caught_warnings:
+        _warnings.simplefilter("always")
+        try:
+            if config_path.exists():
+                config = CopexConfig.from_file(config_path)
+            else:
+                config = CopexConfig()
+        except Exception as e:
+            console.print(f"[red]Configuration error:[/red] {e}")
+            raise typer.Exit(1)
+
+    # Display warnings
+    if caught_warnings:
+        for w in caught_warnings:
+            console.print(f"[yellow]⚠ {w.message}[/yellow]")
+        console.print()
+
+    # Env var overrides
+    env_overrides: list[str] = []
+    import os as _os
+
+    if _os.environ.get("COPEX_MODEL"):
+        env_overrides.append(f"COPEX_MODEL={_os.environ['COPEX_MODEL']}")
+    if _os.environ.get("COPEX_REASONING"):
+        env_overrides.append(f"COPEX_REASONING={_os.environ['COPEX_REASONING']}")
+
+    env_line = ""
+    if env_overrides:
+        env_line = f"\n[bold]Env Overrides:[/bold] {', '.join(env_overrides)}"
+
+    console.print(
+        Panel(
+            f"[bold]Source:[/bold] {source}\n"
+            f"[bold]Model:[/bold] {config.model.value}\n"
+            f"[bold]Reasoning:[/bold] {config.reasoning_effort.value}\n"
+            f"[bold]Streaming:[/bold] {config.streaming}\n"
+            f"[bold]Timeout:[/bold] {config.timeout}s\n"
+            f"[bold]Auto-continue:[/bold] {config.auto_continue}\n"
+            f"[bold]Max Retries:[/bold] {config.retry.max_retries}\n"
+            f"[bold]UI Theme:[/bold] {config.ui_theme}\n"
+            f"[bold]UI Density:[/bold] {config.ui_density}"
+            f"{env_line}",
+            title="Copex Configuration",
+            border_style="green",
+        )
+    )
+
+    if config.skill_directories:
+        console.print("\n[bold]Skill Directories:[/bold]")
+        for d in config.skill_directories:
+            exists = Path(d).exists()
+            icon = "[green]✓[/green]" if exists else "[red]✗[/red]"
+            console.print(f"  {icon} {d}")
+
+    if not caught_warnings:
+        console.print("\n[green]✓ Configuration is valid[/green]")
+
+
 @app.command("plan")
 def plan_command(
     task: Annotated[
@@ -1291,6 +1394,9 @@ def plan_command(
     no_auto_skills: Annotated[
         bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
     ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Generate and display the plan without executing")
+    ] = False,
 ) -> None:
     """
     Generate and optionally execute a step-by-step plan.
@@ -1299,6 +1405,7 @@ def plan_command(
         copex plan "Build a REST API"              # Generate plan only
         copex plan "Build a REST API" --execute    # Generate and execute
         copex plan "Build a REST API" --review     # Generate, review, then execute
+        copex plan "Build a REST API" --dry-run    # Generate plan, show it, don't execute
         copex plan "Build a REST API" --visualize ascii  # Show ASCII plan graph
         copex plan --resume                        # Resume from .copex-state.json
         copex plan "Continue" --load plan.json -f3 # Resume from step 3
@@ -1332,12 +1439,15 @@ def plan_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
 
+    # --dry-run overrides --execute/--review/--resume to prevent execution
+    should_execute = (execute or review or resume) and not dry_run
+
     asyncio.run(
         _run_plan(
             config=config,
             task=task or "",
-            execute=execute or review or resume,  # --resume implies --execute
-            review=review,
+            execute=should_execute,
+            review=review and not dry_run,
             resume=resume,
             output=output,
             from_step=from_step,

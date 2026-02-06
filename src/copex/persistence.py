@@ -10,12 +10,21 @@ Allows saving sessions to disk and resuming later, useful for:
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from copex.models import Model, ReasoningEffort
+
+# Windows reserved device names (case-insensitive)
+_WINDOWS_RESERVED_RE = re.compile(
+    r"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\..+)?$", re.IGNORECASE
+)
+
+# Maximum size for session JSON files (10 MB)
+_MAX_SESSION_FILE_SIZE = 10_485_760
 
 
 @dataclass
@@ -100,6 +109,11 @@ class SessionStore:
         """Get path for a session file."""
         # Sanitize session ID for filesystem
         safe_id = "".join(c if c.isalnum() or c in "-_" else "_" for c in session_id)
+        if not safe_id:
+            safe_id = "_empty"
+        # Avoid Windows reserved device names (CON, PRN, AUX, NUL, COM1-9, LPT1-9)
+        if _WINDOWS_RESERVED_RE.match(safe_id):
+            safe_id = f"_{safe_id}"
         return self.base_dir / f"{safe_id}.json"
 
     def save(
@@ -151,6 +165,12 @@ class SessionStore:
         if not path.exists():
             return None
 
+        file_size = path.stat().st_size
+        if file_size > _MAX_SESSION_FILE_SIZE:
+            raise ValueError(
+                f"Session file too large ({file_size} bytes, max {_MAX_SESSION_FILE_SIZE})"
+            )
+
         with open(path, "r", encoding="utf-8") as f:
             data = json.load(f)
 
@@ -174,6 +194,8 @@ class SessionStore:
         sessions = []
         for path in self.base_dir.glob("*.json"):
             try:
+                if path.stat().st_size > _MAX_SESSION_FILE_SIZE:
+                    continue
                 with open(path, "r", encoding="utf-8") as f:
                     data = json.load(f)
                 sessions.append(

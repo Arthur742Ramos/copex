@@ -82,6 +82,11 @@ class FleetCoordinator:
     ) -> list[FleetResult]:
         """Execute fleet tasks respecting dependencies.
 
+        Uses a task queue pattern: each task is launched immediately and
+        awaits its own dependencies, rather than waiting for entire waves
+        to complete. This improves throughput when tasks have varying
+        durations.
+
         Args:
             tasks: Tasks to execute.
             config: Fleet configuration.
@@ -95,12 +100,39 @@ class FleetCoordinator:
 
         task_map = {t.id: t for t in tasks}
         results: dict[str, FleetResult] = {}
-        completed: set[str] = set()
-        failed: set[str] = set()
         semaphore = asyncio.Semaphore(config.max_concurrent)
         cancel_event = asyncio.Event()
 
+        # Each task gets an event that is set when it finishes
+        done_events: dict[str, asyncio.Event] = {t.id: asyncio.Event() for t in tasks}
+        finished: dict[str, bool] = {}  # task_id -> success
+
         async def _run_task(task: FleetTask) -> FleetResult:
+            if on_status:
+                on_status(task.id, "queued")
+
+            # Wait for all dependencies to finish
+            for dep in task.depends_on:
+                await done_events[dep].wait()
+                if not finished.get(dep, False):
+                    failed_deps = [
+                        d for d in task.depends_on if not finished.get(d, False)
+                    ]
+                    result = FleetResult(
+                        task_id=task.id,
+                        success=False,
+                        error=RuntimeError(
+                            f"Dependency failed for task '{task.id}': "
+                            f"upstream {failed_deps!r} did not succeed"
+                        ),
+                    )
+                    results[task.id] = result
+                    finished[task.id] = False
+                    done_events[task.id].set()
+                    if on_status:
+                        on_status(task.id, "blocked")
+                    return result
+
             if cancel_event.is_set():
                 result = FleetResult(
                     task_id=task.id,
@@ -108,6 +140,8 @@ class FleetCoordinator:
                     error=asyncio.CancelledError("Fleet cancelled due to fail-fast"),
                 )
                 results[task.id] = result
+                finished[task.id] = False
+                done_events[task.id].set()
                 return result
 
             if on_status:
@@ -146,74 +180,19 @@ class FleetCoordinator:
                     cancel_event.set()
 
             results[task.id] = result
+            finished[task.id] = result.success
+            done_events[task.id].set()
             if result.success:
-                completed.add(task.id)
                 if on_status:
                     on_status(task.id, "done")
             else:
-                failed.add(task.id)
                 if on_status:
                     on_status(task.id, "failed")
             return result
 
-        # Dispatch in dependency waves
-        pending = set(task_map.keys())
-
-        while pending:
-            ready = [
-                tid
-                for tid in pending
-                if all(dep in completed for dep in task_map[tid].depends_on)
-            ]
-
-            # Skip tasks whose dependencies failed
-            blocked = [
-                tid
-                for tid in pending
-                if any(dep in failed for dep in task_map[tid].depends_on)
-            ]
-            for tid in blocked:
-                pending.discard(tid)
-                result = FleetResult(
-                    task_id=tid,
-                    success=False,
-                    error=RuntimeError(
-                        f"Dependency failed for task '{tid}'"
-                    ),
-                )
-                results[tid] = result
-                failed.add(tid)
-                if on_status:
-                    on_status(tid, "blocked")
-
-            if not ready and pending:
-                # All remaining tasks are blocked
-                for tid in list(pending):
-                    result = FleetResult(
-                        task_id=tid,
-                        success=False,
-                        error=RuntimeError(f"Deadlocked: dependencies unresolvable for '{tid}'"),
-                    )
-                    results[tid] = result
-                    failed.add(tid)
-                break
-
-            if cancel_event.is_set():
-                for tid in list(pending):
-                    results[tid] = FleetResult(
-                        task_id=tid,
-                        success=False,
-                        error=asyncio.CancelledError("Fleet cancelled due to fail-fast"),
-                    )
-                break
-
-            coros = [_run_task(task_map[tid]) for tid in ready]
-            for tid in ready:
-                pending.discard(tid)
-                if on_status:
-                    on_status(tid, "queued")
-
-            await asyncio.gather(*coros, return_exceptions=True)
+        # Launch all tasks concurrently; each awaits its own dependencies
+        aws = [asyncio.ensure_future(_run_task(task_map[t.id])) for t in tasks]
+        await asyncio.gather(*aws, return_exceptions=True)
 
         return [results[t.id] for t in tasks]
 
@@ -243,12 +222,22 @@ class FleetCoordinator:
         """Validate that tasks form a valid DAG (no cycles, deps exist)."""
         task_ids = {t.id for t in tasks}
 
+        # Check for missing dependencies
+        missing_deps: list[tuple[str, str]] = []
         for task in tasks:
             for dep in task.depends_on:
                 if dep not in task_ids:
-                    raise ValueError(
-                        f"Task '{task.id}' depends on unknown task '{dep}'"
-                    )
+                    missing_deps.append((task.id, dep))
+
+        if missing_deps:
+            details = "\n".join(
+                f"  - Task '{tid}' depends on unknown task '{dep}'"
+                for tid, dep in missing_deps
+            )
+            raise ValueError(
+                f"Missing dependencies detected:\n{details}\n"
+                f"Available task IDs: {sorted(task_ids)}"
+            )
 
         # Topological sort to detect cycles (Kahn's algorithm)
         in_degree: dict[str, int] = {t.id: 0 for t in tasks}
@@ -269,7 +258,16 @@ class FleetCoordinator:
                     queue.append(neighbor)
 
         if visited != len(tasks):
-            raise ValueError("Cycle detected in fleet task dependencies")
+            # Find tasks involved in cycles
+            cycle_tasks = [tid for tid, deg in in_degree.items() if deg > 0]
+            cycle_details = []
+            for tid in cycle_tasks:
+                task = next(t for t in tasks if t.id == tid)
+                cycle_details.append(f"  - '{tid}' depends on {task.depends_on}")
+            raise ValueError(
+                f"Cycle detected in fleet task dependencies. "
+                f"Tasks involved in cycle:\n" + "\n".join(cycle_details)
+            )
 
 
 class Fleet:

@@ -3,17 +3,27 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import random
+import time
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 from copilot import CopilotClient
 
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
+
+# Circuit breaker defaults
+_CB_FAILURE_THRESHOLD = 5
+_CB_COOLDOWN_SECONDS = 60.0
+
+MAX_RAW_EVENTS = 10_000
 
 
 @dataclass
@@ -91,6 +101,10 @@ class Copex:
         self._client: CopilotClient | None = None
         self._session: Any = None
         self._started = False
+        # Circuit breaker state
+        self._cb_failures = 0
+        self._cb_opened_at: float | None = None
+        self._destroy_tasks: set[asyncio.Task[None]] = set()
 
     async def start(self) -> None:
         """Start the Copilot client."""
@@ -106,7 +120,7 @@ class Copex:
             try:
                 await self._session.destroy()
             except Exception:
-                pass
+                logger.debug("Failed to destroy session during stop", exc_info=True)
             self._session = None
         if self._client:
             await self._client.stop()
@@ -151,6 +165,33 @@ class Copex:
         # Add jitter (±25%)
         jitter = delay * 0.25 * (2 * random.random() - 1)
         return delay + jitter
+
+    def _cb_check(self) -> None:
+        """Check circuit breaker state; raise if circuit is open."""
+        if self._cb_opened_at is not None:
+            elapsed = time.monotonic() - self._cb_opened_at
+            if elapsed < _CB_COOLDOWN_SECONDS:
+                raise RuntimeError(
+                    f"Circuit breaker open: too many consecutive failures. "
+                    f"Retry in {_CB_COOLDOWN_SECONDS - elapsed:.0f}s."
+                )
+            # Cooldown elapsed — half-open: allow one attempt
+            self._cb_opened_at = None
+            self._cb_failures = 0
+
+    def _cb_record_success(self) -> None:
+        """Record a successful request, resetting circuit breaker."""
+        self._cb_failures = 0
+        self._cb_opened_at = None
+
+    def _cb_record_failure(self) -> None:
+        """Record a failed request; open circuit if threshold exceeded."""
+        self._cb_failures += 1
+        if self._cb_failures >= _CB_FAILURE_THRESHOLD:
+            self._cb_opened_at = time.monotonic()
+            logger.warning(
+                "Circuit breaker opened after %d consecutive failures", self._cb_failures
+            )
 
     def _handle_message_delta(
         self,
@@ -401,7 +442,7 @@ class Copex:
             try:
                 await self._session.destroy()
             except Exception:
-                pass
+                logger.debug("Failed to destroy session during recovery", exc_info=True)
             self._session = None
 
         # Create fresh session
@@ -457,6 +498,9 @@ class Copex:
             prompt=prompt,
         )
 
+        # Circuit breaker gate
+        self._cb_check()
+
         while True:
             try:
                 result = await self._send_once(session, prompt, tools, on_chunk)
@@ -476,6 +520,7 @@ class Copex:
                     retries=retries,
                     tokens=tokens,
                 )
+                self._cb_record_success()
                 return result
 
             except Exception as e:
@@ -491,6 +536,7 @@ class Copex:
                             error=str(last_error),
                             retries=retries,
                         )
+                        self._cb_record_failure()
                         raise last_error
                     retries = 0
                     session, prompt = await self._recover_session(on_chunk)
@@ -512,6 +558,7 @@ class Copex:
                         error=error_str,
                         retries=retries,
                     )
+                    self._cb_record_failure()
                     raise
 
                 retries += 1
@@ -551,6 +598,7 @@ class Copex:
                         error=str(last_error) if last_error else "Max retries exceeded",
                         retries=retries,
                     )
+                    self._cb_record_failure()
                     raise last_error or RuntimeError("Max retries exceeded")
 
     async def _send_once(
@@ -568,7 +616,8 @@ class Copex:
             state.last_activity = asyncio.get_running_loop().time()
             try:
                 event_type = event.type.value if hasattr(event.type, "value") else str(event.type)
-                state.raw_events.append({"type": event_type, "data": getattr(event, "data", None)})
+                if len(state.raw_events) < MAX_RAW_EVENTS:
+                    state.raw_events.append({"type": event_type, "data": getattr(event, "data", None)})
 
                 if event_type == EventType.ASSISTANT_MESSAGE_DELTA.value:
                     self._handle_message_delta(event, state, on_chunk)
@@ -629,6 +678,7 @@ class Copex:
                     self._handle_session_idle(state)
 
             except Exception as e:
+                logger.warning("Unhandled exception in on_event callback: %s", e, exc_info=True)
                 state.error_holder.append(e)
                 state.done.set()
 
@@ -653,7 +703,7 @@ class Copex:
             try:
                 unsubscribe()
             except Exception:
-                pass
+                logger.debug("Failed to unsubscribe event handler", exc_info=True)
 
         # If we never got explicit content events and NOT streaming, try to extract from history
         # When streaming (on_chunk provided), we trust the streamed chunks and don't use history
@@ -673,7 +723,7 @@ class Copex:
                         if state.final_content:
                             break
             except Exception:
-                pass
+                logger.debug("Failed to extract messages for history fallback", exc_info=True)
 
         if state.error_holder:
             raise state.error_holder[0]
@@ -743,7 +793,16 @@ class Copex:
             except RuntimeError:
                 asyncio.run(session.destroy())
             else:
-                loop.create_task(session.destroy())
+
+                async def _destroy_with_logging() -> None:
+                    try:
+                        await session.destroy()
+                    except Exception as e:
+                        logger.debug("Failed to destroy session in new_session: %s", e)
+
+                task = loop.create_task(_destroy_with_logging())
+                self._destroy_tasks.add(task)
+                task.add_done_callback(self._destroy_tasks.discard)
 
 
 @asynccontextmanager

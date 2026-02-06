@@ -13,10 +13,28 @@ from __future__ import annotations
 
 import asyncio
 import json
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Awaitable, Callable
+
+# Allowlist pattern for MCP server commands: alphanumeric, hyphens, underscores, dots, slashes
+_ALLOWED_COMMAND_RE = re.compile(r"^[a-zA-Z0-9_./@-]+$")
+
+# Maximum size for MCP config files (1 MB)
+_MAX_CONFIG_SIZE = 1_048_576
+
+
+def _validate_command(cmd: str | list[str]) -> None:
+    """Validate MCP server command against allowlist pattern."""
+    parts = [cmd] if isinstance(cmd, str) else list(cmd)
+    for part in parts:
+        if not isinstance(part, str) or not _ALLOWED_COMMAND_RE.match(part):
+            raise ValueError(
+                f"MCP server command contains disallowed characters: {part!r}. "
+                f"Only alphanumeric, hyphens, underscores, dots, forward slashes, and @ are allowed."
+            )
 
 
 @dataclass
@@ -94,6 +112,13 @@ class StdioTransport(MCPTransport):
 
     async def connect(self) -> None:
         """Start the MCP server process."""
+        _validate_command(self.config.command)
+        for arg in self.config.args:
+            if not isinstance(arg, str) or not _ALLOWED_COMMAND_RE.match(arg):
+                raise ValueError(
+                    f"MCP server argument contains disallowed characters: {arg!r}"
+                )
+
         cmd = self.config.command
         if isinstance(cmd, str):
             cmd = [cmd] + self.config.args
@@ -556,6 +581,13 @@ def load_mcp_config(path: Path | str | None = None) -> list[MCPServerConfig]:
 
     if not config_path.exists():
         return []
+
+    # Enforce size limit to prevent memory exhaustion
+    file_size = config_path.stat().st_size
+    if file_size > _MAX_CONFIG_SIZE:
+        raise ValueError(
+            f"MCP config file too large ({file_size} bytes, max {_MAX_CONFIG_SIZE})"
+        )
 
     with open(config_path, "r", encoding="utf-8") as f:
         data = json.load(f)

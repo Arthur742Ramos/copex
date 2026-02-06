@@ -190,7 +190,9 @@ class TestFleetCoordinator:
 
         assert not results[0].success
         assert not results[1].success
-        assert "Dependency failed" in str(results[1].error)
+        err_msg = str(results[1].error)
+        assert "Dependency failed" in err_msg
+        assert "'a'" in err_msg
 
     @pytest.mark.asyncio
     async def test_on_status_callback(self):
