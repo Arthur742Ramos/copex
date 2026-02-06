@@ -702,8 +702,8 @@ class Fleet:
             },
         )
 
-        # Event queue for streaming
-        event_queue: asyncio.Queue[FleetEvent | None] = asyncio.Queue()
+        # Bounded event queue for streaming – backpressure under load
+        event_queue: asyncio.Queue[FleetEvent | None] = asyncio.Queue(maxsize=4096)
         results: dict[str, FleetResult] = {}
         semaphore = asyncio.Semaphore(self._fleet_config.max_concurrent)
         cancel_event = asyncio.Event()
@@ -788,15 +788,18 @@ class Fleet:
                             # Sync wrapper for the async callback
                             def on_chunk(chunk: Any) -> None:
                                 if hasattr(chunk, "delta") and chunk.delta:
-                                    # Can't await in sync callback, so use threadsafe put
+                                    evt = FleetEvent(
+                                        event_type=FleetEventType.MESSAGE_DELTA,
+                                        task_id=task.id,
+                                        delta=chunk.delta,
+                                    )
                                     try:
-                                        event_queue.put_nowait(FleetEvent(
-                                            event_type=FleetEventType.MESSAGE_DELTA,
-                                            task_id=task.id,
-                                            delta=chunk.delta,
-                                        ))
-                                    except Exception:
-                                        pass
+                                        event_queue.put_nowait(evt)
+                                    except asyncio.QueueFull:
+                                        # Backpressure: schedule with await so
+                                        # producer blocks until consumer drains
+                                        loop = asyncio.get_event_loop()
+                                        loop.create_task(event_queue.put(evt))
 
                         response = await asyncio.wait_for(
                             copex.send(task.prompt, on_chunk=on_chunk if include_deltas else None),

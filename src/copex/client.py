@@ -1050,10 +1050,9 @@ class Copex:
             except Exception:
                 logger.debug("Failed to unsubscribe event handler", exc_info=True)
 
-        # If we never got explicit content events and NOT streaming, try to extract from history
-        # When streaming (on_chunk provided), we trust the streamed chunks and don't use history
-        # fallback which could return stale content from previous turns
-        if not state.received_content and on_chunk is None:
+        # If we never got explicit content events, try to extract from history.
+        # This also covers streaming mode (on_chunk provided) where events may be lost.
+        if not state.received_content:
             try:
                 messages = await session.get_messages()
                 for message in reversed(messages):

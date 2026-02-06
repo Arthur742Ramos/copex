@@ -1990,6 +1990,13 @@ def fleet_command(
     timeout: Annotated[
         float, typer.Option("--timeout", help="Per-task timeout in seconds")
     ] = 600.0,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Print full task outputs after completion")
+    ] = False,
+    output_dir: Annotated[
+        Optional[Path],
+        typer.Option("--output-dir", "-o", help="Directory to save each task result as a file"),
+    ] = None,
 ) -> None:
     """
     Run multiple tasks in parallel with fleet execution.
@@ -2028,6 +2035,8 @@ def fleet_command(
             fail_fast=fail_fast,
             shared_context=shared_context,
             timeout=timeout,
+            verbose=verbose,
+            output_dir=output_dir,
         )
     )
 
@@ -2040,6 +2049,8 @@ async def _run_fleet(
     fail_fast: bool,
     shared_context: str | None,
     timeout: float,
+    verbose: bool = False,
+    output_dir: Path | None = None,
 ) -> None:
     """Run fleet tasks with live progress display."""
     from rich.table import Table
@@ -2186,6 +2197,28 @@ async def _run_fleet(
             border_style="green" if failures == 0 else "red",
         )
     )
+
+    # Print full task outputs when --verbose is set
+    if verbose:
+        for r in results:
+            content = r.response.content if r.response else None
+            if content:
+                console.print(
+                    Panel(
+                        content,
+                        title=f"📝 {r.task_id}",
+                        border_style="green" if r.success else "red",
+                    )
+                )
+
+    # Save each task result to a file when --output-dir is set
+    if output_dir:
+        output_dir.mkdir(parents=True, exist_ok=True)
+        for r in results:
+            content = r.response.content if r.response else ""
+            out_file = output_dir / f"{r.task_id}.md"
+            out_file.write_text(content or f"Error: {r.error}")
+        console.print(f"[blue]Results saved to {output_dir}/[/blue]")
 
     if failures > 0:
         raise typer.Exit(1)

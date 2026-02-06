@@ -566,7 +566,7 @@ class PlanExecutor:
         """
         self._cancelled = False
         self._state_path = state_path
-        ctx = skip_context or {}
+        ctx = dict(skip_context) if skip_context else {}
 
         # Initialize state for checkpointing
         if save_checkpoints:

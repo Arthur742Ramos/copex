@@ -134,19 +134,19 @@ def test_send_falls_back_to_session_history():
     assert response.content == "From history"
 
 
-def test_streaming_does_not_use_history_fallback():
-    """Streaming mode should NOT fall back to history - avoids stale content from previous turns."""
+def test_streaming_falls_back_to_history_when_no_content_streamed():
+    """Streaming mode should fall back to history when no content events were received."""
     events = [
         build_event(EventType.ASSISTANT_REASONING_DELTA.value, delta_content="Thinking..."),
         build_event(EventType.ASSISTANT_REASONING.value, content="Thinking..."),
         build_event(EventType.ASSISTANT_TURN_END.value),
     ]
-    # History contains stale content from a previous turn
-    stale_message = SimpleNamespace(
+    # History contains content that wasn't delivered via streaming events
+    history_message = SimpleNamespace(
         type=EventType.ASSISTANT_MESSAGE.value,
-        data=SimpleNamespace(content="Stale previous response"),
+        data=SimpleNamespace(content="Recovered response"),
     )
-    session = FakeSession(events, messages=[stale_message])
+    session = FakeSession(events, messages=[history_message])
     client = Copex(CopexConfig())
     client._started = True
     client._client = DummyClient()
@@ -155,10 +155,9 @@ def test_streaming_does_not_use_history_fallback():
     chunks: list[StreamChunk] = []
     response = run(client.send("prompt", on_chunk=chunks.append))
 
-    # Should NOT contain stale history content
-    assert response.content != "Stale previous response"
-    assert response.content == ""
-    # Reasoning should be captured
+    # Should recover content from history when streaming produced none
+    assert response.content == "Recovered response"
+    # Reasoning should still be captured
     assert response.reasoning == "Thinking..."
 
 

@@ -9,7 +9,11 @@ from copex.config import CopexConfig
 from copex.fleet import (
     Fleet,
     FleetConfig,
+    FleetContext,
     FleetCoordinator,
+    FleetEvent,
+    FleetEventType,
+    FleetMailbox,
     FleetResult,
     FleetTask,
     _slugify,
@@ -258,3 +262,266 @@ class TestFleet:
         fleet = Fleet()
         results = await fleet.run()
         assert results == []
+
+
+# ---------------------------------------------------------------------------
+# TestFleetMailbox
+# ---------------------------------------------------------------------------
+
+
+class TestFleetMailbox:
+    @pytest.mark.asyncio
+    async def test_send_and_receive(self):
+        mbox = FleetMailbox()
+        mbox.create_inbox("task-a")
+
+        ok = await mbox.send("task-a", {"key": "value"}, from_task="task-b")
+        assert ok is True
+
+        msg = await mbox.receive("task-a", timeout=1.0)
+        assert msg is not None
+        assert msg["payload"] == {"key": "value"}
+        assert msg["from"] == "task-b"
+        assert msg["to"] == "task-a"
+
+    @pytest.mark.asyncio
+    async def test_send_to_missing_inbox_returns_false(self):
+        mbox = FleetMailbox()
+        ok = await mbox.send("nonexistent", {"data": 1})
+        assert ok is False
+
+    @pytest.mark.asyncio
+    async def test_receive_timeout_returns_none(self):
+        mbox = FleetMailbox()
+        mbox.create_inbox("task-a")
+
+        msg = await mbox.receive("task-a", timeout=0.05)
+        assert msg is None
+
+    @pytest.mark.asyncio
+    async def test_broadcast_sends_to_all_except_excluded(self):
+        mbox = FleetMailbox()
+        mbox.create_inbox("t1")
+        mbox.create_inbox("t2")
+        mbox.create_inbox("t3")
+
+        count = await mbox.broadcast(
+            {"alert": True},
+            from_task="t1",
+            exclude=["t1"],
+        )
+        assert count == 2
+
+        # t2 and t3 should have messages, t1 should not
+        assert mbox.pending_count("t1") == 0
+        assert mbox.pending_count("t2") == 1
+        assert mbox.pending_count("t3") == 1
+
+        msg_t2 = await mbox.receive("t2", timeout=0.1)
+        assert msg_t2 is not None
+        assert msg_t2["payload"] == {"alert": True}
+
+    def test_try_receive_empty_returns_none(self):
+        mbox = FleetMailbox()
+        mbox.create_inbox("t1")
+        assert mbox.try_receive("t1") is None
+
+    def test_remove_inbox(self):
+        mbox = FleetMailbox()
+        mbox.create_inbox("t1")
+        mbox.remove_inbox("t1")
+        assert mbox.pending_count("t1") == 0
+
+    @pytest.mark.asyncio
+    async def test_receive_from_missing_inbox_returns_none(self):
+        mbox = FleetMailbox()
+        msg = await mbox.receive("ghost", timeout=0.05)
+        assert msg is None
+
+
+# ---------------------------------------------------------------------------
+# TestFleetContext
+# ---------------------------------------------------------------------------
+
+
+class TestFleetContext:
+    @pytest.mark.asyncio
+    async def test_set_and_get(self):
+        ctx = FleetContext()
+        await ctx.set("key", 42)
+        assert await ctx.get("key") == 42
+
+    @pytest.mark.asyncio
+    async def test_get_default(self):
+        ctx = FleetContext()
+        assert await ctx.get("missing", "fallback") == "fallback"
+
+    @pytest.mark.asyncio
+    async def test_initial_state(self):
+        ctx = FleetContext(initial_state={"x": 1})
+        assert await ctx.get("x") == 1
+
+    @pytest.mark.asyncio
+    async def test_add_and_get_result(self):
+        ctx = FleetContext()
+        await ctx.add_result("task-1", {"status": "ok"})
+        r = await ctx.get_result("task-1")
+        assert r == {"status": "ok"}
+
+    @pytest.mark.asyncio
+    async def test_get_results_returns_copy(self):
+        ctx = FleetContext()
+        await ctx.add_result("a", 1)
+        await ctx.add_result("b", 2)
+        results = await ctx.get_results()
+        assert results == {"a": 1, "b": 2}
+        # Mutating the copy doesn't affect the context
+        results["c"] = 3
+        assert await ctx.get_result("c") is None
+
+    @pytest.mark.asyncio
+    async def test_delete_key(self):
+        ctx = FleetContext()
+        await ctx.set("temp", "value")
+        deleted = await ctx.delete("temp")
+        assert deleted is True
+        assert await ctx.get("temp") is None
+        assert await ctx.delete("temp") is False
+
+    @pytest.mark.asyncio
+    async def test_update_multiple(self):
+        ctx = FleetContext()
+        await ctx.update({"a": 1, "b": 2})
+        assert await ctx.get("a") == 1
+        assert await ctx.get("b") == 2
+
+    @pytest.mark.asyncio
+    async def test_aggregate_results(self):
+        ctx = FleetContext()
+        await ctx.add_result("t1", 10)
+        await ctx.add_result("t2", 20)
+        total = await ctx.aggregate_results(lambda r: sum(r.values()))
+        assert total == 30
+
+    def test_clear(self):
+        ctx = FleetContext(initial_state={"k": "v"})
+        ctx.add_result_sync("t1", "r1")
+        ctx.clear()
+        assert ctx.state == {}
+        assert ctx.results == {}
+
+    def test_sync_accessors(self):
+        ctx = FleetContext()
+        ctx.set_sync("key", "val")
+        assert ctx.get_sync("key") == "val"
+        ctx.add_result_sync("t1", "done")
+        assert ctx.get_result_sync("t1") == "done"
+        assert ctx.get_results_sync() == {"t1": "done"}
+
+
+# ---------------------------------------------------------------------------
+# TestRunStreaming
+# ---------------------------------------------------------------------------
+
+
+class TestRunStreaming:
+    @pytest.mark.asyncio
+    async def test_empty_fleet_yields_fleet_complete(self):
+        fleet = Fleet()
+        events = [e async for e in fleet.run_streaming()]
+        assert len(events) == 1
+        assert events[0].event_type == FleetEventType.FLEET_COMPLETE
+        assert events[0].data["total_tasks"] == 0
+
+    @pytest.mark.asyncio
+    async def test_single_task_event_ordering(self):
+        mock_copex = _make_mock_copex(Response(content="result"))
+        fleet = Fleet()
+        fleet.add("Do something", task_id="t1")
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            events = [e async for e in fleet.run_streaming()]
+
+        event_types = [e.event_type for e in events]
+        # Must start with FLEET_START and end with FLEET_COMPLETE
+        assert event_types[0] == FleetEventType.FLEET_START
+        assert event_types[-1] == FleetEventType.FLEET_COMPLETE
+
+        # Task lifecycle events must appear in order
+        task_events = [e for e in events if e.task_id == "t1"]
+        task_types = [e.event_type for e in task_events]
+        assert task_types.index(FleetEventType.TASK_QUEUED) < task_types.index(FleetEventType.TASK_RUNNING)
+        assert task_types.index(FleetEventType.TASK_RUNNING) < task_types.index(FleetEventType.TASK_DONE)
+
+    @pytest.mark.asyncio
+    async def test_streaming_failure_emits_task_failed(self):
+        mock_copex = _make_mock_copex(error=RuntimeError("kaboom"))
+        fleet = Fleet()
+        fleet.add("Fail task", task_id="f1")
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            events = [e async for e in fleet.run_streaming()]
+
+        failed = [e for e in events if e.event_type == FleetEventType.TASK_FAILED]
+        assert len(failed) == 1
+        assert failed[0].task_id == "f1"
+        assert "kaboom" in (failed[0].error or "")
+
+        # Fleet complete should report 0 succeeded, 1 failed
+        complete = [e for e in events if e.event_type == FleetEventType.FLEET_COMPLETE]
+        assert complete[0].data["succeeded"] == 0
+        assert complete[0].data["failed"] == 1
+
+    @pytest.mark.asyncio
+    async def test_streaming_blocked_dependency(self):
+        async def _fail_on_a(prompt, **kwargs):
+            if "A" in prompt:
+                raise RuntimeError("A failed")
+            return Response(content="ok")
+
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_fail_on_a)
+
+        fleet = Fleet()
+        fleet.add("A", task_id="a")
+        fleet.add("B", task_id="b", depends_on=["a"])
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            events = [e async for e in fleet.run_streaming()]
+
+        blocked = [e for e in events if e.event_type == FleetEventType.TASK_BLOCKED]
+        assert len(blocked) == 1
+        assert blocked[0].task_id == "b"
+
+    @pytest.mark.asyncio
+    async def test_streaming_stores_results_in_context(self):
+        mock_copex = _make_mock_copex(Response(content="hello world"))
+        ctx = FleetContext()
+
+        fleet = Fleet()
+        fleet.add("Task one", task_id="t1")
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            events = [e async for e in fleet.run_streaming(context=ctx)]
+
+        # Context should have the task result
+        result = await ctx.get_result("t1")
+        assert result is not None
+        assert result["success"] is True
+        assert result["content"] == "hello world"
+
+    @pytest.mark.asyncio
+    async def test_streaming_creates_mailbox_inboxes(self):
+        mock_copex = _make_mock_copex()
+        mbox = FleetMailbox()
+
+        fleet = Fleet()
+        fleet.add("T1", task_id="t1")
+        fleet.add("T2", task_id="t2")
+
+        with patch("copex.fleet.Copex", return_value=mock_copex):
+            _ = [e async for e in fleet.run_streaming(mailbox=mbox)]
+
+        # Mailbox inboxes should have been created for both tasks
+        assert mbox.pending_count("t1") == 0  # exists but empty
+        assert mbox.pending_count("t2") == 0
