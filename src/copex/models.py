@@ -28,7 +28,14 @@ class Model(str, Enum):
     CLAUDE_HAIKU_4_5 = "claude-haiku-4.5"
     CLAUDE_OPUS_4_5 = "claude-opus-4.5"
     CLAUDE_OPUS_4_6 = "claude-opus-4.6"
+    CLAUDE_OPUS_4_6_FAST = "claude-opus-4.6-fast"
     GEMINI_3_PRO = "gemini-3-pro-preview"
+
+
+# Models that do NOT support reasoning_effort configuration
+_NO_REASONING_MODELS: set[str] = {
+    Model.CLAUDE_OPUS_4_6_FAST.value,
+}
 
 
 class ReasoningEffort(str, Enum):

@@ -200,7 +200,9 @@ class CopexConfig(BaseModel):
     skill_directories: list[str] = Field(
         default_factory=list, description="Explicit skill directories to load"
     )
-    disabled_skills: list[str] = Field(default_factory=list, description="Skills to disable")
+    disabled_skills: list[str] = Field(
+        default_factory=list, description="Skills to disable"
+    )
     auto_discover_skills: bool = Field(
         default=True, description="Auto-discover skills from repo and user dirs"
     )
@@ -351,13 +353,17 @@ class CopexConfig(BaseModel):
 
     def to_session_options(self) -> dict[str, Any]:
         """Convert to create_session options."""
+        from copex.models import _NO_REASONING_MODELS
         from copex.skills import SkillDiscovery
 
+        model_id = self.model.value
         opts: dict[str, Any] = {
-            "model": self.model.value,
-            "reasoning_effort": self.reasoning_effort.value,
+            "model": model_id,
             "streaming": self.streaming,
         }
+        # Only include reasoning_effort for models that support it
+        if model_id not in _NO_REASONING_MODELS:
+            opts["reasoning_effort"] = self.reasoning_effort.value
 
         # Skills (named skills like 'code-review')
         if self.skills:

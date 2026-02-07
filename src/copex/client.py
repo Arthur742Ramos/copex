@@ -13,14 +13,14 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
+logger = logging.getLogger(__name__)
+
 from copilot import CopilotClient
 
-from copex.backoff import AdaptiveRetry, ErrorCategory, categorize_error
+from copex.backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, categorize_error
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
-
-logger = logging.getLogger(__name__)
 
 # Circuit breaker defaults
 _CB_FAILURE_THRESHOLD = 5
@@ -138,7 +138,8 @@ class SlidingWindowBreaker:
                 if self._opened_at is None:
                     self._opened_at = time.monotonic()
                     logger.warning(
-                        "Circuit breaker opened: failure rate %.0f%% exceeds threshold %.0f%%",
+                        "Circuit breaker opened: failure rate %.0f%% "
+                        "exceeds threshold %.0f%%",
                         self.failure_rate * 100,
                         self.threshold * 100,
                     )
@@ -359,7 +360,9 @@ class SessionPool:
                 needed = min(self.pre_warm, self.max_sessions) - len(pool)
                 for _ in range(needed):
                     try:
-                        session = await client.create_session(config.to_session_options())
+                        session = await client.create_session(
+                            config.to_session_options()
+                        )
                         pool.append(
                             SessionPool._PooledSession(
                                 session=session,
@@ -506,7 +509,9 @@ class SessionPool:
                         try:
                             await lru.session.destroy()
                         except Exception:
-                            logger.debug("Failed to destroy evicted session", exc_info=True)
+                            logger.debug(
+                                "Failed to destroy evicted session", exc_info=True
+                            )
         else:
             is_pooled = True
 
@@ -967,9 +972,7 @@ class Copex:
         on_chunk: Callable[[StreamChunk], None] | None,
     ) -> None:
         data = event.data
-        delta = (
-            getattr(data, "delta_content", None) or getattr(data, "transformed_content", None) or ""
-        )
+        delta = getattr(data, "delta_content", None) or getattr(data, "transformed_content", None) or ""
         if delta:
             state.received_content = True
             state.content_parts.append(delta)
@@ -1167,6 +1170,7 @@ class Copex:
 
     async def _ensure_session(self) -> Any:
         """Ensure a session exists, creating one if needed."""
+        from copex.models import _NO_REASONING_MODELS
         if not self._started:
             await self.start()
         if self._session is None:
@@ -1175,6 +1179,9 @@ class Copex:
             session_options = self.config.to_session_options()
             if self._current_model and self._current_model != self.config.model.value:
                 session_options["model"] = self._current_model
+                # If the fallback model doesn't support reasoning, drop it
+                if self._current_model in _NO_REASONING_MODELS:
+                    session_options.pop("reasoning_effort", None)
             self._session = await self._client.create_session(session_options)
         return self._session
 
