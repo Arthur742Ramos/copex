@@ -26,7 +26,7 @@ from rich.panel import Panel
 
 from copex import __version__
 from copex.client import Copex, StreamChunk
-from copex.config import CopexConfig, load_last_model, save_last_model
+from copex.config import CopexConfig, load_last_model, make_client, save_last_model
 from copex.log_render import render_jsonl
 from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
 from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
@@ -236,6 +236,10 @@ def main(
     allow_all: Annotated[
         bool, typer.Option("--allow-all", help="Enable all permissions (tools, paths, URLs)")
     ] = False,
+    use_cli: Annotated[
+        bool,
+        typer.Option("--use-cli", help="Use CLI subprocess instead of SDK (supports all models)"),
+    ] = False,
 ) -> None:
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
     if ctx.invoked_subcommand is None:
@@ -246,6 +250,8 @@ def main(
             try:
                 config = CopexConfig()
                 config.model = Model(effective_model)
+                if use_cli:
+                    config.use_cli = True
                 requested_effort = parse_reasoning_effort(reasoning)
                 if requested_effort is None:
                     requested_effort = ReasoningEffort.HIGH
@@ -500,6 +506,10 @@ def chat(
     output: Annotated[
         Optional[Path], typer.Option("--output", "-o", help="Write response to file")
     ] = None,
+    use_cli: Annotated[
+        bool,
+        typer.Option("--use-cli", help="Use CLI subprocess instead of SDK (supports all models)"),
+    ] = False,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors."""
     # Load config: explicit flag wins; otherwise auto-load from ~/.config/copex/config.toml if present
@@ -534,6 +544,8 @@ def chat(
 
     config.retry.max_retries = max_retries
     config.streaming = not no_stream
+    if use_cli:
+        config.use_cli = True
     if ui_theme:
         config.ui_theme = ui_theme
     if ui_density:
@@ -611,7 +623,7 @@ async def _run_chat(
     output_path: Path | None = None,
 ) -> None:
     """Run the chat command."""
-    client = Copex(config)
+    client = make_client(config)
 
     try:
         await client.start()
@@ -1068,7 +1080,7 @@ def interactive(
 
 async def _interactive_loop(config: CopexConfig) -> None:
     """Run interactive chat loop."""
-    client = Copex(config)
+    client = make_client(config)
     await client.start()
     session = _build_prompt_session()
     show_all_tools = False
@@ -1408,7 +1420,7 @@ async def _run_ralph(
     """Run Ralph loop with beautiful UI."""
     from copex.ui import RalphUI
 
-    client = Copex(config)
+    client = make_client(config)
     await client.start()
 
     ralph_ui = RalphUI(console)
@@ -1764,7 +1776,7 @@ async def _run_plan(
     from copex.ui import PlanUI
     from copex.visualization import visualize_plan
 
-    client = Copex(config)
+    client = make_client(config)
     await client.start()
 
     plan_ui = PlanUI(console)

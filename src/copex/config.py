@@ -175,6 +175,7 @@ class CopexConfig(BaseModel):
     retry: RetryConfig = Field(default_factory=RetryConfig, description="Retry configuration")
 
     # Client options
+    use_cli: bool = Field(default=False, description="Use CLI subprocess instead of SDK (supports all models)")
     cli_path: str | None = Field(default=None, description="Path to Copilot CLI executable")
     cli_url: str | None = Field(default=None, description="URL of existing CLI server")
     cwd: str | None = Field(default=None, description="Working directory for CLI process")
@@ -417,3 +418,17 @@ class CopexConfig(BaseModel):
             opts["excluded_tools"] = self.excluded_tools
 
         return opts
+
+
+def make_client(config: CopexConfig) -> Any:
+    """Create the appropriate client based on configuration.
+
+    When ``use_cli`` is True, returns a CopilotCLI instance that wraps
+    the Copilot CLI subprocess directly (supports all CLI models).
+    Otherwise returns a Copex instance using the SDK.
+    """
+    if config.use_cli:
+        from copex.cli_client import CopilotCLI
+        return CopilotCLI(config)
+    from copex.client import Copex
+    return Copex(config)

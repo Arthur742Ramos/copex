@@ -7,6 +7,7 @@ This module also includes small helpers for validating combinations of model +
 from __future__ import annotations
 
 import re
+import subprocess
 from enum import Enum
 from typing import Tuple
 
@@ -36,6 +37,102 @@ class Model(str, Enum):
 _NO_REASONING_MODELS: set[str] = {
     Model.CLAUDE_OPUS_4_6_FAST.value,
 }
+
+# ---------------------------------------------------------------------------
+# Dynamic model discovery
+# ---------------------------------------------------------------------------
+
+_discovered_models: list[str] | None = None
+
+_MODEL_CHOICES_RE = re.compile(
+    r'--model\b.*?\(choices:\s*(.+?)\)',
+    re.IGNORECASE | re.DOTALL,
+)
+
+
+def discover_models() -> list[str]:
+    """Discover available models by parsing ``copilot --help``.
+
+    Results are cached for the lifetime of the process.  Falls back to the
+    ``Model`` enum values when the CLI is unavailable.
+    """
+    global _discovered_models
+    if _discovered_models is not None:
+        return _discovered_models
+
+    try:
+        from copex.config import find_copilot_cli
+
+        cli_path = find_copilot_cli()
+        if cli_path is None:
+            raise FileNotFoundError("copilot CLI not found")
+
+        result = subprocess.run(
+            [cli_path, "--help"],
+            capture_output=True,
+            text=True,
+            timeout=10,
+        )
+        if result.returncode != 0:
+            raise RuntimeError(f"copilot --help exited with code {result.returncode}")
+        m = _MODEL_CHOICES_RE.search(result.stdout)
+        if m:
+            raw = m.group(1)
+            models = [s.strip().strip('"').strip("'") for s in raw.split(",")]
+            models = [s for s in models if s]
+            if models:
+                _discovered_models = models
+                return _discovered_models
+    except Exception:
+        pass
+
+    _discovered_models = [model.value for model in Model]
+    return _discovered_models
+
+
+def resolve_model(model_str: str) -> str:
+    """Resolve a model string to a valid model ID.
+
+    Accepts ``Model`` enum values as well as any model ID returned by
+    :func:`discover_models`.  Raises ``ValidationError`` for unknown models.
+    """
+    # Check enum values first
+    enum_values = {m.value for m in Model}
+    if model_str in enum_values:
+        return model_str
+
+    # Check dynamically discovered models
+    if model_str in discover_models():
+        return model_str
+
+    from copex.exceptions import ValidationError
+
+    raise ValidationError(
+        f"Unknown model '{model_str}'. "
+        f"Available models: {', '.join(get_available_models())}"
+    )
+
+
+def get_available_models() -> list[str]:
+    """Return the union of enum values and dynamically discovered models."""
+    enum_values = [m.value for m in Model]
+    discovered = discover_models()
+    seen: set[str] = set()
+    merged: list[str] = []
+    for model_id in [*enum_values, *discovered]:
+        if model_id not in seen:
+            seen.add(model_id)
+            merged.append(model_id)
+    return merged
+
+
+def no_reasoning_models() -> set[str]:
+    """Return the set of models that do NOT support reasoning_effort.
+
+    Currently returns only the known set since model capabilities cannot be
+    inferred from ``--help`` output.
+    """
+    return set(_NO_REASONING_MODELS)
 
 
 class ReasoningEffort(str, Enum):

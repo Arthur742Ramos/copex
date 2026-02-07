@@ -1,13 +1,14 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
-__version__ = "2.0.0"
+__version__ = "2.1.0"
 
 # Re-export core components for convenience
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
 from .cache import StepCache, clear_global_cache, get_cache
+from .cli_client import CopilotCLI
 from .client import Copex
 from .conditions import Condition, ConditionContext, all_of, any_of, when
-from .config import CopexConfig, find_copilot_cli
+from .config import CopexConfig, find_copilot_cli, make_client
 
 # Export new modules
 from .exceptions import (
@@ -34,7 +35,14 @@ from .fleet import (
     summarize_fleet_results,
 )
 from .fleet_store import FleetStore, RunRecord, TaskRecord
-from .models import Model, ReasoningEffort
+from .models import (
+    Model,
+    ReasoningEffort,
+    discover_models,
+    get_available_models,
+    no_reasoning_models,
+    resolve_model,
+)
 from .skills import SkillDiscovery, SkillInfo, get_skill_content, list_skills
 from .templates import (
     StepInstance,
@@ -51,9 +59,15 @@ from .visualization import render_ascii, render_mermaid, visualize_plan
 __all__ = [
     # Core
     "Copex",
+    "CopilotCLI",
     "CopexConfig",
+    "make_client",
     "Model",
     "ReasoningEffort",
+    "discover_models",
+    "get_available_models",
+    "no_reasoning_models",
+    "resolve_model",
     # Skills
     "SkillDiscovery",
     "SkillInfo",

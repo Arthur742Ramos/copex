@@ -13,14 +13,14 @@ from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from copilot import CopilotClient
 
-from copex.backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, categorize_error
+from copex.backoff import AdaptiveRetry, ErrorCategory, categorize_error
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
+
+logger = logging.getLogger(__name__)
 
 # ---------------------------------------------------------------------------
 # Patch: Remove ``--no-auto-update`` from the CLI startup args.
