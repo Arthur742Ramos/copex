@@ -6,10 +6,12 @@ import asyncio
 import json
 import sys
 import time
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, Any, Optional
 
 import typer
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
@@ -22,6 +24,7 @@ from rich.panel import Panel
 from copex import __version__
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig, load_last_model, save_last_model
+from copex.log_render import render_jsonl
 from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
 from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 from copex.ralph import RalphState, RalphWiggum
@@ -56,7 +59,7 @@ _copex_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="chat plan ralph fleet interactive models skills status config init login logout tui completions"
+    opts="chat plan ralph fleet council interactive render models skills status config init login logout tui completions"
 
     case "${prev}" in
         -m|--model)
@@ -94,7 +97,9 @@ _copex() {
         'plan:Generate and execute step-by-step plans'
         'ralph:Start a Ralph Wiggum loop'
         'fleet:Run multiple tasks in parallel'
+        'council:Run a model council with Opus as chair'
         'interactive:Start interactive chat session'
+        'render:Render JSONL session logs'
         'models:List available models'
         'skills:Manage skills'
         'status:Check Copilot status'
@@ -127,7 +132,7 @@ _copex() {
             ;;
         args)
             case "$words[1]" in
-                chat|plan|ralph|fleet|interactive)
+                chat|plan|ralph|fleet|council|interactive)
                     _arguments \\
                         '(-m --model)'{-m,--model}'[Model to use]:model:($models)' \\
                         '(-r --reasoning)'{-r,--reasoning}'[Reasoning effort]:level:($reasoning_levels)' \\
@@ -147,7 +152,7 @@ _copex "$@"
 FISH_COMPLETION = '''
 # copex fish completion
 
-set -l commands chat plan ralph fleet interactive models skills status config init login logout tui completions
+set -l commands chat plan ralph fleet council interactive render models skills status config init login logout tui completions
 set -l models claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini
 set -l reasoning low medium high xhigh
 
@@ -191,6 +196,12 @@ def reasoning_callback(value: str | None) -> ReasoningEffort | None:
     except ValueError:
         valid = ", ".join(r.value for r in ReasoningEffort)
         raise typer.BadParameter(f"Invalid reasoning effort. Valid: {valid}")
+
+
+def _parse_exclude_tools(value: str | None) -> list[str]:
+    if not value:
+        return []
+    return [item.strip() for item in value.split(",") if item.strip()]
 
 
 @app.callback(invoke_without_command=True)
@@ -814,6 +825,30 @@ def models() -> None:
     console.print("[bold]Available Models:[/bold]\n")
     for model in Model:
         console.print(f"  • {model.value}")
+
+
+@app.command("render")
+def render_command(
+    input_path: Annotated[
+        Path,
+        typer.Option(
+            "--input",
+            "-i",
+            help="Path to JSONL session log file (use - for stdin)",
+        ),
+    ] = ...,
+) -> None:
+    """Render JSONL session logs with readable formatting."""
+    if str(input_path) == "-":
+        render_jsonl(sys.stdin, console)
+        return
+
+    if not input_path.exists():
+        console.print(f"[red]File not found: {input_path}[/red]")
+        raise typer.Exit(1)
+
+    with input_path.open("r", encoding="utf-8") as handle:
+        render_jsonl(handle, console)
 
 
 # Skills subcommand group
@@ -1966,6 +2001,196 @@ def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
     )
 
 
+class FleetTaskSpec(BaseModel):
+    """Shared task schema for fleet JSON and TOML configs."""
+
+    model_config = ConfigDict(extra="forbid")
+
+    id: str | None = None
+    prompt: str
+    depends_on: list[str] = Field(default_factory=list)
+    model: Model | None = None
+    reasoning_effort: ReasoningEffort | None = None
+    cwd: str | None = None
+    on_dependency_failure: str = "block"
+    exclude_tools: list[str] = Field(default_factory=list)
+    skills: list[str] | None = None
+    skills_dirs: list[str] = Field(default_factory=list)
+    mcp_servers: dict[str, Any] | list[dict[str, Any]] | None = None
+    timeout_sec: float | None = None
+
+    @field_validator("id")
+    @classmethod
+    def _validate_id(cls, value: str | None) -> str | None:
+        if value is None:
+            return None
+        if not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value.strip()
+
+    @field_validator("prompt")
+    @classmethod
+    def _validate_prompt(cls, value: str) -> str:
+        if not isinstance(value, str) or not value.strip():
+            raise ValueError("must be a non-empty string")
+        return value
+
+    @field_validator("depends_on")
+    @classmethod
+    def _validate_depends_on(cls, value: list[str]) -> list[str]:
+        if any(not isinstance(dep, str) or not dep.strip() for dep in value):
+            raise ValueError("must be a list of non-empty strings")
+        return value
+
+    @field_validator("reasoning_effort", mode="before")
+    @classmethod
+    def _parse_reasoning_effort(cls, value: Any) -> Any:
+        if value is None:
+            return None
+        if isinstance(value, ReasoningEffort):
+            return value
+        if not isinstance(value, str):
+            return value
+        parsed = parse_reasoning_effort(value)
+        if parsed is None:
+            valid = ", ".join(r.value for r in ReasoningEffort)
+            raise ValueError(f"invalid value '{value}'. Valid: {valid}")
+        return parsed
+
+    @field_validator("on_dependency_failure", mode="before")
+    @classmethod
+    def _validate_on_dependency_failure(cls, value: Any) -> str:
+        if value is None:
+            return "block"
+        if not isinstance(value, str):
+            raise ValueError("must be a string ('block' or 'continue')")
+        normalized = value.strip().lower()
+        if normalized not in {"block", "continue"}:
+            raise ValueError("must be 'block' or 'continue'")
+        return normalized
+
+    @field_validator("exclude_tools", mode="before")
+    @classmethod
+    def _parse_exclude_tools(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [item.strip() for item in value.split(",") if item.strip()]
+        return value
+
+    @field_validator("exclude_tools")
+    @classmethod
+    def _validate_exclude_tools(cls, value: list[str]) -> list[str]:
+        if any(not isinstance(tool, str) or not tool.strip() for tool in value):
+            raise ValueError("must be a list of non-empty strings")
+        return [tool.strip() for tool in value if tool.strip()]
+
+    @field_validator("skills")
+    @classmethod
+    def _validate_skills(cls, value: list[str] | None) -> list[str] | None:
+        if value is None:
+            return None
+        if any(not isinstance(skill, str) or not skill.strip() for skill in value):
+            raise ValueError("must be a list of non-empty strings")
+        return value
+
+    @field_validator("skills_dirs", mode="before")
+    @classmethod
+    def _parse_skills_dirs(cls, value: Any) -> Any:
+        if value is None:
+            return []
+        if isinstance(value, str):
+            return [value]
+        return value
+
+    @field_validator("skills_dirs")
+    @classmethod
+    def _validate_skills_dirs(cls, value: list[str]) -> list[str]:
+        if any(not isinstance(path, str) or not path.strip() for path in value):
+            raise ValueError("must be a list of non-empty strings")
+        return [path.strip() for path in value if path.strip()]
+
+    @field_validator("mcp_servers")
+    @classmethod
+    def _validate_mcp_servers(
+        cls,
+        value: dict[str, Any] | list[dict[str, Any]] | None,
+    ) -> dict[str, Any] | list[dict[str, Any]] | None:
+        if value is None:
+            return None
+        if isinstance(value, list):
+            if any(not isinstance(server, dict) for server in value):
+                raise ValueError("must be a list of objects")
+            return value
+        if not isinstance(value, dict):
+            raise ValueError("must be an object or list of objects")
+        return value
+
+    @field_validator("timeout_sec")
+    @classmethod
+    def _validate_timeout(cls, value: float | None) -> float | None:
+        if value is None:
+            return None
+        if value <= 0:
+            raise ValueError("must be greater than zero")
+        return float(value)
+
+
+def _format_fleet_spec_error(exc: ValidationError, idx: int) -> str:
+    """Convert pydantic errors into existing CLI-style task errors."""
+    err = exc.errors(include_url=False)[0]
+    loc = ".".join(str(part) for part in err.get("loc", ()))
+    loc_suffix = f".{loc}" if loc else ""
+    return f"tasks[{idx}]{loc_suffix} {err.get('msg', 'is invalid')}"
+
+
+def _parse_fleet_task_specs(raw_tasks: Any, *, key_name: str = "tasks") -> list["FleetTask"]:
+    """Parse/validate task rows from JSON or TOML using one shared schema."""
+    from copex.fleet import DependencyFailurePolicy, FleetTask
+
+    if raw_tasks is None:
+        raise ValueError(f"Fleet config missing required '{key_name}' list")
+    if not isinstance(raw_tasks, list):
+        raise ValueError(f"Fleet config '{key_name}' must be a list")
+    if not raw_tasks:
+        raise ValueError(f"Fleet config '{key_name}' list is empty")
+
+    tasks: list[FleetTask] = []
+    seen_ids: set[str] = set()
+    for idx, task_data in enumerate(raw_tasks):
+        if not isinstance(task_data, dict):
+            raise ValueError(f"tasks[{idx}] must be an object")
+
+        try:
+            spec = FleetTaskSpec.model_validate(task_data)
+        except ValidationError as exc:
+            raise ValueError(_format_fleet_spec_error(exc, idx)) from exc
+
+        task_id = spec.id or f"task-{idx + 1}"
+        if task_id in seen_ids:
+            raise ValueError(f"Duplicate task id in fleet config: '{task_id}'")
+        seen_ids.add(task_id)
+
+        tasks.append(
+            FleetTask(
+                id=task_id,
+                prompt=spec.prompt,
+                depends_on=spec.depends_on,
+                model=spec.model,
+                reasoning_effort=spec.reasoning_effort,
+                cwd=spec.cwd,
+                skills=spec.skills,
+                exclude_tools=spec.exclude_tools,
+                mcp_servers=spec.mcp_servers,
+                timeout_sec=spec.timeout_sec,
+                skills_dirs=spec.skills_dirs,
+                on_dependency_failure=DependencyFailurePolicy(spec.on_dependency_failure),
+            )
+        )
+
+    return tasks
+
+
 @app.command("fleet")
 def fleet_command(
     prompts: Annotated[
@@ -1973,6 +2198,9 @@ def fleet_command(
     ] = None,
     file: Annotated[
         Optional[Path], typer.Option("--file", "-f", help="TOML file with task definitions")
+    ] = None,
+    config_file: Annotated[
+        Optional[Path], typer.Option("--config", help="JSON config file with task definitions")
     ] = None,
     max_concurrent: Annotated[
         int, typer.Option("--max-concurrent", help="Max concurrent tasks")
@@ -1984,6 +2212,9 @@ def fleet_command(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
+    mcp_config: Annotated[
+        Optional[Path], typer.Option("--mcp-config", help="Path to MCP config JSON file")
+    ] = None,
     shared_context: Annotated[
         Optional[str], typer.Option("--shared-context", help="Context prepended to all tasks")
     ] = None,
@@ -1997,6 +2228,10 @@ def fleet_command(
         Optional[Path],
         typer.Option("--output-dir", "-o", help="Directory to save each task result as a file"),
     ] = None,
+    artifact: Annotated[
+        Optional[Path],
+        typer.Option("--artifact", help="Write run artifact JSON"),
+    ] = None,
     git_finalize: Annotated[
         bool,
         typer.Option(
@@ -2008,6 +2243,17 @@ def fleet_command(
         Optional[str],
         typer.Option("--git-message", help="Commit message for git finalize"),
     ] = None,
+    skills: Annotated[
+        Optional[list[str]],
+        typer.Option("--skills", help="Skill directories (.md files) to prepend to system prompt"),
+    ] = None,
+    exclude_tools: Annotated[
+        Optional[str],
+        typer.Option(
+            "--exclude-tools",
+            help="Comma-separated tool patterns to exclude per task (e.g. shell(rm))",
+        ),
+    ] = None,
 ) -> None:
     """
     Run multiple tasks in parallel with fleet execution.
@@ -2015,10 +2261,14 @@ def fleet_command(
     Examples:
         copex fleet "Write tests" "Fix linting" "Update docs"
         copex fleet --file tasks.toml
+        copex fleet --config tasks.json
         copex fleet "Task A" "Task B" --max-concurrent 3 --fail-fast
     """
-    if not prompts and not file:
-        console.print("[red]Error: Provide task prompts or --file[/red]")
+    if config_file and (prompts or file):
+        console.print("[red]Error: Use --config without prompts or --file[/red]")
+        raise typer.Exit(1)
+    if not prompts and not file and not config_file:
+        console.print("[red]Error: Provide task prompts, --file, or --config[/red]")
         raise typer.Exit(1)
 
     effective_model = model or _DEFAULT_MODEL.value
@@ -2033,6 +2283,11 @@ def fleet_command(
             model=model_enum,
             reasoning_effort=normalized_effort,
         )
+        if mcp_config:
+            if not mcp_config.exists():
+                console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
+                raise typer.Exit(1)
+            config.mcp_config_file = str(mcp_config)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1)
@@ -2042,30 +2297,332 @@ def fleet_command(
             config=config,
             prompts=prompts or [],
             file=file,
+            config_file=config_file,
             max_concurrent=max_concurrent,
             fail_fast=fail_fast,
             shared_context=shared_context,
             timeout=timeout,
             verbose=verbose,
             output_dir=output_dir,
+            artifact_path=artifact,
             git_finalize=git_finalize,
             git_message=git_message,
+            skills=skills or [],
+            exclude_tools=_parse_exclude_tools(exclude_tools),
         )
     )
+
+
+def _build_council_tasks(
+    task: str,
+    *,
+    investigator_model: Model | None = None,
+    codex_model: Model | None = None,
+    gemini_model: Model | None = None,
+    opus_model: Model | None = None,
+    chair_model: Model | None = None,
+    reasoning_effort: ReasoningEffort = ReasoningEffort.HIGH,
+    debate: bool = False,
+    preset: str | None = None,
+    escalate: bool = False,
+) -> list["FleetTask"]:
+    """Create the council workflow task graph with enhancements.
+    
+    Args:
+        task: The task/problem for the council
+        investigator_model: Override model for all 3 investigators
+        codex_model: Override model for Codex investigator
+        gemini_model: Override model for Gemini investigator
+        opus_model: Override model for Opus investigator
+        chair_model: Model for chair (default: claude-opus-4.6)
+        reasoning_effort: Reasoning effort for all tasks
+        debate: Enable debate rounds (investigators revise after seeing others)
+        preset: Specialist preset (security/architecture/refactor/review)
+        escalate: Enable tie-breaker escalation on uncertainty
+    """
+    from copex.council import CouncilConfig, CouncilPreset, build_council_tasks
+    
+    # Parse preset
+    council_preset = None
+    if preset:
+        try:
+            council_preset = CouncilPreset(preset.lower())
+        except ValueError:
+            valid = ", ".join(p.value for p in CouncilPreset)
+            console.print(f"[yellow]Warning: Invalid preset '{preset}'. Valid: {valid}[/yellow]")
+    
+    config = CouncilConfig(
+        investigator_model=investigator_model,
+        codex_model=codex_model,
+        gemini_model=gemini_model,
+        opus_model=opus_model,
+        chair_model=chair_model or Model.CLAUDE_OPUS_4_6,
+        reasoning_effort=reasoning_effort,
+        debate=debate,
+        preset=council_preset,
+        escalate=escalate,
+    )
+    
+    return build_council_tasks(task, config)
+
+
+@app.command("council")
+def council_command(
+    task: Annotated[str, typer.Argument(help="Task/problem for the model council")],
+    max_concurrent: Annotated[
+        int, typer.Option("--max-concurrent", help="Max concurrent tasks")
+    ] = 3,
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Per-task timeout in seconds")
+    ] = 900.0,
+    shared_context: Annotated[
+        Optional[str], typer.Option("--shared-context", help="Context prepended to all tasks")
+    ] = None,
+    mcp_config: Annotated[
+        Optional[Path], typer.Option("--mcp-config", help="Path to MCP config JSON file")
+    ] = None,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Print full task outputs after completion")
+    ] = False,
+    output_dir: Annotated[
+        Optional[Path],
+        typer.Option("--output-dir", "-o", help="Directory to save each task result as a file"),
+    ] = None,
+    artifact: Annotated[
+        Optional[Path],
+        typer.Option("--artifact", help="Write run artifact JSON"),
+    ] = None,
+    git_finalize: Annotated[
+        bool,
+        typer.Option(
+            "--git-finalize/--no-git-finalize",
+            help="Stage and commit all changes after council completes",
+        ),
+    ] = True,
+    git_message: Annotated[
+        Optional[str],
+        typer.Option("--git-message", help="Commit message for git finalize"),
+    ] = None,
+    skills: Annotated[
+        Optional[list[str]],
+        typer.Option("--skills", help="Skill directories (.md files) to prepend to system prompt"),
+    ] = None,
+    exclude_tools: Annotated[
+        Optional[str],
+        typer.Option(
+            "--exclude-tools",
+            help="Comma-separated tool patterns to exclude per task (e.g. shell(rm))",
+        ),
+    ] = None,
+    # New council enhancement options
+    investigator_model: Annotated[
+        Optional[str],
+        typer.Option(
+            "--investigator-model",
+            help="Model for all 3 investigators (overrides defaults)",
+        ),
+    ] = None,
+    codex_model: Annotated[
+        Optional[str],
+        typer.Option("--codex-model", help="Model for Codex investigator"),
+    ] = None,
+    gemini_model: Annotated[
+        Optional[str],
+        typer.Option("--gemini-model", help="Model for Gemini investigator"),
+    ] = None,
+    opus_model: Annotated[
+        Optional[str],
+        typer.Option("--opus-model", help="Model for Opus investigator (not chair)"),
+    ] = None,
+    chair_model: Annotated[
+        Optional[str],
+        typer.Option("--chair-model", help="Model for chair (default: claude-opus-4.6)"),
+    ] = None,
+    reasoning: Annotated[
+        Optional[str],
+        typer.Option("-r", "--reasoning", help="Reasoning effort for all tasks (low/medium/high/xhigh)"),
+    ] = None,
+    debate: Annotated[
+        bool,
+        typer.Option("--debate/--no-debate", help="Enable debate round (investigators revise after seeing others)"),
+    ] = False,
+    preset: Annotated[
+        Optional[str],
+        typer.Option(
+            "--preset",
+            help="Specialist preset: security, architecture, refactor, review",
+        ),
+    ] = None,
+    escalate: Annotated[
+        bool,
+        typer.Option("--escalate/--no-escalate", help="Enable tie-breaker escalation on uncertainty"),
+    ] = False,
+) -> None:
+    """Run a council workflow: Codex + Gemini + Opus, with Opus as chair.
+    
+    Enhanced council features:
+    
+    \b
+    MODEL SELECTION:
+      --investigator-model  Override model for all 3 investigators
+      --codex-model         Override just Codex
+      --gemini-model        Override just Gemini
+      --opus-model          Override just Opus investigator
+      --chair-model         Override chair model (default: claude-opus-4.6)
+    
+    \b
+    DEBATE ROUNDS:
+      --debate              After initial opinions, each investigator sees others'
+                            responses and can revise their position
+    
+    \b
+    SPECIALIST PRESETS:
+      --preset security      Focus on vulnerabilities, auth, injection
+      --preset architecture  Focus on patterns, scaling, modularity
+      --preset refactor      Focus on code quality, DRY, naming
+      --preset review        Balanced code review
+    
+    \b
+    TIE-BREAKER:
+      --escalate            If chair is uncertain (confidence < 0.7), re-run
+                            with xhigh reasoning for a definitive answer
+    """
+    # Parse model options
+    def parse_model(m: str | None) -> Model | None:
+        if m is None:
+            return None
+        try:
+            return Model(m)
+        except ValueError:
+            console.print(f"[red]Invalid model: {m}[/red]")
+            raise typer.Exit(1)
+    
+    inv_model = parse_model(investigator_model)
+    cdx_model = parse_model(codex_model)
+    gem_model = parse_model(gemini_model)
+    op_model = parse_model(opus_model)
+    chr_model = parse_model(chair_model)
+    
+    # Parse reasoning effort
+    effort = ReasoningEffort.HIGH
+    if reasoning:
+        try:
+            effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        except ValueError:
+            console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
+            raise typer.Exit(1)
+    
+    config = CopexConfig(
+        model=chr_model or Model.CLAUDE_OPUS_4_6,
+        reasoning_effort=effort,
+    )
+    if mcp_config:
+        if not mcp_config.exists():
+            console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
+            raise typer.Exit(1)
+        config.mcp_config_file = str(mcp_config)
+
+    council_tasks = _build_council_tasks(
+        task,
+        investigator_model=inv_model,
+        codex_model=cdx_model,
+        gemini_model=gem_model,
+        opus_model=op_model,
+        chair_model=chr_model,
+        reasoning_effort=effort,
+        debate=debate,
+        preset=preset,
+        escalate=escalate,
+    )
+    asyncio.run(
+        _run_fleet(
+            config=config,
+            prompts=[],
+            file=None,
+            config_file=None,
+            max_concurrent=max_concurrent,
+            fail_fast=False,
+            shared_context=shared_context,
+            timeout=timeout,
+            verbose=verbose,
+            output_dir=output_dir,
+            artifact_path=artifact,
+            git_finalize=git_finalize,
+            git_message=git_message,
+            skills=skills or [],
+            exclude_tools=_parse_exclude_tools(exclude_tools),
+            tasks_override=council_tasks,
+        )
+    )
+
+
+def _load_fleet_json_config(path: Path) -> list["FleetTask"]:
+    """Load and validate JSON fleet config."""
+    if not path.exists():
+        raise ValueError(f"Config file not found: {path}")
+
+    try:
+        with open(path, "r", encoding="utf-8") as f:
+            data = json.load(f)
+    except json.JSONDecodeError as exc:
+        raise ValueError(
+            f"Invalid JSON in {path}: {exc.msg} (line {exc.lineno} column {exc.colno})"
+        ) from exc
+
+    if not isinstance(data, dict):
+        raise ValueError("Fleet config must be a JSON object with a top-level 'tasks' list")
+
+    raw_tasks = data.get("tasks")
+    return _parse_fleet_task_specs(raw_tasks, key_name="tasks")
+
+
+def _load_fleet_toml_config(path: Path) -> tuple[dict[str, Any], list["FleetTask"]]:
+    """Load TOML fleet config and return (fleet_section, tasks)."""
+    try:
+        import tomllib  # Python 3.11+
+    except Exception:
+        import tomli as tomllib  # type: ignore
+
+    if not path.exists():
+        raise ValueError(f"File not found: {path}")
+
+    with open(path, "rb") as f:
+        data = tomllib.load(f)
+
+    if not isinstance(data, dict):
+        raise ValueError("Fleet TOML must contain a top-level table/object")
+
+    fleet_section = data.get("fleet", {})
+    if not isinstance(fleet_section, dict):
+        raise ValueError("fleet section must be a table/object")
+
+    raw_tasks = data.get("task")
+    if raw_tasks is None:
+        return fleet_section, []
+    if isinstance(raw_tasks, list) and not raw_tasks:
+        return fleet_section, []
+
+    tasks = _parse_fleet_task_specs(raw_tasks, key_name="task")
+    return fleet_section, tasks
 
 
 async def _run_fleet(
     config: CopexConfig,
     prompts: list[str],
     file: Path | None,
+    config_file: Path | None,
     max_concurrent: int,
     fail_fast: bool,
     shared_context: str | None,
     timeout: float,
     verbose: bool = False,
     output_dir: Path | None = None,
+    artifact_path: Path | None = None,
     git_finalize: bool = True,
     git_message: str | None = None,
+    skills: list[str] | None = None,
+    exclude_tools: list[str] | None = None,
+    tasks_override: list["FleetTask"] | None = None,
 ) -> None:
     """Run fleet tasks with live progress display."""
     from rich.table import Table
@@ -2081,23 +2638,56 @@ async def _run_fleet(
     )
 
     tasks: list[FleetTask] = []
+    fleet_skills = skills or []
+    fleet_excluded = exclude_tools or []
+
+    def _merge_skills(base: list[str], extra: list[str]) -> list[str]:
+        merged: list[str] = []
+        for path in [*base, *extra]:
+            if path not in merged:
+                merged.append(path)
+        return merged
+
+    def _merge_excludes(base: list[str], extra: list[str]) -> list[str]:
+        merged: list[str] = []
+        for tool in [*base, *extra]:
+            if tool not in merged:
+                merged.append(tool)
+        return merged
+
+    # Direct task graph (used by preset modes like council)
+    if tasks_override is not None:
+        tasks = list(tasks_override)
+        for task in tasks:
+            task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
+            task.exclude_tools = _merge_excludes(
+                fleet_excluded,
+                task.exclude_tools or [],
+            )
+
+    # Load tasks from JSON config file
+    elif config_file:
+        try:
+            tasks = _load_fleet_json_config(config_file)
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
+            raise typer.Exit(1)
+        for task in tasks:
+            task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
+            task.exclude_tools = _merge_excludes(
+                fleet_excluded,
+                task.exclude_tools or [],
+            )
 
     # Load tasks from TOML file
-    if file:
+    elif file:
         try:
-            import tomllib  # Python 3.11+
-        except Exception:
-            import tomli as tomllib  # type: ignore
-
-        if not file.exists():
-            console.print(f"[red]File not found: {file}[/red]")
+            fleet_section, parsed_tasks = _load_fleet_toml_config(file)
+        except ValueError as exc:
+            console.print(f"[red]Error: {exc}[/red]")
             raise typer.Exit(1)
 
-        with open(file, "rb") as f:
-            data = tomllib.load(f)
-
         # Apply fleet-level config from file
-        fleet_section = data.get("fleet", {})
         if "max_concurrent" in fleet_section:
             fleet_config.max_concurrent = fleet_section["max_concurrent"]
         if "shared_context" in fleet_section:
@@ -2107,18 +2697,25 @@ async def _run_fleet(
         if "fail_fast" in fleet_section:
             fleet_config.fail_fast = fleet_section["fail_fast"]
 
-        for task_data in data.get("task", []):
-            tasks.append(
-                FleetTask(
-                    id=task_data["id"],
-                    prompt=task_data["prompt"],
-                    depends_on=task_data.get("depends_on", []),
-                )
+        for task in parsed_tasks:
+            task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
+            task.exclude_tools = _merge_excludes(
+                fleet_excluded,
+                task.exclude_tools or [],
             )
+            tasks.append(task)
 
     # Add CLI prompt tasks
-    for i, prompt in enumerate(prompts):
-        tasks.append(FleetTask(id=f"task-{i + 1}", prompt=prompt))
+    if tasks_override is None and not config_file:
+        for i, prompt in enumerate(prompts):
+            tasks.append(
+                FleetTask(
+                    id=f"task-{i + 1}",
+                    prompt=prompt,
+                    skills_dirs=fleet_skills,
+                    exclude_tools=fleet_excluded,
+                )
+            )
 
     if not tasks:
         console.print("[red]No tasks to run[/red]")
@@ -2172,6 +2769,15 @@ async def _run_fleet(
                 task.prompt,
                 task_id=task.id,
                 depends_on=task.depends_on if task.depends_on else None,
+                model=task.model,
+                reasoning_effort=task.reasoning_effort,
+                cwd=task.cwd,
+                skills=task.skills,
+                exclude_tools=task.exclude_tools,
+                mcp_servers=task.mcp_servers,
+                timeout_sec=task.timeout_sec,
+                skills_dirs=task.skills_dirs,
+                on_dependency_failure=task.on_dependency_failure,
             )
 
         with Live(build_table(), console=console, refresh_per_second=4) as live:
@@ -2191,6 +2797,7 @@ async def _run_fleet(
     total_time = time.time() - start_time
     successes = sum(1 for r in results if r.success)
     failures = len(results) - successes
+    git_artifact: dict[str, Any] | None = None
 
     # Summary
     summary_lines = [
@@ -2242,6 +2849,7 @@ async def _run_fleet(
 
         if not GitFinalizer.is_git_repo():
             console.print("[dim]Not a git repository — skipping git finalize[/dim]")
+            git_artifact = {"enabled": True, "success": False, "error": "not a git repository"}
         else:
             # Auto-generate commit message from task descriptions if not provided
             if git_message:
@@ -2256,6 +2864,14 @@ async def _run_fleet(
             console.print("[dim]Detecting changes…[/dim]")
             finalizer = GitFinalizer(message=message)
             git_result = await finalizer.finalize()
+            git_artifact = {
+                "enabled": True,
+                "success": bool(git_result.success),
+                "message": message,
+                "commit_hash": git_result.commit_hash,
+                "files_staged": git_result.files_staged,
+                "error": git_result.error,
+            }
 
             if git_result.success and git_result.commit_hash:
                 console.print(
@@ -2272,6 +2888,76 @@ async def _run_fleet(
                 console.print(
                     f"[red]Git finalize failed: {git_result.error}[/red]"
                 )
+    else:
+        git_artifact = {"enabled": False}
+
+    if artifact_path:
+        result_map = {r.task_id: r for r in results}
+        task_artifacts: list[dict[str, Any]] = []
+
+        total_prompt_tokens = 0
+        total_completion_tokens = 0
+        for task in tasks:
+            result = result_map.get(task.id)
+            response = result.response if result else None
+            prompt_tokens = int(response.prompt_tokens or 0) if response else 0
+            completion_tokens = int(response.completion_tokens or 0) if response else 0
+            total_prompt_tokens += prompt_tokens
+            total_completion_tokens += completion_tokens
+            task_artifacts.append(
+                {
+                    "id": task.id,
+                    "depends_on": task.depends_on,
+                    "on_dependency_failure": (
+                        task.on_dependency_failure.value
+                        if hasattr(task.on_dependency_failure, "value")
+                        else str(task.on_dependency_failure)
+                    ),
+                    "model": (task.model.value if task.model else config.model.value),
+                    "reasoning_effort": (
+                        task.reasoning_effort.value
+                        if task.reasoning_effort
+                        else config.reasoning_effort.value
+                    ),
+                    "status": statuses.get(task.id, "unknown"),
+                    "success": result.success if result else None,
+                    "duration_ms": result.duration_ms if result else None,
+                    "error": str(result.error) if result and result.error else None,
+                    "prompt_tokens": prompt_tokens,
+                    "completion_tokens": completion_tokens,
+                    "usage": response.usage if response else None,
+                    "output_file": (
+                        str((output_dir / f"{task.id}.md").resolve()) if output_dir else None
+                    ),
+                    "content_preview": (
+                        response.content[:500] if response and response.content else None
+                    ),
+                }
+            )
+
+        artifact = {
+            "created_at": datetime.now(UTC).isoformat(),
+            "summary": {
+                "total_tasks": len(tasks),
+                "succeeded": successes,
+                "failed": failures,
+                "duration_seconds": total_time,
+                "prompt_tokens": total_prompt_tokens,
+                "completion_tokens": total_completion_tokens,
+            },
+            "run_config": {
+                "max_concurrent": fleet_config.max_concurrent,
+                "timeout_seconds": fleet_config.timeout,
+                "fail_fast": fleet_config.fail_fast,
+                "shared_context": fleet_config.shared_context,
+            },
+            "git_finalize": git_artifact,
+            "tasks": task_artifacts,
+        }
+
+        artifact_path.parent.mkdir(parents=True, exist_ok=True)
+        artifact_path.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
+        console.print(f"[blue]Run artifact saved to {artifact_path}[/blue]")
 
     if failures > 0:
         raise typer.Exit(1)

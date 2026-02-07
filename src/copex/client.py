@@ -722,6 +722,12 @@ class _SendState:
     streaming_metrics: StreamingMetrics = field(default_factory=StreamingMetrics)
 
 
+@dataclass(frozen=True)
+class _ToolExcludePattern:
+    name: str
+    arg: str | None = None
+
+
 class Copex:
     """Copilot Extended - Resilient wrapper with automatic retry and stuck detection."""
 
@@ -830,6 +836,80 @@ class Copex:
         """Detect tool-state mismatch errors that require session recovery."""
         error_str = str(error).lower()
         return "tool_use_id" in error_str and "tool_result" in error_str
+
+    @staticmethod
+    def _parse_tool_exclude(value: str) -> _ToolExcludePattern | None:
+        trimmed = value.strip()
+        if not trimmed:
+            return None
+        if "(" in trimmed and trimmed.endswith(")"):
+            name, arg = trimmed.split("(", 1)
+            name = name.strip()
+            arg = arg[:-1].strip()
+            if name:
+                return _ToolExcludePattern(name=name.lower(), arg=arg.lower() or None)
+        return _ToolExcludePattern(name=trimmed.lower())
+
+    @staticmethod
+    def _tool_name(tool: Any) -> str | None:
+        if isinstance(tool, dict):
+            name = tool.get("name") or tool.get("tool") or tool.get("id")
+            return str(name) if name else None
+        name = getattr(tool, "name", None) or getattr(tool, "__name__", None)
+        return str(name) if name else None
+
+    @staticmethod
+    def _tool_metadata(tool: Any) -> str:
+        parts: list[str] = []
+        if isinstance(tool, dict):
+            for key in ("name", "description", "command", "args", "arguments"):
+                value = tool.get(key)
+                if isinstance(value, (list, tuple)):
+                    parts.append(" ".join(str(item) for item in value))
+                elif value is not None:
+                    parts.append(str(value))
+        else:
+            for attr in ("name", "description", "__doc__"):
+                value = getattr(tool, attr, None)
+                if isinstance(value, str):
+                    parts.append(value)
+        return " ".join(parts).lower()
+
+    def _filter_tools(self, tools: list[Any] | None) -> list[Any] | None:
+        if not tools:
+            return tools
+        if not self.config.excluded_tools:
+            return tools
+        patterns = [
+            pattern
+            for raw in self.config.excluded_tools
+            if (pattern := self._parse_tool_exclude(raw)) is not None
+        ]
+        if not patterns:
+            return tools
+        filtered: list[Any] = []
+        for tool in tools:
+            name = self._tool_name(tool)
+            if not name:
+                filtered.append(tool)
+                continue
+            name_lower = name.lower()
+            metadata: str | None = None
+            excluded = False
+            for pattern in patterns:
+                if name_lower != pattern.name:
+                    continue
+                if pattern.arg is None:
+                    excluded = True
+                    break
+                if metadata is None:
+                    metadata = self._tool_metadata(tool)
+                if pattern.arg in metadata:
+                    excluded = True
+                    break
+            if not excluded:
+                filtered.append(tool)
+        return filtered
 
     def _calculate_delay(self, attempt: int, error: Exception | None = None) -> float:
         """Calculate delay with exponential backoff and jitter using AdaptiveRetry.
@@ -1225,6 +1305,7 @@ class Copex:
             self._current_model = original_model
 
         session = await self._ensure_session()
+        filtered_tools = self._filter_tools(tools)
         retries = 0
         auto_continues = 0
         last_error: Exception | None = None
@@ -1240,7 +1321,7 @@ class Copex:
 
         while True:
             try:
-                result = await self._send_once(session, prompt, tools, on_chunk)
+                result = await self._send_once(session, prompt, filtered_tools, on_chunk)
                 result.retries = retries
                 result.auto_continues = auto_continues
                 tokens = None
@@ -1435,7 +1516,10 @@ class Copex:
         unsubscribe = session.on(on_event)
 
         try:
-            await session.send({"prompt": prompt})
+            payload: dict[str, Any] = {"prompt": prompt}
+            if tools is not None:
+                payload["tools"] = tools
+            await session.send(payload)
             # Activity-based timeout: only timeout if no events received for timeout period
             while not state.done.is_set():
                 try:
