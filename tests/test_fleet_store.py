@@ -216,7 +216,8 @@ class TestFleetWithPersistence:
         fleet.add("Task A", task_id="a")
         fleet.add("Task B", task_id="b")
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             results = await fleet.run()
 
         assert all(r.success for r in results)
@@ -243,7 +244,8 @@ class TestFleetWithPersistence:
         fleet = Fleet()
         fleet.add("Task", task_id="t1")
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             results = await fleet.run()
 
         assert len(results) == 1
@@ -274,7 +276,8 @@ class TestFleetResume:
         # Resume should only run b and c (a is already done)
         mock_copex = _make_mock_copex(Response(content="resumed"))
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             results = await Fleet.resume(db, run_id)
 
         assert len(results) == 2
@@ -315,7 +318,8 @@ class TestFleetResume:
 
         mock_copex = _make_mock_copex(Response(content="ok"))
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             await Fleet.resume(db, run_id)
 
         store = FleetStore(db)

@@ -114,7 +114,8 @@ class TestFleetCoordinator:
             FleetTask(id="c", prompt="C"),
         ]
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             results = await coord.run(tasks)
 
         assert len(results) == 3
@@ -139,7 +140,8 @@ class TestFleetCoordinator:
         ]
         coord = FleetCoordinator(CopexConfig())
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             results = await coord.run(tasks)
 
         assert results[0].success
@@ -167,7 +169,8 @@ class TestFleetCoordinator:
         coord = FleetCoordinator(CopexConfig())
         config = FleetConfig(fail_fast=True)
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             results = await coord.run(tasks, config=config)
 
         assert not results[0].success
@@ -189,7 +192,8 @@ class TestFleetCoordinator:
         ]
         coord = FleetCoordinator(CopexConfig())
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             results = await coord.run(tasks)
 
         assert not results[0].success
@@ -209,7 +213,8 @@ class TestFleetCoordinator:
         tasks = [FleetTask(id="t1", prompt="hello")]
         coord = FleetCoordinator(CopexConfig())
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             await coord.run(tasks, on_status=_on_status)
 
         task_statuses = [s for tid, s in statuses if tid == "t1"]
@@ -250,7 +255,8 @@ class TestFleet:
         fleet = Fleet(fleet_config=cfg)
         fleet.add("Write tests", task_id="t1")
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             await fleet.run()
 
         sent_prompt = mock_copex.send.call_args[0][0]
@@ -547,7 +553,8 @@ class TestFleetPromptImmutability:
         original_prompt = fleet._tasks[0].prompt
         assert original_prompt == "Original prompt"
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             await fleet.run()
 
         # Task prompt should NOT have been modified
@@ -567,7 +574,8 @@ class TestFleetPromptImmutability:
         fleet = Fleet(fleet_config=cfg)
         fleet.add("My prompt", task_id="t1")
 
-        with patch("copex.fleet.Copex", return_value=mock_copex):
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
             await fleet.run()
             # Reset mock for second call
             mock_copex.send.reset_mock()
