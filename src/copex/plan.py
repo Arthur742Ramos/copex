@@ -775,9 +775,7 @@ class PlanEditor:
         for s in self.plan.steps:
             if s.depends_on:
                 s.depends_on = [
-                    d - 1 if d > step_number else d
-                    for d in s.depends_on
-                    if d != step_number
+                    d - 1 if d > step_number else d for d in s.depends_on if d != step_number
                 ]
 
         return step
@@ -824,10 +822,7 @@ class PlanEditor:
         # Update dependencies to account for the new step
         for s in self.plan.steps:
             if s.depends_on and s != new_step:
-                s.depends_on = [
-                    d + 1 if d > after_step else d
-                    for d in s.depends_on
-                ]
+                s.depends_on = [d + 1 if d > after_step else d for d in s.depends_on]
 
         return new_step
 
@@ -996,11 +991,13 @@ class PlanCheckpoint:
 
         for s in plan.steps:
             if s.number < step_number and s.status == StepStatus.COMPLETED:
-                prior_steps.append({
-                    "number": s.number,
-                    "description": s.description,
-                    "result_preview": (s.result or "")[:200],
-                })
+                prior_steps.append(
+                    {
+                        "number": s.number,
+                        "description": s.description,
+                        "result_preview": (s.result or "")[:200],
+                    }
+                )
                 skip_context[f"step_{s.number}_completed"] = True
                 skip_context[f"step_{s.number}_result"] = s.result
 

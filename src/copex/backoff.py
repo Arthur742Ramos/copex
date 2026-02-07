@@ -23,25 +23,25 @@ logger = logging.getLogger(__name__)
 class ErrorCategory(str, Enum):
     """Categories of errors for backoff strategy selection."""
 
-    RATE_LIMIT = "rate_limit"      # 429 / rate limit errors
-    NETWORK = "network"            # Connection errors, timeouts
-    SERVER = "server"              # 5xx server errors
-    AUTH = "auth"                  # Authentication errors (usually non-retryable)
-    CLIENT = "client"              # 4xx client errors (usually non-retryable)
-    TRANSIENT = "transient"        # Other transient errors
-    UNKNOWN = "unknown"            # Unclassified errors
+    RATE_LIMIT = "rate_limit"  # 429 / rate limit errors
+    NETWORK = "network"  # Connection errors, timeouts
+    SERVER = "server"  # 5xx server errors
+    AUTH = "auth"  # Authentication errors (usually non-retryable)
+    CLIENT = "client"  # 4xx client errors (usually non-retryable)
+    TRANSIENT = "transient"  # Other transient errors
+    UNKNOWN = "unknown"  # Unclassified errors
 
 
 @dataclass
 class BackoffStrategy:
     """Configuration for a backoff strategy."""
 
-    base_delay: float = 1.0       # Base delay in seconds
-    max_delay: float = 60.0       # Maximum delay cap
-    multiplier: float = 2.0       # Exponential multiplier
-    jitter: float = 0.1           # Random jitter factor (0-1)
-    max_retries: int = 5          # Maximum retry attempts
-    retryable: bool = True        # Whether errors of this type are retryable
+    base_delay: float = 1.0  # Base delay in seconds
+    max_delay: float = 60.0  # Maximum delay cap
+    multiplier: float = 2.0  # Exponential multiplier
+    jitter: float = 0.1  # Random jitter factor (0-1)
+    max_retries: int = 5  # Maximum retry attempts
+    retryable: bool = True  # Whether errors of this type are retryable
 
     def compute_delay(self, attempt: int) -> float:
         """Compute delay for a given attempt number (1-indexed).
@@ -69,11 +69,11 @@ class BackoffStrategy:
 # Default strategies per error category
 DEFAULT_STRATEGIES: dict[ErrorCategory, BackoffStrategy] = {
     ErrorCategory.RATE_LIMIT: BackoffStrategy(
-        base_delay=5.0,      # Start with 5s for rate limits
-        max_delay=120.0,     # Cap at 2 minutes
+        base_delay=5.0,  # Start with 5s for rate limits
+        max_delay=120.0,  # Cap at 2 minutes
         multiplier=2.0,
         jitter=0.2,
-        max_retries=10,      # More retries for rate limits
+        max_retries=10,  # More retries for rate limits
     ),
     ErrorCategory.NETWORK: BackoffStrategy(
         base_delay=1.0,
@@ -93,7 +93,7 @@ DEFAULT_STRATEGIES: dict[ErrorCategory, BackoffStrategy] = {
         base_delay=1.0,
         max_delay=5.0,
         multiplier=1.0,
-        max_retries=1,       # Auth errors usually shouldn't be retried
+        max_retries=1,  # Auth errors usually shouldn't be retried
         retryable=False,
     ),
     ErrorCategory.CLIENT: BackoffStrategy(
@@ -123,28 +123,24 @@ DEFAULT_STRATEGIES: dict[ErrorCategory, BackoffStrategy] = {
 # Compiled regex patterns for efficient error categorization (v1.9.0)
 # Using context-aware patterns to avoid false positives (e.g., "line 500" won't match)
 _RE_RATE_LIMIT = re.compile(
-    r"\brate\s*limit|(?:^|http\s*|status\s*|code\s*|error\s*)429\b|too many requests",
-    re.IGNORECASE
+    r"\brate\s*limit|(?:^|http\s*|status\s*|code\s*|error\s*)429\b|too many requests", re.IGNORECASE
 )
-_RE_NETWORK = re.compile(
-    r"\b(connection|timeout|network|refused|socket)\b",
-    re.IGNORECASE
-)
+_RE_NETWORK = re.compile(r"\b(connection|timeout|network|refused|socket)\b", re.IGNORECASE)
 _RE_AUTH = re.compile(
     r"(?:^|http\s*|status\s*|code\s*|error\s*)(401|403)\b|\bunauthorized\b|\bforbidden\b",
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 # Match HTTP 5xx status codes in HTTP context (not just any "500")
 _RE_SERVER = re.compile(
     r"(?:^|http\s*|status\s*|code\s*|error\s*)(5\d{2})\b|internal server|service unavailable|bad gateway",
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 # Match HTTP 4xx status codes (excluding 401, 403, 429) in HTTP context
 # Note: "not found" and "bad request" only match if they appear as HTTP error descriptions
 _RE_CLIENT = re.compile(
     r"(?:^|http\s*|status\s*|code\s*|error\s*)(4(?:0[02-8]|1[0-79]|[2-9]\d))\b|"
     r"(?:^|http\s*|error\s*)(?:bad request|not found)\b",
-    re.IGNORECASE
+    re.IGNORECASE,
 )
 
 # Sets for O(1) type name lookups
@@ -300,10 +296,7 @@ class AdaptiveRetry:
                 state.record_error(e, category)
 
                 # Check if retryable
-                should_retry = (
-                    strategy.retryable or
-                    type(e) in retryable
-                )
+                should_retry = strategy.retryable or type(e) in retryable
 
                 if not should_retry:
                     logger.debug(f"Non-retryable error category: {category}")
@@ -340,8 +333,7 @@ class AdaptiveRetry:
                     logger.info(f"Rate limit: waiting {e.retry_after}s (retry-after header)")
 
                 logger.info(
-                    f"Retry {state.attempt}: {category.value} error, "
-                    f"waiting {delay:.1f}s ({e})"
+                    f"Retry {state.attempt}: {category.value} error, waiting {delay:.1f}s ({e})"
                 )
 
                 if self.on_retry:
@@ -362,13 +354,16 @@ class AdaptiveRetry:
         Returns:
             Decorator function
         """
+
         def decorator(func: Callable[..., Any]) -> Callable[..., Any]:
             async def wrapper(*args: Any, **kwargs: Any) -> Any:
                 return await self.execute(
                     lambda: func(*args, **kwargs),
                     retryable_exceptions=retryable_exceptions,
                 )
+
             return wrapper
+
         return decorator
 
 

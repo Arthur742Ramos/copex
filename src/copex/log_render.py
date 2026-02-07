@@ -33,9 +33,7 @@ def render_jsonl(stream: TextIO, console: Console) -> None:
         try:
             event = json.loads(line)
         except json.JSONDecodeError as exc:
-            console.print(
-                Text(f"Invalid JSON on line {line_no}: {exc}", style=Theme.ERROR)
-            )
+            console.print(Text(f"Invalid JSON on line {line_no}: {exc}", style=Theme.ERROR))
             continue
         _render_event(event, state, console)
 
@@ -170,7 +168,9 @@ def _extract_data(event: dict[str, Any]) -> dict[str, Any] | None:
     return None
 
 
-def _classify_event(event_type: str | None, event: dict[str, Any], data: dict[str, Any] | None) -> str:
+def _classify_event(
+    event_type: str | None, event: dict[str, Any], data: dict[str, Any] | None
+) -> str:
     if event_type:
         t = event_type.lower()
     else:
@@ -400,7 +400,9 @@ def _print_section(
             console.print(Text(content, style=content_style or style))
 
 
-def _print_tool_partial(console: Console, name: str, output: str | None, timestamp: str | None) -> None:
+def _print_tool_partial(
+    console: Console, name: str, output: str | None, timestamp: str | None
+) -> None:
     header = Text()
     if timestamp:
         header.append(f"{timestamp} ", style=Theme.MUTED)
@@ -538,7 +540,9 @@ def _flush_buffers(state: RenderState, console: Console, timestamp: str | None) 
         state.reasoning_buffer = ""
         console.print()
     if state.message_buffer:
-        _print_section(console, "Assistant", state.message_buffer, timestamp, Theme.PRIMARY, markdown=True)
+        _print_section(
+            console, "Assistant", state.message_buffer, timestamp, Theme.PRIMARY, markdown=True
+        )
         state.message_buffer = ""
         console.print()
 

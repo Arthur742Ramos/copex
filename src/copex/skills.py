@@ -53,7 +53,9 @@ class SkillDiscovery:
     """Handles skill auto-discovery from various locations."""
 
     repo_root: Path | None = None
-    user_skills_dir: Path = field(default_factory=lambda: Path.home() / ".config" / "copex" / "skills")
+    user_skills_dir: Path = field(
+        default_factory=lambda: Path.home() / ".config" / "copex" / "skills"
+    )
     explicit_dirs: list[Path] = field(default_factory=list)
     disabled_skills: set[str] = field(default_factory=set)
     auto_discover: bool = True

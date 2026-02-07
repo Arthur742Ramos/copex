@@ -42,6 +42,7 @@ class Condition:
         except Exception as e:
             # Log but don't crash - default to True (execute step)
             import logging
+
             logging.warning(f"Condition evaluation failed: {e}")
             return True
 
@@ -103,10 +104,10 @@ class ConditionContext:
     - Custom variables
     """
 
-    step_outputs: dict[int, str]       # step_index -> output
-    step_statuses: dict[int, str]      # step_index -> status
-    env: Mapping[str, str]             # Environment variables
-    variables: dict[str, Any]          # Custom variables
+    step_outputs: dict[int, str]  # step_index -> output
+    step_statuses: dict[int, str]  # step_index -> status
+    env: Mapping[str, str]  # Environment variables
+    variables: dict[str, Any]  # Custom variables
 
     def get_step_output(self, index: int) -> str:
         """Get the output of a step by index."""
@@ -137,6 +138,7 @@ class ConditionContext:
     def empty(cls) -> "ConditionContext":
         """Create an empty context."""
         import os
+
         return cls(
             step_outputs={},
             step_statuses={},
@@ -195,6 +197,7 @@ def _resolve_reference(ref_type: str, ref_path: str, context: ConditionContext) 
 
 def _substitute_references(expr: str, context: ConditionContext) -> str:
     """Substitute all references in an expression with their values."""
+
     def replace(match: re.Match[str]) -> str:
         ref_type = match.group(1)
         ref_path = match.group(2)
@@ -249,8 +252,9 @@ def _parse_value(val_str: str) -> Any:
     val_str = val_str.strip()
 
     # Quoted string
-    if (val_str.startswith("'") and val_str.endswith("'")) or \
-       (val_str.startswith('"') and val_str.endswith('"')):
+    if (val_str.startswith("'") and val_str.endswith("'")) or (
+        val_str.startswith('"') and val_str.endswith('"')
+    ):
         return val_str[1:-1]
 
     # Boolean
@@ -276,6 +280,7 @@ def _parse_value(val_str: str) -> Any:
 
 
 # Convenience functions for building conditional steps
+
 
 def when(condition: str | Condition) -> Condition:
     """Create a condition from a string expression or existing Condition.

@@ -24,7 +24,7 @@ _ALLOWED_COMMAND_RE = re.compile(r"^[a-zA-Z0-9_./@-]+$")
 
 # Arg allowlist: block shell metacharacters but allow filesystem path characters
 # (spaces, backslashes, colons, etc. are safe since we use subprocess exec, not shell)
-_BLOCKED_ARG_CHARS_RE = re.compile(r'[\x00;|&$`(){}<>\n\r]')
+_BLOCKED_ARG_CHARS_RE = re.compile(r"[\x00;|&$`(){}<>\n\r]")
 
 # Maximum size for MCP config files (1 MB)
 _MAX_CONFIG_SIZE = 1_048_576
@@ -215,9 +215,7 @@ class StdioTransport(MCPTransport):
         self._pending.clear()
         for future in pending.values():
             if not future.done():
-                future.set_exception(
-                    ConnectionError("MCP transport closed unexpectedly")
-                )
+                future.set_exception(ConnectionError("MCP transport closed unexpectedly"))
 
     async def _write(self, message: dict[str, Any]) -> None:
         """Write a message to the server."""
@@ -599,9 +597,7 @@ def load_mcp_config(path: Path | str | None = None) -> list[MCPServerConfig]:
     # Enforce size limit to prevent memory exhaustion
     file_size = config_path.stat().st_size
     if file_size > _MAX_CONFIG_SIZE:
-        raise ValueError(
-            f"MCP config file too large ({file_size} bytes, max {_MAX_CONFIG_SIZE})"
-        )
+        raise ValueError(f"MCP config file too large ({file_size} bytes, max {_MAX_CONFIG_SIZE})")
 
     with open(config_path, "r", encoding="utf-8") as f:
         data = json.load(f)

@@ -153,9 +153,7 @@ class FleetStore:
 
     def get_run(self, run_id: str) -> RunRecord | None:
         """Get a run record by ID."""
-        row = self._conn.execute(
-            "SELECT * FROM fleet_runs WHERE run_id = ?", (run_id,)
-        ).fetchone()
+        row = self._conn.execute("SELECT * FROM fleet_runs WHERE run_id = ?", (run_id,)).fetchone()
         if not row:
             return None
         return RunRecord(

@@ -550,7 +550,9 @@ async def run_interactive(config: "CopexConfig") -> None:
                     new_model = Model(model_name)
                     client.config.model = new_model
                     save_last_model(new_model)
-                    normalized, warning = normalize_reasoning_effort(new_model, client.config.reasoning_effort)
+                    normalized, warning = normalize_reasoning_effort(
+                        new_model, client.config.reasoning_effort
+                    )
                     if warning:
                         console.print(f"[{Colors.WARNING}]{warning}[/{Colors.WARNING}]")
                     client.config.reasoning_effort = normalized
@@ -559,10 +561,14 @@ async def run_interactive(config: "CopexConfig") -> None:
                         new_model.value.split("/")[-1],
                         normalized.value,
                     )
-                    console.print(f"[{Colors.SUCCESS}]Switched to {new_model.value}[/{Colors.SUCCESS}]")
+                    console.print(
+                        f"[{Colors.SUCCESS}]Switched to {new_model.value}[/{Colors.SUCCESS}]"
+                    )
                 except ValueError:
                     console.print(f"[{Colors.ERROR}]Unknown model: {model_name}[/{Colors.ERROR}]")
-                    console.print(f"[{Colors.TEXT_DIM}]Use /models to see available options[/{Colors.TEXT_DIM}]")
+                    console.print(
+                        f"[{Colors.TEXT_DIM}]Use /models to see available options[/{Colors.TEXT_DIM}]"
+                    )
                 continue
 
             if cmd.startswith("/reasoning "):
@@ -580,7 +586,9 @@ async def run_interactive(config: "CopexConfig") -> None:
                         client.config.model.value.split("/")[-1],
                         normalized.value,
                     )
-                    console.print(f"[{Colors.SUCCESS}]Reasoning set to {normalized.value}[/{Colors.SUCCESS}]")
+                    console.print(
+                        f"[{Colors.SUCCESS}]Reasoning set to {normalized.value}[/{Colors.SUCCESS}]"
+                    )
                 except ValueError:
                     valid = ", ".join(r.value for r in ReasoningEffort)
                     console.print(f"[{Colors.ERROR}]Invalid level: {level}[/{Colors.ERROR}]")
@@ -628,7 +636,9 @@ async def _stream_message(console: Console, client: "Copex", prompt: str) -> Non
             state.phase = "tool_call"
         elif chunk.type == "tool_result":
             for tool in reversed(state.tool_calls):
-                if (chunk.tool_id and tool.tool_id == chunk.tool_id) or tool.name == chunk.tool_name:
+                if (
+                    chunk.tool_id and tool.tool_id == chunk.tool_id
+                ) or tool.name == chunk.tool_name:
                     if tool.status == "running":
                         tool.status = "success" if chunk.tool_success is not False else "error"
                         tool.result = chunk.tool_result
@@ -726,17 +736,31 @@ def _print_help(console: Console) -> None:
         ("exit", "Quit"),
     ]
     for cmd, desc in cmds:
-        console.print(f"  [{Colors.PRIMARY}]{cmd:22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]{desc}[/{Colors.TEXT_MUTED}]")
+        console.print(
+            f"  [{Colors.PRIMARY}]{cmd:22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]{desc}[/{Colors.TEXT_MUTED}]"
+        )
 
     console.print()
     console.print("[bold]Keyboard[/bold]")
     console.print()
-    console.print(f"  [{Colors.PRIMARY}]{'Enter':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Send message[/{Colors.TEXT_MUTED}]")
-    console.print(f"  [{Colors.PRIMARY}]{'Esc + Enter':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]New line[/{Colors.TEXT_MUTED}]")
-    console.print(f"  [{Colors.PRIMARY}]{'Tab':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Complete command[/{Colors.TEXT_MUTED}]")
-    console.print(f"  [{Colors.PRIMARY}]{'↑ / ↓':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]History navigation[/{Colors.TEXT_MUTED}]")
-    console.print(f"  [{Colors.PRIMARY}]{'Ctrl+L':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Clear screen[/{Colors.TEXT_MUTED}]")
-    console.print(f"  [{Colors.PRIMARY}]{'Ctrl+C':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Cancel/Exit[/{Colors.TEXT_MUTED}]")
+    console.print(
+        f"  [{Colors.PRIMARY}]{'Enter':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Send message[/{Colors.TEXT_MUTED}]"
+    )
+    console.print(
+        f"  [{Colors.PRIMARY}]{'Esc + Enter':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]New line[/{Colors.TEXT_MUTED}]"
+    )
+    console.print(
+        f"  [{Colors.PRIMARY}]{'Tab':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Complete command[/{Colors.TEXT_MUTED}]"
+    )
+    console.print(
+        f"  [{Colors.PRIMARY}]{'↑ / ↓':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]History navigation[/{Colors.TEXT_MUTED}]"
+    )
+    console.print(
+        f"  [{Colors.PRIMARY}]{'Ctrl+L':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Clear screen[/{Colors.TEXT_MUTED}]"
+    )
+    console.print(
+        f"  [{Colors.PRIMARY}]{'Ctrl+C':22}[/{Colors.PRIMARY}] [{Colors.TEXT_MUTED}]Cancel/Exit[/{Colors.TEXT_MUTED}]"
+    )
     console.print()
 
 
@@ -756,9 +780,15 @@ def _print_status(console: Console, client: "Copex") -> None:
     except ValueError:
         display_path = str(cwd)
 
-    console.print(f"  [{Colors.TEXT_DIM}]Directory:[/{Colors.TEXT_DIM}]  [{Colors.TEXT_MUTED}]{display_path}[/{Colors.TEXT_MUTED}]")
-    console.print(f"  [{Colors.TEXT_DIM}]Model:[/{Colors.TEXT_DIM}]      [{Colors.PRIMARY}]{client.config.model.value}[/{Colors.PRIMARY}]")
-    console.print(f"  [{Colors.TEXT_DIM}]Reasoning:[/{Colors.TEXT_DIM}]  [{Colors.ACCENT}]{client.config.reasoning_effort.value}[/{Colors.ACCENT}]")
+    console.print(
+        f"  [{Colors.TEXT_DIM}]Directory:[/{Colors.TEXT_DIM}]  [{Colors.TEXT_MUTED}]{display_path}[/{Colors.TEXT_MUTED}]"
+    )
+    console.print(
+        f"  [{Colors.TEXT_DIM}]Model:[/{Colors.TEXT_DIM}]      [{Colors.PRIMARY}]{client.config.model.value}[/{Colors.PRIMARY}]"
+    )
+    console.print(
+        f"  [{Colors.TEXT_DIM}]Reasoning:[/{Colors.TEXT_DIM}]  [{Colors.ACCENT}]{client.config.reasoning_effort.value}[/{Colors.ACCENT}]"
+    )
     console.print()
 
 
@@ -771,7 +801,9 @@ def _print_models(console: Console, current: "Model") -> None:
     console.print()
     for model in Model:
         if model == current:
-            console.print(f"  [{Colors.SUCCESS}]→[/{Colors.SUCCESS}] [{Colors.PRIMARY} bold]{model.value}[/{Colors.PRIMARY} bold] [{Colors.TEXT_DIM}](current)[/{Colors.TEXT_DIM}]")
+            console.print(
+                f"  [{Colors.SUCCESS}]→[/{Colors.SUCCESS}] [{Colors.PRIMARY} bold]{model.value}[/{Colors.PRIMARY} bold] [{Colors.TEXT_DIM}](current)[/{Colors.TEXT_DIM}]"
+            )
         else:
             console.print(f"    [{Colors.TEXT_MUTED}]{model.value}[/{Colors.TEXT_MUTED}]")
     console.print()

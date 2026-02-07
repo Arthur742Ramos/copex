@@ -9,18 +9,18 @@ from __future__ import annotations
 from dataclasses import dataclass
 from enum import Enum
 
-from copex.plan import Plan, StepStatus
+from copex.plan import Plan
 
 
 class StatusIndicator(Enum):
     """Visual status indicators for diagram rendering."""
 
-    PENDING = ("○", "#9e9e9e", "pending")      # Gray
-    RUNNING = ("◐", "#2196f3", "running")      # Blue
+    PENDING = ("○", "#9e9e9e", "pending")  # Gray
+    RUNNING = ("◐", "#2196f3", "running")  # Blue
     COMPLETED = ("●", "#4caf50", "completed")  # Green
-    FAILED = ("✗", "#f44336", "failed")        # Red
-    SKIPPED = ("◌", "#ff9800", "skipped")      # Orange
-    BLOCKED = ("⊘", "#9c27b0", "blocked")      # Purple
+    FAILED = ("✗", "#f44336", "failed")  # Red
+    SKIPPED = ("◌", "#ff9800", "skipped")  # Orange
+    BLOCKED = ("⊘", "#9c27b0", "blocked")  # Purple
 
     def __init__(self, symbol: str, color: str, label: str) -> None:
         self.symbol = symbol
@@ -31,16 +31,18 @@ class StatusIndicator(Enum):
 @dataclass
 class DependencyEdge:
     """Represents a dependency edge between steps."""
+
     from_step: int  # Step index (1-indexed)
-    to_step: int    # Step index (1-indexed)
+    to_step: int  # Step index (1-indexed)
 
 
 @dataclass
 class ParallelGroup:
     """A group of steps that can run in parallel."""
-    level: int            # Execution level (topological depth)
+
+    level: int  # Execution level (topological depth)
     step_numbers: list[int]  # Step numbers in this group
-    can_parallelize: bool    # True if multiple steps at this level
+    can_parallelize: bool  # True if multiple steps at this level
 
 
 def analyze_dependencies(plan: Plan) -> list[DependencyEdge]:
@@ -118,11 +120,13 @@ def find_parallel_groups(plan: Plan) -> list[ParallelGroup]:
     groups: list[ParallelGroup] = []
     for level in sorted(level_groups.keys()):
         steps = sorted(level_groups[level])
-        groups.append(ParallelGroup(
-            level=level,
-            step_numbers=steps,
-            can_parallelize=len(steps) > 1,
-        ))
+        groups.append(
+            ParallelGroup(
+                level=level,
+                step_numbers=steps,
+                can_parallelize=len(steps) > 1,
+            )
+        )
 
     return groups
 
@@ -130,7 +134,11 @@ def find_parallel_groups(plan: Plan) -> list[ParallelGroup]:
 def _get_status_indicator(step) -> StatusIndicator:
     """Get the status indicator for a step."""
     if hasattr(step, "status"):
-        status_str = str(step.status.value).lower() if hasattr(step.status, "value") else str(step.status).lower()
+        status_str = (
+            str(step.status.value).lower()
+            if hasattr(step.status, "value")
+            else str(step.status).lower()
+        )
         for indicator in StatusIndicator:
             if indicator.label == status_str:
                 return indicator
@@ -174,7 +182,7 @@ def _render_dag_mermaid(plan: Plan, show_parallel: bool, show_legend: bool) -> s
     lines.append("graph TD")
 
     # Title
-    lines.append(f"    title[\"📋 {_escape_mermaid(plan.task)}\"]")
+    lines.append(f'    title["📋 {_escape_mermaid(plan.task)}"]')
     lines.append("    style title fill:#e1f5fe,stroke:#01579b,stroke-width:2px")
     lines.append("")
 
@@ -219,7 +227,9 @@ def _render_dag_mermaid(plan: Plan, show_parallel: bool, show_legend: bool) -> s
     lines.append("    %% Status-based styling")
     for step in plan.steps:
         indicator = _get_status_indicator(step)
-        lines.append(f"    style step{step.number} fill:{indicator.color},stroke:#333,stroke-width:2px,color:white")
+        lines.append(
+            f"    style step{step.number} fill:{indicator.color},stroke:#333,stroke-width:2px,color:white"
+        )
 
     # Highlight parallel groups
     if show_parallel and parallel_groups:
@@ -227,11 +237,15 @@ def _render_dag_mermaid(plan: Plan, show_parallel: bool, show_legend: bool) -> s
         lines.append("    %% Parallel group subgraphs")
         for group in parallel_groups:
             if group.can_parallelize:
-                lines.append(f"    subgraph parallel_{group.level}[\"⚡ Parallel Group L{group.level}\"]")
+                lines.append(
+                    f'    subgraph parallel_{group.level}["⚡ Parallel Group L{group.level}"]'
+                )
                 for step_num in group.step_numbers:
                     lines.append(f"        step{step_num}")
                 lines.append("    end")
-                lines.append(f"    style parallel_{group.level} fill:#fff3e0,stroke:#ff9800,stroke-dasharray: 5 5")
+                lines.append(
+                    f"    style parallel_{group.level} fill:#fff3e0,stroke:#ff9800,stroke-dasharray: 5 5"
+                )
 
     # Legend
     if show_legend:
@@ -241,8 +255,12 @@ def _render_dag_mermaid(plan: Plan, show_parallel: bool, show_legend: bool) -> s
         lines.append("        direction LR")
         for indicator in StatusIndicator:
             if indicator != StatusIndicator.BLOCKED:
-                lines.append(f'        legend_{indicator.label}["{indicator.symbol} {indicator.label}"]')
-                lines.append(f"        style legend_{indicator.label} fill:{indicator.color},color:white")
+                lines.append(
+                    f'        legend_{indicator.label}["{indicator.symbol} {indicator.label}"]'
+                )
+                lines.append(
+                    f"        style legend_{indicator.label} fill:{indicator.color},color:white"
+                )
         lines.append("    end")
 
     return "\n".join(lines)
@@ -280,7 +298,9 @@ def _render_dag_ascii(plan: Plan, show_parallel: bool, show_legend: bool) -> str
             if step_level != current_level:
                 current_level = step_level
                 if group.step_numbers[0] == step.number:  # First in group
-                    parallel_label = f"─── ⚡ Parallel Group (L{step_level}, {len(group.step_numbers)} steps) "
+                    parallel_label = (
+                        f"─── ⚡ Parallel Group (L{step_level}, {len(group.step_numbers)} steps) "
+                    )
                     lines.append(f"║ {parallel_label:─<{width - 4}} ║")
 
         # Status indicator
@@ -315,7 +335,9 @@ def _render_dag_ascii(plan: Plan, show_parallel: bool, show_legend: bool) -> str
     # Legend
     if show_legend:
         lines.append("")
-        legend_parts = [f"{ind.symbol} {ind.label}" for ind in StatusIndicator if ind != StatusIndicator.BLOCKED]
+        legend_parts = [
+            f"{ind.symbol} {ind.label}" for ind in StatusIndicator if ind != StatusIndicator.BLOCKED
+        ]
         lines.append("Legend: " + "  │  ".join(legend_parts))
         if show_parallel:
             lines.append("        [∥N] = N parallel steps")
@@ -342,7 +364,9 @@ def _render_dag_dot(plan: Plan, show_parallel: bool) -> str:
         indicator = _get_status_indicator(step)
         label = f"{indicator.symbol} Step {step.number}\\n{_escape_dot(step.description[:30])}"
         color = indicator.color
-        lines.append(f'    step{step.number} [label="{label}", fillcolor="{color}", style="filled,rounded", fontcolor="white"];')
+        lines.append(
+            f'    step{step.number} [label="{label}", fillcolor="{color}", style="filled,rounded", fontcolor="white"];'
+        )
 
     lines.append("")
 
@@ -464,28 +488,18 @@ def _truncate(text: str, max_len: int) -> str:
     """Truncate text with ellipsis if too long."""
     if len(text) <= max_len:
         return text
-    return text[:max_len - 3] + "..."
+    return text[: max_len - 3] + "..."
 
 
 def _escape_mermaid(text: str) -> str:
     """Escape special characters for Mermaid."""
     # Mermaid uses specific syntax, escape quotes and special chars
-    return (
-        text.replace('"', "'")
-        .replace("<", "&lt;")
-        .replace(">", "&gt;")
-        .replace("&", "&amp;")
-    )
+    return text.replace('"', "'").replace("<", "&lt;").replace(">", "&gt;").replace("&", "&amp;")
 
 
 def _escape_dot(text: str) -> str:
     """Escape special characters for GraphViz DOT."""
-    return (
-        text.replace('"', '\\"')
-        .replace("\n", "\\n")
-        .replace("<", "\\<")
-        .replace(">", "\\>")
-    )
+    return text.replace('"', '\\"').replace("\n", "\\n").replace("<", "\\<").replace(">", "\\>")
 
 
 # Convenience functions for CLI
@@ -514,8 +528,12 @@ def visualize_plan(
     elif format == "tree":
         return render_simple_tree(plan)
     elif format == "dag":
-        return render_dag_with_status(plan, format="mermaid", show_parallel=show_parallel, show_legend=show_status)
+        return render_dag_with_status(
+            plan, format="mermaid", show_parallel=show_parallel, show_legend=show_status
+        )
     elif format == "dot":
         return render_dag_with_status(plan, format="dot", show_parallel=show_parallel)
     else:
-        raise ValueError(f"Unknown format: {format}. Use 'ascii', 'mermaid', 'tree', 'dag', or 'dot'")
+        raise ValueError(
+            f"Unknown format: {format}. Use 'ascii', 'mermaid', 'tree', 'dag', or 'dot'"
+        )

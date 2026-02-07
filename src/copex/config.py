@@ -200,9 +200,7 @@ class CopexConfig(BaseModel):
     skill_directories: list[str] = Field(
         default_factory=list, description="Explicit skill directories to load"
     )
-    disabled_skills: list[str] = Field(
-        default_factory=list, description="Skills to disable"
-    )
+    disabled_skills: list[str] = Field(default_factory=list, description="Skills to disable")
     auto_discover_skills: bool = Field(
         default=True, description="Auto-discover skills from repo and user dirs"
     )

@@ -1218,7 +1218,9 @@ class RalphUI:
 
         # Response preview (truncated)
         if response_preview:
-            preview = response_preview[:200] + "..." if len(response_preview) > 200 else response_preview
+            preview = (
+                response_preview[:200] + "..." if len(response_preview) > 200 else response_preview
+            )
             self.console.print(Text(f"  └─ {preview}", style=Theme.MUTED))
         self.console.print()
 
@@ -1417,7 +1419,9 @@ class PlanUI:
             eta_line = Text()
             eta_line.append("  ", style="")
             eta_line.append(f"{Icons.CLOCK} ", style=Theme.INFO)
-            eta_line.append(f"Estimated remaining: ~{format_duration(eta_remaining)}", style=Theme.INFO)
+            eta_line.append(
+                f"Estimated remaining: ~{format_duration(eta_remaining)}", style=Theme.INFO
+            )
             self.console.print(eta_line)
 
         self.console.print()
@@ -1439,7 +1443,9 @@ class PlanUI:
 
         error_preview = error[:200] + "..." if len(error) > 200 else error
         self.console.print(Text(f"  └─ {error_preview}", style=Theme.ERROR))
-        self.console.print(Text("  └─ Checkpoint saved. Resume with: copex plan --resume", style=Theme.MUTED))
+        self.console.print(
+            Text("  └─ Checkpoint saved. Resume with: copex plan --resume", style=Theme.MUTED)
+        )
         self.console.print()
 
     def print_plan_complete(
@@ -1457,13 +1463,19 @@ class PlanUI:
         if failed_steps == 0 and completed_steps == total_steps:
             status_line = Text()
             status_line.append(f"{Icons.DONE} ", style=f"bold {Theme.SUCCESS}")
-            status_line.append(f"{completed_steps}/{total_steps} steps completed successfully!", style=Theme.SUCCESS)
+            status_line.append(
+                f"{completed_steps}/{total_steps} steps completed successfully!",
+                style=Theme.SUCCESS,
+            )
             border_style = Theme.SUCCESS
             title_style = Theme.SUCCESS
         elif failed_steps > 0:
             status_line = Text()
             status_line.append(f"{Icons.WARNING} ", style=f"bold {Theme.WARNING}")
-            status_line.append(f"{completed_steps}/{total_steps} completed, {failed_steps} failed", style=Theme.WARNING)
+            status_line.append(
+                f"{completed_steps}/{total_steps} completed, {failed_steps} failed",
+                style=Theme.WARNING,
+            )
             border_style = Theme.WARNING
             title_style = Theme.WARNING
         else:

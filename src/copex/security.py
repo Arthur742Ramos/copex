@@ -16,63 +16,92 @@ from typing import Any, Mapping, Sequence
 from copex.exceptions import SecurityError
 
 # Environment variables that are safe to pass to subprocesses
-ENV_ALLOWLIST: frozenset[str] = frozenset({
-    # System essentials
-    "PATH",
-    "HOME",
-    "USER",
-    "SHELL",
-    "TERM",
-    "LANG",
-    "LC_ALL",
-    "LC_CTYPE",
-    "TZ",
-    "TMPDIR",
-    "TEMP",
-    "TMP",
-    # Python
-    "PYTHONPATH",
-    "PYTHONHOME",
-    "VIRTUAL_ENV",
-    # Development tools
-    "EDITOR",
-    "VISUAL",
-    "GIT_AUTHOR_NAME",
-    "GIT_AUTHOR_EMAIL",
-    "GIT_COMMITTER_NAME",
-    "GIT_COMMITTER_EMAIL",
-    # Node.js
-    "NODE_ENV",
-    "NODE_PATH",
-    "NPM_CONFIG_PREFIX",
-    # MCP-specific
-    "MCP_SERVER_NAME",
-    # XDG
-    "XDG_CONFIG_HOME",
-    "XDG_DATA_HOME",
-    "XDG_CACHE_HOME",
-    "XDG_RUNTIME_DIR",
-})
+ENV_ALLOWLIST: frozenset[str] = frozenset(
+    {
+        # System essentials
+        "PATH",
+        "HOME",
+        "USER",
+        "SHELL",
+        "TERM",
+        "LANG",
+        "LC_ALL",
+        "LC_CTYPE",
+        "TZ",
+        "TMPDIR",
+        "TEMP",
+        "TMP",
+        # Python
+        "PYTHONPATH",
+        "PYTHONHOME",
+        "VIRTUAL_ENV",
+        # Development tools
+        "EDITOR",
+        "VISUAL",
+        "GIT_AUTHOR_NAME",
+        "GIT_AUTHOR_EMAIL",
+        "GIT_COMMITTER_NAME",
+        "GIT_COMMITTER_EMAIL",
+        # Node.js
+        "NODE_ENV",
+        "NODE_PATH",
+        "NPM_CONFIG_PREFIX",
+        # MCP-specific
+        "MCP_SERVER_NAME",
+        # XDG
+        "XDG_CONFIG_HOME",
+        "XDG_DATA_HOME",
+        "XDG_CACHE_HOME",
+        "XDG_RUNTIME_DIR",
+    }
+)
 
 # Patterns that indicate potentially dangerous input
 DANGEROUS_PATTERNS: tuple[re.Pattern[str], ...] = (
     re.compile(r"\$\{[^}]+\}"),  # ${VAR} expansion
     re.compile(r"\$\([^)]+\)"),  # $(command) substitution
-    re.compile(r"`[^`]+`"),      # `command` substitution
-    re.compile(r";\s*"),         # Command chaining with ;
-    re.compile(r"\|\s*"),        # Pipe chaining
-    re.compile(r"&&\s*"),        # Logical AND chaining
-    re.compile(r"\|\|\s*"),      # Logical OR chaining
-    re.compile(r">\s*"),         # Output redirection
-    re.compile(r"<\s*"),         # Input redirection
-    re.compile(r"\n"),           # Newline injection
+    re.compile(r"`[^`]+`"),  # `command` substitution
+    re.compile(r";\s*"),  # Command chaining with ;
+    re.compile(r"\|\s*"),  # Pipe chaining
+    re.compile(r"&&\s*"),  # Logical AND chaining
+    re.compile(r"\|\|\s*"),  # Logical OR chaining
+    re.compile(r">\s*"),  # Output redirection
+    re.compile(r"<\s*"),  # Input redirection
+    re.compile(r"\n"),  # Newline injection
 )
 
 # Characters that should be escaped in shell arguments
-SHELL_SPECIAL_CHARS: frozenset[str] = frozenset({
-    " ", "\t", "\n", "$", "`", "\\", '"', "'", "|", "&", ";", "(", ")", "<", ">",
-    "!", "?", "*", "[", "]", "#", "~", "=", "%", "{", "}", "^",
-})
+SHELL_SPECIAL_CHARS: frozenset[str] = frozenset(
+    {
+        " ",
+        "\t",
+        "\n",
+        "$",
+        "`",
+        "\\",
+        '"',
+        "'",
+        "|",
+        "&",
+        ";",
+        "(",
+        ")",
+        "<",
+        ">",
+        "!",
+        "?",
+        "*",
+        "[",
+        "]",
+        "#",
+        "~",
+        "=",
+        "%",
+        "{",
+        "}",
+        "^",
+    }
+)
 
 
 def filter_env_vars(
@@ -296,6 +325,7 @@ def validate_json_value(value: Any, max_depth: int = 10) -> Any:
     Raises:
         SecurityError: If the value is unsafe for serialization
     """
+
     def _validate(v: Any, depth: int, seen: set[int]) -> None:
         if depth > max_depth:
             raise SecurityError(

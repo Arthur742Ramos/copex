@@ -34,11 +34,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
-logger = logging.getLogger(__name__)
-
 from copex.client import Copex, Response, SessionPool
 from copex.config import CopexConfig
 from copex.models import Model, ReasoningEffort
+
+logger = logging.getLogger(__name__)
 
 try:
     from copilot import CopilotClient
@@ -71,7 +71,7 @@ def _is_rate_limit_error(exc: Exception) -> bool:
 
 class AdaptiveConcurrency:
     """Manages adaptive concurrency based on rate limit errors.
-    
+
     Reduces concurrency when rate limits are hit, gradually restores
     after a streak of successes.
     """
@@ -113,10 +113,7 @@ class AdaptiveConcurrency:
         """Called on successful task completion. Returns new concurrency level."""
         async with self._lock:
             self._success_streak += 1
-            if (
-                self._current < self._initial
-                and self._success_streak >= self._restore_after
-            ):
+            if self._current < self._initial and self._success_streak >= self._restore_after:
                 old = self._current
                 # Increase by 1, not exceeding initial
                 self._current = min(self._initial, self._current + 1)
@@ -237,9 +234,7 @@ def _render_prompt_with_task_outputs(
     try:
         return _TASK_OUTPUT_REF_RE.sub(_replace, prompt)
     except ValueError as exc:
-        raise RuntimeError(
-            f"Task '{current_task_id}' prompt template error: {exc}"
-        ) from exc
+        raise RuntimeError(f"Task '{current_task_id}' prompt template error: {exc}") from exc
 
 
 @dataclass
@@ -562,9 +557,7 @@ def _load_skills_content(skills_dirs: list[str]) -> str:
         if not path.is_dir():
             raise NotADirectoryError(f"Skills path is not a directory: {path}")
 
-        md_files = sorted(
-            p for p in path.iterdir() if p.is_file() and p.suffix == ".md"
-        )
+        md_files = sorted(p for p in path.iterdir() if p.is_file() and p.suffix == ".md")
         for md_file in md_files:
             text = md_file.read_text(encoding="utf-8").strip()
             if text:
@@ -788,7 +781,7 @@ class FleetCoordinator:
         and prompt length (shortest first) to maximize throughput.
 
         Sessions are reused via SessionPool for efficiency (new in v1.9.0).
-        
+
         New in v2.0.0:
         - Per-task retry policies with configurable retries and delay
         - Adaptive concurrency: auto-reduces on rate limit errors
@@ -805,17 +798,21 @@ class FleetCoordinator:
         config = config or FleetConfig()
         self._validate_dag(tasks)
 
-        task_map = {t.id: t for t in tasks}
+        {t.id: t for t in tasks}
         results: dict[str, FleetResult] = {}
         cancel_event = asyncio.Event()
 
         # Adaptive concurrency management
-        adaptive = AdaptiveConcurrency(
-            initial=config.max_concurrent,
-            minimum=config.min_concurrent,
-            restore_after=config.concurrency_restore_after,
-        ) if config.adaptive_concurrency else None
-        
+        adaptive = (
+            AdaptiveConcurrency(
+                initial=config.max_concurrent,
+                minimum=config.min_concurrent,
+                restore_after=config.concurrency_restore_after,
+            )
+            if config.adaptive_concurrency
+            else None
+        )
+
         # Dynamic semaphore that can be adjusted
         semaphore = asyncio.Semaphore(config.max_concurrent)
 
@@ -842,15 +839,18 @@ class FleetCoordinator:
             await pool.start()
 
         try:
+
             async def _run_task_with_retry(task: FleetTask) -> FleetResult:
                 """Execute a task with per-task retry logic."""
                 # Determine retry config: task-specific or global
                 max_retries = task.retries if task.retries is not None else config.default_retries
-                retry_delay = task.retry_delay if task.retry_delay is not None else config.default_retry_delay
-                
+                retry_delay = (
+                    task.retry_delay if task.retry_delay is not None else config.default_retry_delay
+                )
+
                 last_error: Exception | None = None
                 retries_used = 0
-                
+
                 for attempt in range(max_retries + 1):  # +1 for initial attempt
                     if attempt > 0:
                         # Calculate exponential backoff with jitter
@@ -860,32 +860,32 @@ class FleetCoordinator:
                         retries_used = attempt
                         if on_status:
                             on_status(task.id, f"retry-{attempt}")
-                    
+
                     result = await _run_task_once(task, retries_used)
-                    
+
                     if result.success:
                         # Notify adaptive concurrency of success
                         if adaptive:
                             await adaptive.on_success()
                         return result
-                    
+
                     last_error = result.error
-                    
+
                     # Check if it's a rate limit error
                     if last_error and _is_rate_limit_error(last_error):
                         if adaptive:
-                            new_concurrency = await adaptive.on_rate_limit()
+                            await adaptive.on_rate_limit()
                             # Note: We can't dynamically resize the semaphore,
                             # but the rate limit backoff will naturally slow things down
                         # Always retry rate limits if we have retries left
                         continue
                     elif adaptive:
                         await adaptive.on_failure()
-                    
+
                     # For non-rate-limit errors, check if we should retry
                     if attempt >= max_retries:
                         break
-                
+
                 # All retries exhausted
                 return result
 
@@ -969,12 +969,12 @@ class FleetCoordinator:
                                 )
 
                     elapsed = (time.monotonic() - start) * 1000
-                    
+
                     # Extract cost tracking from response
                     prompt_tokens = response.prompt_tokens or 0
                     completion_tokens = response.completion_tokens or 0
                     total_cost = response.cost or 0.0
-                    
+
                     result = FleetResult(
                         task_id=task.id,
                         success=True,
@@ -1002,7 +1002,7 @@ class FleetCoordinator:
             async def _run_task(task: FleetTask) -> FleetResult:
                 """Run a task with retries, then update shared state."""
                 result = await _run_task_with_retry(task)
-                
+
                 results[task.id] = result
                 finished[task.id] = result.success
                 done_events[task.id].set()
@@ -1048,9 +1048,7 @@ class FleetCoordinator:
             if instructions is None and instructions_file:
                 instructions_path = Path(instructions_file)
                 if not instructions_path.exists():
-                    raise FileNotFoundError(
-                        f"Instructions file not found: {instructions_path}"
-                    )
+                    raise FileNotFoundError(f"Instructions file not found: {instructions_path}")
                 instructions = instructions_path.read_text(encoding="utf-8")
 
             combined_parts = []
@@ -1063,9 +1061,7 @@ class FleetCoordinator:
 
         task_timeout = task.timeout_sec if task.timeout_sec is not None else fleet_cfg.timeout
         task_cwd = task.cwd if task.cwd is not None else self._base_config.cwd
-        task_working_dir = (
-            task.cwd if task.cwd is not None else self._base_config.working_directory
-        )
+        task_working_dir = task.cwd if task.cwd is not None else self._base_config.working_directory
         task_skills = task.skills if task.skills is not None else self._base_config.skills
         if task.exclude_tools is None:
             task_excluded = self._base_config.excluded_tools
@@ -1093,7 +1089,7 @@ class FleetCoordinator:
             instructions=instructions,
             instructions_file=instructions_file,
             available_tools=self._base_config.available_tools,
-        excluded_tools=task_excluded,
+            excluded_tools=task_excluded,
             mcp_servers=task_mcp_servers,
             mcp_config_file=task_mcp_config_file,
             working_directory=task_working_dir,
@@ -1115,12 +1111,10 @@ class FleetCoordinator:
 
         if missing_deps:
             details = "\n".join(
-                f"  - Task '{tid}' depends on unknown task '{dep}'"
-                for tid, dep in missing_deps
+                f"  - Task '{tid}' depends on unknown task '{dep}'" for tid, dep in missing_deps
             )
             raise ValueError(
-                f"Missing dependencies detected:\n{details}\n"
-                f"Available task IDs: {sorted(task_ids)}"
+                f"Missing dependencies detected:\n{details}\nAvailable task IDs: {sorted(task_ids)}"
             )
 
         # Topological sort to detect cycles (Kahn's algorithm)
@@ -1149,18 +1143,18 @@ class FleetCoordinator:
                 task = next(t for t in tasks if t.id == tid)
                 cycle_details.append(f"  - '{tid}' depends on {task.depends_on}")
             raise ValueError(
-                f"Cycle detected in fleet task dependencies. "
-                f"Tasks involved in cycle:\n" + "\n".join(cycle_details)
+                "Cycle detected in fleet task dependencies. "
+                "Tasks involved in cycle:\n" + "\n".join(cycle_details)
             )
 
 
 @dataclass
 class FleetSummary:
     """Aggregated summary of fleet execution results.
-    
+
     Provides totals for tokens, cost, and timing across all tasks.
     """
-    
+
     total_tasks: int = 0
     succeeded: int = 0
     failed: int = 0
@@ -1170,7 +1164,7 @@ class FleetSummary:
     total_cost: float = 0.0
     total_duration_ms: float = 0.0
     total_retries: int = 0
-    
+
     @classmethod
     def from_results(cls, results: list[FleetResult]) -> "FleetSummary":
         """Create a summary from a list of fleet results."""
@@ -1187,7 +1181,7 @@ class FleetSummary:
             summary.total_retries += r.retries_used
         summary.total_tokens = summary.total_prompt_tokens + summary.total_completion_tokens
         return summary
-    
+
     def __str__(self) -> str:
         """Human-readable summary string."""
         lines = [
@@ -1198,23 +1192,25 @@ class FleetSummary:
             lines.append(f"Failed: {self.failed}")
         if self.total_retries:
             lines.append(f"Retries used: {self.total_retries}")
-        lines.extend([
-            f"Tokens: {self.total_prompt_tokens:,} prompt + {self.total_completion_tokens:,} completion = {self.total_tokens:,} total",
-            f"Cost: ${self.total_cost:.4f}",
-            f"Duration: {self.total_duration_ms/1000:.1f}s",
-        ])
+        lines.extend(
+            [
+                f"Tokens: {self.total_prompt_tokens:,} prompt + {self.total_completion_tokens:,} completion = {self.total_tokens:,} total",
+                f"Cost: ${self.total_cost:.4f}",
+                f"Duration: {self.total_duration_ms / 1000:.1f}s",
+            ]
+        )
         return "\n".join(lines)
 
 
 def summarize_fleet_results(results: list[FleetResult]) -> FleetSummary:
     """Create an aggregated summary from fleet results.
-    
+
     Args:
         results: List of FleetResult from a fleet run.
-        
+
     Returns:
         FleetSummary with aggregated totals.
-        
+
     Example:
         results = await fleet.run()
         summary = summarize_fleet_results(results)
@@ -1247,6 +1243,7 @@ class Fleet:
         self._run_id: str | None = None
         if db_path is not None:
             from copex.fleet_store import FleetStore
+
             self._store = FleetStore(db_path)
         self._git_finalizer: GitFinalizer | None = None
         if self._fleet_config.git_finalize:
@@ -1384,6 +1381,7 @@ class Fleet:
             # Reconstruct FleetConfig from stored config if not provided
             if fleet_config is None:
                 import json
+
                 stored_config = json.loads(run.config_json) if run.config_json else {}
                 fleet_config = FleetConfig(
                     max_concurrent=stored_config.get("max_concurrent", 5),
@@ -1398,11 +1396,13 @@ class Fleet:
             for task_rec in incomplete:
                 # Filter depends_on to only include deps that aren't already done
                 remaining_deps = [d for d in task_rec.depends_on if d not in completed_ids]
-                fleet._tasks.append(FleetTask(
-                    id=task_rec.task_id,
-                    prompt=task_rec.prompt,
-                    depends_on=remaining_deps,
-                ))
+                fleet._tasks.append(
+                    FleetTask(
+                        id=task_rec.task_id,
+                        prompt=task_rec.prompt,
+                        depends_on=remaining_deps,
+                    )
+                )
 
             # Reset task statuses in the store for re-run
             for task_rec in incomplete:
@@ -1461,9 +1461,7 @@ class Fleet:
                 }
             )
             for task in tasks:
-                self._store.add_task(
-                    self._run_id, task.id, task.prompt, depends_on=task.depends_on
-                )
+                self._store.add_task(self._run_id, task.id, task.prompt, depends_on=task.depends_on)
 
         # Wrap on_status to also update store
         original_on_status = on_status
@@ -1576,9 +1574,7 @@ class Fleet:
                 }
             )
             for task in tasks:
-                self._store.add_task(
-                    self._run_id, task.id, task.prompt, depends_on=task.depends_on
-                )
+                self._store.add_task(self._run_id, task.id, task.prompt, depends_on=task.depends_on)
         store = self._store
         run_id = self._run_id
 
@@ -1605,21 +1601,25 @@ class Fleet:
 
         async def _run_task(task: FleetTask) -> FleetResult:
             # Emit queued event
-            await event_queue.put(FleetEvent(
-                event_type=FleetEventType.TASK_QUEUED,
-                task_id=task.id,
-                data={"prompt_preview": task.prompt[:100]},
-            ))
+            await event_queue.put(
+                FleetEvent(
+                    event_type=FleetEventType.TASK_QUEUED,
+                    task_id=task.id,
+                    data={"prompt_preview": task.prompt[:100]},
+                )
+            )
             if store is not None and run_id is not None:
                 store.update_task_status(run_id, task.id, "pending")
 
             # Wait for dependencies
             if task.depends_on:
-                await event_queue.put(FleetEvent(
-                    event_type=FleetEventType.TASK_WAITING,
-                    task_id=task.id,
-                    data={"waiting_for": task.depends_on},
-                ))
+                await event_queue.put(
+                    FleetEvent(
+                        event_type=FleetEventType.TASK_WAITING,
+                        task_id=task.id,
+                        data={"waiting_for": task.depends_on},
+                    )
+                )
 
             dep_policy = _normalize_dep_failure_policy(task.on_dependency_failure)
             for dep in task.depends_on:
@@ -1637,11 +1637,13 @@ class Fleet:
                 results[task.id] = result
                 finished[task.id] = False
                 done_events[task.id].set()
-                await event_queue.put(FleetEvent(
-                    event_type=FleetEventType.TASK_BLOCKED,
-                    task_id=task.id,
-                    error=f"Blocked by failed dependencies: {failed_deps}",
-                ))
+                await event_queue.put(
+                    FleetEvent(
+                        event_type=FleetEventType.TASK_BLOCKED,
+                        task_id=task.id,
+                        error=f"Blocked by failed dependencies: {failed_deps}",
+                    )
+                )
                 if store is not None and run_id is not None:
                     store.update_task_status(run_id, task.id, "blocked")
                 return result
@@ -1655,17 +1657,21 @@ class Fleet:
                 results[task.id] = result
                 finished[task.id] = False
                 done_events[task.id].set()
-                await event_queue.put(FleetEvent(
-                    event_type=FleetEventType.TASK_CANCELLED,
-                    task_id=task.id,
-                ))
+                await event_queue.put(
+                    FleetEvent(
+                        event_type=FleetEventType.TASK_CANCELLED,
+                        task_id=task.id,
+                    )
+                )
                 return result
 
             # Emit running event
-            await event_queue.put(FleetEvent(
-                event_type=FleetEventType.TASK_RUNNING,
-                task_id=task.id,
-            ))
+            await event_queue.put(
+                FleetEvent(
+                    event_type=FleetEventType.TASK_RUNNING,
+                    task_id=task.id,
+                )
+            )
             if store is not None and run_id is not None:
                 store.update_task_status(run_id, task.id, "running")
 
@@ -1699,17 +1705,19 @@ class Fleet:
                                         pass  # Drop delta events under backpressure
 
                         response = await asyncio.wait_for(
-                            copex.send(rendered_prompt, on_chunk=on_chunk if include_deltas else None),
+                            copex.send(
+                                rendered_prompt, on_chunk=on_chunk if include_deltas else None
+                            ),
                             timeout=self._fleet_config.timeout,
                         )
 
                 elapsed = (time.monotonic() - start) * 1000
-                
+
                 # Extract cost tracking from response
                 prompt_tokens = response.prompt_tokens or 0
                 completion_tokens = response.completion_tokens or 0
                 total_cost = response.cost or 0.0
-                
+
                 result = FleetResult(
                     task_id=task.id,
                     success=True,
@@ -1722,11 +1730,14 @@ class Fleet:
 
                 # Store in context if provided
                 if context:
-                    ctx.add_result_sync(task.id, {
-                        "success": True,
-                        "content": response.content,
-                        "duration_ms": elapsed,
-                    })
+                    ctx.add_result_sync(
+                        task.id,
+                        {
+                            "success": True,
+                            "content": response.content,
+                            "duration_ms": elapsed,
+                        },
+                    )
 
             except Exception as exc:
                 elapsed = (time.monotonic() - start) * 1000
@@ -1740,11 +1751,14 @@ class Fleet:
                     cancel_event.set()
 
                 if context:
-                    ctx.add_result_sync(task.id, {
-                        "success": False,
-                        "error": str(exc),
-                        "duration_ms": elapsed,
-                    })
+                    ctx.add_result_sync(
+                        task.id,
+                        {
+                            "success": False,
+                            "error": str(exc),
+                            "duration_ms": elapsed,
+                        },
+                    )
 
             results[task.id] = result
             finished[task.id] = result.success
@@ -1752,14 +1766,18 @@ class Fleet:
 
             # Emit completion event
             if result.success:
-                await event_queue.put(FleetEvent(
-                    event_type=FleetEventType.TASK_DONE,
-                    task_id=task.id,
-                    data={
-                        "duration_ms": result.duration_ms,
-                        "content_preview": (result.response.content[:200] if result.response else "")[:200],
-                    },
-                ))
+                await event_queue.put(
+                    FleetEvent(
+                        event_type=FleetEventType.TASK_DONE,
+                        task_id=task.id,
+                        data={
+                            "duration_ms": result.duration_ms,
+                            "content_preview": (
+                                result.response.content[:200] if result.response else ""
+                            )[:200],
+                        },
+                    )
+                )
                 if store is not None and run_id is not None:
                     store.record_result(
                         run_id,
@@ -1769,12 +1787,14 @@ class Fleet:
                         duration_ms=result.duration_ms,
                     )
             else:
-                await event_queue.put(FleetEvent(
-                    event_type=FleetEventType.TASK_FAILED,
-                    task_id=task.id,
-                    error=str(result.error) if result.error else "Unknown error",
-                    data={"duration_ms": result.duration_ms},
-                ))
+                await event_queue.put(
+                    FleetEvent(
+                        event_type=FleetEventType.TASK_FAILED,
+                        task_id=task.id,
+                        error=str(result.error) if result.error else "Unknown error",
+                        data={"duration_ms": result.duration_ms},
+                    )
+                )
                 if store is not None and run_id is not None:
                     store.record_result(
                         run_id,

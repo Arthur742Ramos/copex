@@ -8,14 +8,17 @@ import sys
 import time
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Annotated, Any, Optional
+from typing import TYPE_CHECKING, Annotated, Any, Optional
+
+if TYPE_CHECKING:
+    from copex.fleet import FleetTask
 
 import typer
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
+from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from rich.console import Console
 from rich.live import Live
 from rich.markdown import Markdown
@@ -53,7 +56,7 @@ console = Console()
 
 
 # Shell completion scripts
-BASH_COMPLETION = '''
+BASH_COMPLETION = """
 _copex_completion() {
     local cur prev opts
     COMPREPLY=()
@@ -85,9 +88,9 @@ _copex_completion() {
     COMPREPLY=( $(compgen -W "${opts}" -- ${cur}) )
 }
 complete -F _copex_completion copex
-'''
+"""
 
-ZSH_COMPLETION = '''
+ZSH_COMPLETION = """
 #compdef copex
 
 _copex() {
@@ -147,9 +150,9 @@ _copex() {
 }
 
 _copex "$@"
-'''
+"""
 
-FISH_COMPLETION = '''
+FISH_COMPLETION = """
 # copex fish completion
 
 set -l commands chat plan ralph fleet council interactive render models skills status config init login logout tui completions
@@ -166,7 +169,7 @@ complete -c copex -s r -l reasoning -d "Reasoning effort" -xa "$reasoning"
 
 # Completions subcommand
 complete -c copex -n "__fish_seen_subcommand_from completions" -a "bash zsh fish"
-'''
+"""
 
 
 def version_callback(value: bool) -> None:
@@ -225,7 +228,10 @@ def main(
         str | None, typer.Option("--prompt", "-p", help="Execute a prompt in non-interactive mode")
     ] = None,
     non_interactive: Annotated[
-        bool, typer.Option("--non-interactive", "-s", help="Non-interactive mode (exit after completion)")
+        bool,
+        typer.Option(
+            "--non-interactive", "-s", help="Non-interactive mode (exit after completion)"
+        ),
     ] = False,
     allow_all: Annotated[
         bool, typer.Option("--allow-all", help="Enable all permissions (tools, paths, URLs)")
@@ -234,7 +240,7 @@ def main(
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
     if ctx.invoked_subcommand is None:
         effective_model = model or _DEFAULT_MODEL.value
-        
+
         # If -p/--prompt provided, run in non-interactive/chat mode
         if prompt is not None:
             try:
@@ -243,14 +249,16 @@ def main(
                 requested_effort = parse_reasoning_effort(reasoning)
                 if requested_effort is None:
                     requested_effort = ReasoningEffort.HIGH
-                normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
+                normalized_effort, warning = normalize_reasoning_effort(
+                    config.model, requested_effort
+                )
                 if warning:
                     console.print(f"[yellow]{warning}[/yellow]")
                 config.reasoning_effort = normalized_effort
-                
+
                 # Run chat with the prompt
                 asyncio.run(_run_chat(config, prompt, show_reasoning=True, raw=non_interactive))
-            except ValueError as e:
+            except ValueError:
                 console.print(f"[red]Invalid model: {effective_model}[/red]")
                 raise typer.Exit(1)
         else:
@@ -455,7 +463,8 @@ def chat(
     ] = None,
     raw: Annotated[bool, typer.Option("--raw", help="Output raw text without formatting")] = False,
     ui_theme: Annotated[
-        Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)")
+        Optional[str],
+        typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)"),
     ] = None,
     ui_density: Annotated[
         Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
@@ -473,17 +482,20 @@ def chat(
         bool, typer.Option("--json", help="Output response as machine-readable JSON")
     ] = False,
     quiet: Annotated[
-        bool, typer.Option("--quiet", "-q", help="Minimal output (content only, no panels or formatting)")
+        bool,
+        typer.Option(
+            "--quiet", "-q", help="Minimal output (content only, no panels or formatting)"
+        ),
     ] = False,
     # New options
-    stdin: Annotated[
-        bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")
-    ] = False,
+    stdin: Annotated[bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")] = False,
     context: Annotated[
-        Optional[list[Path]], typer.Option("--context", "-C", help="Include file(s) as context (can be repeated)")
+        Optional[list[Path]],
+        typer.Option("--context", "-C", help="Include file(s) as context (can be repeated)"),
     ] = None,
     template: Annotated[
-        Optional[str], typer.Option("--template", "-T", help="Jinja2 template for output formatting")
+        Optional[str],
+        typer.Option("--template", "-T", help="Jinja2 template for output formatting"),
     ] = None,
     output: Annotated[
         Optional[Path], typer.Option("--output", "-o", help="Write response to file")
@@ -564,7 +576,7 @@ def chat(
             try:
                 content = ctx_path.read_text()
                 # Format with filename header
-                context_parts.append(f"<file path=\"{ctx_path}\">\n{content}\n</file>")
+                context_parts.append(f'<file path="{ctx_path}">\n{content}\n</file>')
             except Exception as e:
                 console.print(f"[red]Error reading {ctx_path}: {e}[/red]")
                 raise typer.Exit(1)
@@ -573,11 +585,18 @@ def chat(
             context_content = "\n\n".join(context_parts)
             prompt = f"Context files:\n{context_content}\n\nPrompt: {prompt}"
 
-    asyncio.run(_run_chat(
-        config, prompt, show_reasoning, raw,
-        json_output=json_output, quiet=quiet,
-        template=template, output_path=output,
-    ))
+    asyncio.run(
+        _run_chat(
+            config,
+            prompt,
+            show_reasoning,
+            raw,
+            json_output=json_output,
+            quiet=quiet,
+            template=template,
+            output_path=output,
+        )
+    )
 
 
 async def _run_chat(
@@ -865,9 +884,7 @@ def skills_list(
     skill_dir: Annotated[
         Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
-    no_auto: Annotated[
-        bool, typer.Option("--no-auto", help="Disable auto-discovery")
-    ] = False,
+    no_auto: Annotated[bool, typer.Option("--no-auto", help="Disable auto-discovery")] = False,
 ) -> None:
     """List all available skills."""
     from copex.skills import list_skills
@@ -984,7 +1001,8 @@ def interactive(
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
     ui_theme: Annotated[
-        Optional[str], typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)")
+        Optional[str],
+        typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)"),
     ] = None,
     ui_density: Annotated[
         Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
@@ -1044,6 +1062,7 @@ def interactive(
     else:
         # Use new beautiful interactive mode
         from copex.interactive import run_interactive
+
         asyncio.run(run_interactive(config))
 
 
@@ -1550,7 +1569,6 @@ def config_cmd(
     config_path = Path(config_file) if config_file else CopexConfig.default_path()
     source = str(config_path) if config_path.exists() else "defaults"
 
-    caught_warnings: list[_warnings.WarningMessage] = []
     with _warnings.catch_warnings(record=True) as caught_warnings:
         _warnings.simplefilter("always")
         try:
@@ -1638,7 +1656,7 @@ def plan_command(
     ] = 10,
     visualize: Annotated[
         Optional[str],
-        typer.Option("--visualize", "-V", help="Show plan visualization (ascii, mermaid, tree)")
+        typer.Option("--visualize", "-V", help="Show plan visualization (ascii, mermaid, tree)"),
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
@@ -2327,7 +2345,7 @@ def _build_council_tasks(
     escalate: bool = False,
 ) -> list["FleetTask"]:
     """Create the council workflow task graph with enhancements.
-    
+
     Args:
         task: The task/problem for the council
         investigator_model: Override model for all 3 investigators
@@ -2341,7 +2359,7 @@ def _build_council_tasks(
         escalate: Enable tie-breaker escalation on uncertainty
     """
     from copex.council import CouncilConfig, CouncilPreset, build_council_tasks
-    
+
     # Parse preset
     council_preset = None
     if preset:
@@ -2350,7 +2368,7 @@ def _build_council_tasks(
         except ValueError:
             valid = ", ".join(p.value for p in CouncilPreset)
             console.print(f"[yellow]Warning: Invalid preset '{preset}'. Valid: {valid}[/yellow]")
-    
+
     config = CouncilConfig(
         investigator_model=investigator_model,
         codex_model=codex_model,
@@ -2362,7 +2380,7 @@ def _build_council_tasks(
         preset=council_preset,
         escalate=escalate,
     )
-    
+
     return build_council_tasks(task, config)
 
 
@@ -2440,11 +2458,16 @@ def council_command(
     ] = None,
     reasoning: Annotated[
         Optional[str],
-        typer.Option("-r", "--reasoning", help="Reasoning effort for all tasks (low/medium/high/xhigh)"),
+        typer.Option(
+            "-r", "--reasoning", help="Reasoning effort for all tasks (low/medium/high/xhigh)"
+        ),
     ] = None,
     debate: Annotated[
         bool,
-        typer.Option("--debate/--no-debate", help="Enable debate round (investigators revise after seeing others)"),
+        typer.Option(
+            "--debate/--no-debate",
+            help="Enable debate round (investigators revise after seeing others)",
+        ),
     ] = False,
     preset: Annotated[
         Optional[str],
@@ -2455,13 +2478,15 @@ def council_command(
     ] = None,
     escalate: Annotated[
         bool,
-        typer.Option("--escalate/--no-escalate", help="Enable tie-breaker escalation on uncertainty"),
+        typer.Option(
+            "--escalate/--no-escalate", help="Enable tie-breaker escalation on uncertainty"
+        ),
     ] = False,
 ) -> None:
     """Run a council workflow: Codex + Gemini + Opus, with Opus as chair.
-    
+
     Enhanced council features:
-    
+
     \b
     MODEL SELECTION:
       --investigator-model  Override model for all 3 investigators
@@ -2469,24 +2494,25 @@ def council_command(
       --gemini-model        Override just Gemini
       --opus-model          Override just Opus investigator
       --chair-model         Override chair model (default: claude-opus-4.6)
-    
+
     \b
     DEBATE ROUNDS:
       --debate              After initial opinions, each investigator sees others'
                             responses and can revise their position
-    
+
     \b
     SPECIALIST PRESETS:
       --preset security      Focus on vulnerabilities, auth, injection
       --preset architecture  Focus on patterns, scaling, modularity
       --preset refactor      Focus on code quality, DRY, naming
       --preset review        Balanced code review
-    
+
     \b
     TIE-BREAKER:
       --escalate            If chair is uncertain (confidence < 0.7), re-run
                             with xhigh reasoning for a definitive answer
     """
+
     # Parse model options
     def parse_model(m: str | None) -> Model | None:
         if m is None:
@@ -2496,13 +2522,13 @@ def council_command(
         except ValueError:
             console.print(f"[red]Invalid model: {m}[/red]")
             raise typer.Exit(1)
-    
+
     inv_model = parse_model(investigator_model)
     cdx_model = parse_model(codex_model)
     gem_model = parse_model(gemini_model)
     op_model = parse_model(opus_model)
     chr_model = parse_model(chair_model)
-    
+
     # Parse reasoning effort
     effort = ReasoningEffort.HIGH
     if reasoning:
@@ -2511,7 +2537,7 @@ def council_command(
         except ValueError:
             console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
             raise typer.Exit(1)
-    
+
     config = CopexConfig(
         model=chr_model or Model.CLAUDE_OPUS_4_6,
         reasoning_effort=effort,
@@ -2783,7 +2809,6 @@ async def _run_fleet(
         with Live(build_table(), console=console, refresh_per_second=4) as live:
 
             async def _run_with_updates() -> list:
-                from copex.fleet import FleetResult
 
                 results = await fleet.run(on_status=on_status)
                 # Mark final statuses
@@ -2885,9 +2910,7 @@ async def _run_fleet(
             elif git_result.success:
                 console.print("[dim]No changes to commit[/dim]")
             else:
-                console.print(
-                    f"[red]Git finalize failed: {git_result.error}[/red]"
-                )
+                console.print(f"[red]Git finalize failed: {git_result.error}[/red]")
     else:
         git_artifact = {"enabled": False}
 

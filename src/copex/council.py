@@ -18,7 +18,7 @@ from copex.models import Model, ReasoningEffort
 
 class CouncilPreset(str, Enum):
     """Specialist presets for council analysis focus."""
-    
+
     SECURITY = "security"
     ARCHITECTURE = "architecture"
     REFACTOR = "refactor"
@@ -72,22 +72,22 @@ PRESET_PROMPTS: dict[CouncilPreset, str] = {
 @dataclass
 class CouncilConfig:
     """Configuration for council workflow."""
-    
+
     # Model overrides
     investigator_model: Model | None = None  # Applies to all 3 investigators
-    codex_model: Model | None = None         # Override for Codex only
-    gemini_model: Model | None = None        # Override for Gemini only
-    opus_model: Model | None = None          # Override for Opus investigator only
+    codex_model: Model | None = None  # Override for Codex only
+    gemini_model: Model | None = None  # Override for Gemini only
+    opus_model: Model | None = None  # Override for Opus investigator only
     chair_model: Model = Model.CLAUDE_OPUS_4_6
-    
+
     # Reasoning effort
     reasoning_effort: ReasoningEffort = ReasoningEffort.HIGH
-    
+
     # Features
-    debate: bool = False                     # Enable debate rounds
-    preset: CouncilPreset | None = None      # Specialist preset
-    escalate: bool = False                   # Enable tie-breaker escalation
-    
+    debate: bool = False  # Enable debate rounds
+    preset: CouncilPreset | None = None  # Specialist preset
+    escalate: bool = False  # Enable tie-breaker escalation
+
     def get_codex_model(self) -> Model:
         """Get effective model for Codex investigator."""
         if self.codex_model:
@@ -95,7 +95,7 @@ class CouncilConfig:
         if self.investigator_model:
             return self.investigator_model
         return Model.GPT_5_2_CODEX
-    
+
     def get_gemini_model(self) -> Model:
         """Get effective model for Gemini investigator."""
         if self.gemini_model:
@@ -103,7 +103,7 @@ class CouncilConfig:
         if self.investigator_model:
             return self.investigator_model
         return Model.GEMINI_3_PRO
-    
+
     def get_opus_model(self) -> Model:
         """Get effective model for Opus investigator."""
         if self.opus_model:
@@ -129,7 +129,7 @@ def _build_investigator_prompt(
 ) -> str:
     """Build prompt for an investigator."""
     preset_prefix = _get_preset_prefix(preset)
-    
+
     if round_num == 1:
         # First round: independent analysis
         return (
@@ -149,7 +149,7 @@ def _build_investigator_prompt(
             for name, opinion_ref in prior_opinions.items():
                 if name.lower() != role.lower():
                     others_text += f"\n{name}'s opinion:\n{opinion_ref}\n"
-        
+
         return (
             f"You are council member {role}. This is ROUND 2 (debate round).\n\n"
             f"{preset_prefix}"
@@ -175,7 +175,7 @@ def _build_chair_prompt(
         "You are Opus acting as chair. Produce the final decision for the council.\n\n"
         f"Task:\n{task}\n\n"
     )
-    
+
     if include_debate:
         submissions = (
             "Initial opinions:\n"
@@ -209,7 +209,7 @@ def _build_chair_prompt(
             "Opus independent error: {{task:opus-opinion.error}}\n"
             "{{task:opus-opinion.content}}\n\n"
         )
-    
+
     confidence_note = ""
     if escalate:
         confidence_note = (
@@ -217,7 +217,7 @@ def _build_chair_prompt(
             "explicitly state 'UNCERTAIN' at the start of your response. "
             "This will trigger a re-evaluation with higher reasoning effort.\n\n"
         )
-    
+
     output_format = (
         "Output format:\n"
         "1. Final decision\n"
@@ -225,7 +225,7 @@ def _build_chair_prompt(
         "3. Concrete next steps\n"
         "4. Confidence (0-1)"
     )
-    
+
     return base + submissions + confidence_note + output_format
 
 
@@ -253,56 +253,52 @@ def build_council_tasks(
     config: CouncilConfig | None = None,
 ) -> list[Any]:
     """Create council workflow task graph with enhancements.
-    
+
     Args:
         task: The task/problem for the council to analyze
         config: Council configuration with model overrides and features
-        
+
     Returns:
         List of FleetTask objects for the council workflow
     """
     from copex.fleet import DependencyFailurePolicy, FleetTask
-    
+
     if config is None:
         config = CouncilConfig()
-    
+
     tasks: list[FleetTask] = []
     high = config.reasoning_effort
-    
+
     # Round 1: Independent opinions
-    codex_prompt = _build_investigator_prompt(
-        "Codex", task, config.preset, round_num=1
+    codex_prompt = _build_investigator_prompt("Codex", task, config.preset, round_num=1)
+    gemini_prompt = _build_investigator_prompt("Gemini", task, config.preset, round_num=1)
+    opus_opinion_prompt = _build_investigator_prompt("Opus", task, config.preset, round_num=1)
+
+    tasks.extend(
+        [
+            FleetTask(
+                id="codex-opinion",
+                prompt=codex_prompt,
+                model=config.get_codex_model(),
+                reasoning_effort=high,
+            ),
+            FleetTask(
+                id="gemini-opinion",
+                prompt=gemini_prompt,
+                model=config.get_gemini_model(),
+                reasoning_effort=high,
+            ),
+            FleetTask(
+                id="opus-opinion",
+                prompt=opus_opinion_prompt,
+                model=config.get_opus_model(),
+                reasoning_effort=high,
+            ),
+        ]
     )
-    gemini_prompt = _build_investigator_prompt(
-        "Gemini", task, config.preset, round_num=1
-    )
-    opus_opinion_prompt = _build_investigator_prompt(
-        "Opus", task, config.preset, round_num=1
-    )
-    
-    tasks.extend([
-        FleetTask(
-            id="codex-opinion",
-            prompt=codex_prompt,
-            model=config.get_codex_model(),
-            reasoning_effort=high,
-        ),
-        FleetTask(
-            id="gemini-opinion",
-            prompt=gemini_prompt,
-            model=config.get_gemini_model(),
-            reasoning_effort=high,
-        ),
-        FleetTask(
-            id="opus-opinion",
-            prompt=opus_opinion_prompt,
-            model=config.get_opus_model(),
-            reasoning_effort=high,
-        ),
-    ])
-    
+
     chair_depends_on = ["codex-opinion", "gemini-opinion", "opus-opinion"]
-    
+
     # Round 2: Debate (optional)
     if config.debate:
         # Each investigator sees others' opinions and can revise
@@ -311,7 +307,7 @@ def build_council_tasks(
             "Gemini": "{{task:gemini-opinion.content}}",
             "Opus": "{{task:opus-opinion.content}}",
         }
-        
+
         codex_r2_prompt = _build_investigator_prompt(
             "Codex", task, config.preset, round_num=2, prior_opinions=prior_opinions
         )
@@ -321,43 +317,45 @@ def build_council_tasks(
         opus_r2_prompt = _build_investigator_prompt(
             "Opus", task, config.preset, round_num=2, prior_opinions=prior_opinions
         )
-        
-        tasks.extend([
-            FleetTask(
-                id="codex-opinion-r2",
-                prompt=codex_r2_prompt,
-                depends_on=["codex-opinion", "gemini-opinion", "opus-opinion"],
-                model=config.get_codex_model(),
-                reasoning_effort=high,
-                on_dependency_failure=DependencyFailurePolicy.CONTINUE,
-            ),
-            FleetTask(
-                id="gemini-opinion-r2",
-                prompt=gemini_r2_prompt,
-                depends_on=["codex-opinion", "gemini-opinion", "opus-opinion"],
-                model=config.get_gemini_model(),
-                reasoning_effort=high,
-                on_dependency_failure=DependencyFailurePolicy.CONTINUE,
-            ),
-            FleetTask(
-                id="opus-opinion-r2",
-                prompt=opus_r2_prompt,
-                depends_on=["codex-opinion", "gemini-opinion", "opus-opinion"],
-                model=config.get_opus_model(),
-                reasoning_effort=high,
-                on_dependency_failure=DependencyFailurePolicy.CONTINUE,
-            ),
-        ])
-        
+
+        tasks.extend(
+            [
+                FleetTask(
+                    id="codex-opinion-r2",
+                    prompt=codex_r2_prompt,
+                    depends_on=["codex-opinion", "gemini-opinion", "opus-opinion"],
+                    model=config.get_codex_model(),
+                    reasoning_effort=high,
+                    on_dependency_failure=DependencyFailurePolicy.CONTINUE,
+                ),
+                FleetTask(
+                    id="gemini-opinion-r2",
+                    prompt=gemini_r2_prompt,
+                    depends_on=["codex-opinion", "gemini-opinion", "opus-opinion"],
+                    model=config.get_gemini_model(),
+                    reasoning_effort=high,
+                    on_dependency_failure=DependencyFailurePolicy.CONTINUE,
+                ),
+                FleetTask(
+                    id="opus-opinion-r2",
+                    prompt=opus_r2_prompt,
+                    depends_on=["codex-opinion", "gemini-opinion", "opus-opinion"],
+                    model=config.get_opus_model(),
+                    reasoning_effort=high,
+                    on_dependency_failure=DependencyFailurePolicy.CONTINUE,
+                ),
+            ]
+        )
+
         chair_depends_on.extend(["codex-opinion-r2", "gemini-opinion-r2", "opus-opinion-r2"])
-    
+
     # Chair final decision
     chair_prompt = _build_chair_prompt(
         task,
         include_debate=config.debate,
         escalate=config.escalate,
     )
-    
+
     tasks.append(
         FleetTask(
             id="opus-chair-final",
@@ -368,7 +366,7 @@ def build_council_tasks(
             on_dependency_failure=DependencyFailurePolicy.CONTINUE,
         )
     )
-    
+
     # Escalation task (only included if escalate is enabled)
     # This task will be conditionally run based on chair response
     if config.escalate:
@@ -387,7 +385,7 @@ def build_council_tasks(
             "3. Concrete next steps\n"
             "4. Confidence (should be high after deeper analysis)"
         )
-        
+
         tasks.append(
             FleetTask(
                 id="opus-chair-escalated",
@@ -398,5 +396,5 @@ def build_council_tasks(
                 on_dependency_failure=DependencyFailurePolicy.CONTINUE,
             )
         )
-    
+
     return tasks

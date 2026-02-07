@@ -26,7 +26,7 @@ class StepTemplate:
 
     name: str
     description_template: str  # Can contain {placeholders}
-    prompt_template: str       # Main instruction template
+    prompt_template: str  # Main instruction template
     condition: Condition | None = None
     depends_on: list[str] = field(default_factory=list)
     tags: list[str] = field(default_factory=list)
@@ -291,6 +291,7 @@ Report PR URL.""",
 # Template Registry
 # ============================================================================
 
+
 class TemplateRegistry:
     """Registry of available step templates."""
 
@@ -374,6 +375,7 @@ def create_step(template_name: str, **kwargs: Any) -> StepInstance:
 # Workflow Builders
 # ============================================================================
 
+
 def test_workflow(
     *,
     framework: str = "pytest",
@@ -434,26 +436,32 @@ def build_workflow(
     ]
 
     if lint:
-        steps.append(LINT_CODE.instantiate(
-            linter="ruff",
-            config_file="pyproject.toml",
-            paths="src",
-            lint_command="ruff check src",
-        ))
+        steps.append(
+            LINT_CODE.instantiate(
+                linter="ruff",
+                config_file="pyproject.toml",
+                paths="src",
+                lint_command="ruff check src",
+            )
+        )
 
     if type_check:
-        steps.append(TYPE_CHECK.instantiate(
-            type_checker="mypy",
-            config_file="pyproject.toml",
-            strictness="strict",
-            check_command="mypy src",
-        ))
+        steps.append(
+            TYPE_CHECK.instantiate(
+                type_checker="mypy",
+                config_file="pyproject.toml",
+                strictness="strict",
+                check_command="mypy src",
+            )
+        )
 
-    steps.append(BUILD_PROJECT.instantiate(
-        project_name=project_name,
-        build_command=build_command,
-        environment="production",
-    ))
+    steps.append(
+        BUILD_PROJECT.instantiate(
+            project_name=project_name,
+            build_command=build_command,
+            environment="production",
+        )
+    )
 
     return steps
 
@@ -486,18 +494,22 @@ def deploy_workflow(
     ]
 
     if health_endpoint:
-        steps.append(HEALTH_CHECK.instantiate(
-            service=target,
-            health_endpoint=health_endpoint,
-            expected_status="200",
-            timeout="30s",
-        ))
+        steps.append(
+            HEALTH_CHECK.instantiate(
+                service=target,
+                health_endpoint=health_endpoint,
+                expected_status="200",
+                timeout="30s",
+            )
+        )
 
     # Add rollback as conditional step
-    steps.append(ROLLBACK.instantiate(
-        environment=environment,
-        version="previous",
-        reason="Deployment failed",
-    ))
+    steps.append(
+        ROLLBACK.instantiate(
+            environment=environment,
+            version="previous",
+            reason="Deployment failed",
+        )
+    )
 
     return steps

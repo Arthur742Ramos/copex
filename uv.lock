@@ -43,7 +43,7 @@ wheels = [
 
 [[package]]
 name = "copex"
-version = "1.7.0"
+version = "2.0.0"
 source = { editable = "." }
 dependencies = [
     { name = "github-copilot-sdk" },

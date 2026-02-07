@@ -19,9 +19,7 @@ from typing import Any
 from copex.models import Model, ReasoningEffort
 
 # Windows reserved device names (case-insensitive)
-_WINDOWS_RESERVED_RE = re.compile(
-    r"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\..+)?$", re.IGNORECASE
-)
+_WINDOWS_RESERVED_RE = re.compile(r"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\..+)?$", re.IGNORECASE)
 
 # Maximum size for session JSON files (10 MB)
 _MAX_SESSION_FILE_SIZE = 10_485_760
