@@ -6,7 +6,7 @@ import asyncio
 import json
 import sys
 import time
-from datetime import UTC, datetime
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any, Optional
 
@@ -2959,7 +2959,7 @@ async def _run_fleet(
             )
 
         artifact = {
-            "created_at": datetime.now(UTC).isoformat(),
+            "created_at": datetime.now(timezone.utc).isoformat(),
             "summary": {
                 "total_tasks": len(tasks),
                 "succeeded": successes,
