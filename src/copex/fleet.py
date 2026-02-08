@@ -962,7 +962,6 @@ class FleetCoordinator:
         config = config or FleetConfig()
         self._validate_dag(tasks)
 
-        {t.id: t for t in tasks}
         results: dict[str, FleetResult] = {}
         cancel_event = asyncio.Event()
 
@@ -1740,7 +1739,21 @@ class Fleet:
         # Bounded event queue for streaming – backpressure under load
         event_queue: asyncio.Queue[FleetEvent | None] = asyncio.Queue(maxsize=10000)
         results: dict[str, FleetResult] = {}
-        semaphore = asyncio.Semaphore(self._fleet_config.max_concurrent)
+
+        # Adaptive concurrency management
+        adaptive = (
+            AdaptiveConcurrency(
+                initial=self._fleet_config.max_concurrent,
+                minimum=self._fleet_config.min_concurrent,
+                restore_after=self._fleet_config.concurrency_restore_after,
+            )
+            if self._fleet_config.adaptive_concurrency
+            else None
+        )
+
+        semaphore: DynamicSemaphore | asyncio.Semaphore = (
+            adaptive.semaphore if adaptive else asyncio.Semaphore(self._fleet_config.max_concurrent)
+        )
         cancel_event = asyncio.Event()
         done_events: dict[str, asyncio.Event] = {t.id: asyncio.Event() for t in tasks}
         finished: dict[str, bool] = {}
@@ -1748,7 +1761,87 @@ class Fleet:
         # Prioritize: shallowest deps first, shortest prompt first
         prioritized = FleetCoordinator._prioritize_tasks(tasks)
 
+        async def _run_task_once(task: FleetTask, retries_used: int = 0) -> FleetResult:
+            """Execute a single prompt attempt (no dependency handling)."""
+            if cancel_event.is_set():
+                return FleetResult(
+                    task_id=task.id,
+                    success=False,
+                    error=asyncio.CancelledError("Fleet cancelled"),
+                )
+
+            start = time.monotonic()
+            try:
+                rendered_prompt = _render_prompt_with_task_outputs(
+                    task.prompt,
+                    current_task_id=task.id,
+                    results=results,
+                )
+                task_config = self._coordinator._task_config(task, self._fleet_config)
+                task_timeout = (
+                    task.timeout_sec if task.timeout_sec is not None else self._fleet_config.timeout
+                )
+                async with semaphore:
+                    if cancel_event.is_set():
+                        raise asyncio.CancelledError("Fleet cancelled")
+
+                    async with Copex(task_config) as copex:
+                        # Build streaming callback if needed
+                        on_chunk = None
+                        if include_deltas:
+                            # Sync wrapper for the streaming callback
+                            def on_chunk(chunk: Any) -> None:
+                                if hasattr(chunk, "delta") and chunk.delta:
+                                    evt = FleetEvent(
+                                        event_type=FleetEventType.MESSAGE_DELTA,
+                                        task_id=task.id,
+                                        delta=chunk.delta,
+                                    )
+                                    try:
+                                        event_queue.put_nowait(evt)
+                                    except asyncio.QueueFull:
+                                        pass  # Drop delta events under backpressure
+
+                        response = await asyncio.wait_for(
+                            copex.send(
+                                rendered_prompt, on_chunk=on_chunk if include_deltas else None
+                            ),
+                            timeout=task_timeout,
+                        )
+
+                elapsed = (time.monotonic() - start) * 1000
+
+                # Extract cost tracking from response
+                prompt_tokens = response.prompt_tokens or 0
+                completion_tokens = response.completion_tokens or 0
+                total_cost = response.cost or 0.0
+
+                return FleetResult(
+                    task_id=task.id,
+                    success=True,
+                    response=response,
+                    duration_ms=elapsed,
+                    prompt_tokens=prompt_tokens,
+                    completion_tokens=completion_tokens,
+                    total_cost=total_cost,
+                    retries_used=retries_used,
+                )
+
+            except Exception as exc:  # Catch-all: task failures are captured as FleetResult
+                elapsed = (time.monotonic() - start) * 1000
+                result = FleetResult(
+                    task_id=task.id,
+                    success=False,
+                    error=exc,
+                    duration_ms=elapsed,
+                    retries_used=retries_used,
+                )
+                if self._fleet_config.fail_fast:
+                    cancel_event.set()
+                return result
+
         async def _run_task(task: FleetTask) -> FleetResult:
+            """Run a task: check deps, retry execution, record results."""
             # Emit queued event
             await event_queue.put(
                 FleetEvent(
@@ -1858,90 +1951,15 @@ class Fleet:
             if store is not None and run_id is not None:
                 store.update_task_status(run_id, task.id, "running")
 
-            start = time.monotonic()
-            try:
-                rendered_prompt = _render_prompt_with_task_outputs(
-                    task.prompt,
-                    current_task_id=task.id,
-                    results=results,
-                )
-                task_config = self._coordinator._task_config(task, self._fleet_config)
-                async with semaphore:
-                    if cancel_event.is_set():
-                        raise asyncio.CancelledError("Fleet cancelled")
+            # Execute with retries
+            def _on_status(task_id: str, status: str) -> None:
+                if store is not None and run_id is not None:
+                    store.update_task_status(run_id, task_id, status)
 
-                    async with Copex(task_config) as copex:
-                        # Build streaming callback if needed
-                        on_chunk = None
-                        if include_deltas:
-                            # Sync wrapper for the streaming callback
-                            def on_chunk(chunk: Any) -> None:
-                                if hasattr(chunk, "delta") and chunk.delta:
-                                    evt = FleetEvent(
-                                        event_type=FleetEventType.MESSAGE_DELTA,
-                                        task_id=task.id,
-                                        delta=chunk.delta,
-                                    )
-                                    try:
-                                        event_queue.put_nowait(evt)
-                                    except asyncio.QueueFull:
-                                        pass  # Drop delta events under backpressure
-
-                        response = await asyncio.wait_for(
-                            copex.send(
-                                rendered_prompt, on_chunk=on_chunk if include_deltas else None
-                            ),
-                            timeout=self._fleet_config.timeout,
-                        )
-
-                elapsed = (time.monotonic() - start) * 1000
-
-                # Extract cost tracking from response
-                prompt_tokens = response.prompt_tokens or 0
-                completion_tokens = response.completion_tokens or 0
-                total_cost = response.cost or 0.0
-
-                result = FleetResult(
-                    task_id=task.id,
-                    success=True,
-                    response=response,
-                    duration_ms=elapsed,
-                    prompt_tokens=prompt_tokens,
-                    completion_tokens=completion_tokens,
-                    total_cost=total_cost,
-                )
-
-                # Store in context if provided
-                if context:
-                    ctx.add_result_sync(
-                        task.id,
-                        {
-                            "success": True,
-                            "content": response.content,
-                            "duration_ms": elapsed,
-                        },
-                    )
-
-            except Exception as exc:  # Catch-all: task failures are captured as FleetResult
-                elapsed = (time.monotonic() - start) * 1000
-                result = FleetResult(
-                    task_id=task.id,
-                    success=False,
-                    error=exc,
-                    duration_ms=elapsed,
-                )
-                if self._fleet_config.fail_fast:
-                    cancel_event.set()
-
-                if context:
-                    ctx.add_result_sync(
-                        task.id,
-                        {
-                            "success": False,
-                            "error": str(exc),
-                            "duration_ms": elapsed,
-                        },
-                    )
+            result = await _run_task_with_retry(
+                task, self._fleet_config, _run_task_once,
+                on_status=_on_status, adaptive=adaptive,
+            )
 
             results[task.id] = result
             finished[task.id] = result.success
@@ -1986,6 +2004,18 @@ class Fleet:
                         error=str(result.error) if result.error else None,
                         duration_ms=result.duration_ms,
                     )
+
+            # Store in context if provided
+            if context:
+                ctx.add_result_sync(
+                    task.id,
+                    {
+                        "success": result.success,
+                        "content": result.response.content if result.response else None,
+                        "error": str(result.error) if result.error else None,
+                        "duration_ms": result.duration_ms,
+                    },
+                )
 
             return result
 
