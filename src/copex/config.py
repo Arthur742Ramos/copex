@@ -188,6 +188,7 @@ class CopexConfig(BaseModel):
     auto_start: bool = Field(default=True, description="Auto-start CLI server")
     auto_restart: bool = Field(default=True, description="Auto-restart on crash")
     log_level: str = Field(default="warning", description="Log level")
+    github_token: str | None = Field(default=None, description="GitHub token for SDK auth (overrides gh CLI login)")
 
     # Session options
     timeout: float = Field(
@@ -276,6 +277,10 @@ class CopexConfig(BaseModel):
 
     @model_validator(mode="after")
     def _apply_env_overrides(self) -> "CopexConfig":
+        env_token = os.environ.get("COPEX_TOKEN")
+        if env_token:
+            self.github_token = env_token
+
         env_model = os.environ.get("COPEX_MODEL")
         if env_model:
             try:
@@ -358,6 +363,11 @@ class CopexConfig(BaseModel):
             opts["cli_url"] = self.cli_url
         if self.cwd:
             opts["cwd"] = self.cwd
+
+        if self.github_token:
+            opts["github_token"] = self.github_token
+            opts["use_logged_in_user"] = False
+
         return opts
 
     def to_session_options(self) -> dict[str, Any]:
