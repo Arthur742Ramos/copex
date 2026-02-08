@@ -137,6 +137,7 @@ class Response:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     cost: float | None = None
+    server_model: str | None = None  # Actual model used (from assistant.usage event)
 
     retries: int = 0
     auto_continues: int = 0

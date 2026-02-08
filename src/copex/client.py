@@ -75,6 +75,7 @@ class _SendState:
     prompt_tokens: int | None = None
     completion_tokens: int | None = None
     cost: float | None = None
+    server_model: str | None = None
 
     # Streaming performance tracking
     streaming_metrics: StreamingMetrics = field(default_factory=StreamingMetrics)
@@ -805,6 +806,7 @@ class Copex:
             inp = getattr(data, "input_tokens", None)
             out = getattr(data, "output_tokens", None)
             cost = getattr(data, "cost", None)
+            server_model = getattr(data, "model", None)
             if inp is not None:
                 try:
                     st.prompt_tokens = int(inp)
@@ -820,6 +822,8 @@ class Copex:
                     st.cost = float(cost)
                 except (TypeError, ValueError):
                     pass
+            if server_model is not None:
+                st.server_model = str(server_model)
 
         def _handle_turn_end(_e: Any, st: _SendState, _oc: Any) -> None:
             self._handle_assistant_turn_end(st)
@@ -936,6 +940,7 @@ class Copex:
             prompt_tokens=state.prompt_tokens,
             completion_tokens=state.completion_tokens,
             cost=state.cost,
+            server_model=state.server_model,
             streaming_metrics=state.streaming_metrics,
         )
 

@@ -634,12 +634,15 @@ async def _run_chat(
             result: dict[str, Any] = {
                 "content": response.content,
                 "model": config.model.value,
+                "server_model": response.server_model,  # Actual model from assistant.usage
                 "retries": response.retries,
             }
             if show_reasoning and response.reasoning:
                 result["reasoning"] = response.reasoning
             if response.usage:
                 result["usage"] = response.usage
+            if response.cost is not None:
+                result["cost"] = response.cost
             output_text = json.dumps(result, indent=2)
 
             if output_path:
