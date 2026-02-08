@@ -138,7 +138,7 @@ def load_last_model() -> Model | None:
     try:
         import json
 
-        with open(state_path, "r", encoding="utf-8") as f:
+        with open(state_path, encoding="utf-8") as f:
             data = json.load(f)
         model_value = data.get("last_model")
         if model_value:
@@ -159,7 +159,7 @@ def save_last_model(model: Model) -> None:
     data: dict[str, Any] = {}
     if state_path.exists():
         try:
-            with open(state_path, "r", encoding="utf-8") as f:
+            with open(state_path, encoding="utf-8") as f:
                 data = json.load(f)
         except (OSError, json.JSONDecodeError):
             pass
@@ -249,7 +249,7 @@ class CopexConfig(BaseModel):
         # Accept short aliases like "xh".
         try:
             parsed = parse_reasoning_effort(value)
-        except Exception:
+        except (ValueError, KeyError, TypeError):
             return value
         return parsed if parsed is not None else value
 
@@ -261,7 +261,7 @@ class CopexConfig(BaseModel):
             # (Avoid noisy warnings when defaults get normalized.)
             fields_set = getattr(self, "__pydantic_fields_set__", set())
             if "reasoning_effort" in fields_set:
-                warnings.warn(warning, UserWarning)
+                warnings.warn(warning, UserWarning, stacklevel=2)
             self.reasoning_effort = normalized
         return self
 
@@ -271,7 +271,7 @@ class CopexConfig(BaseModel):
         for d in value:
             p = Path(d)
             if not p.exists():
-                warnings.warn(f"Skill directory does not exist: {d}", UserWarning)
+                warnings.warn(f"Skill directory does not exist: {d}", UserWarning, stacklevel=2)
         return value
 
     @model_validator(mode="after")
@@ -285,6 +285,7 @@ class CopexConfig(BaseModel):
                 warnings.warn(
                     f"COPEX_MODEL='{env_model}' is not valid. Valid: {valid}",
                     UserWarning,
+                    stacklevel=2,
                 )
 
         env_reasoning = os.environ.get("COPEX_REASONING")
@@ -298,6 +299,7 @@ class CopexConfig(BaseModel):
                 warnings.warn(
                     f"COPEX_REASONING='{env_reasoning}' is not valid. Valid: {valid}",
                     UserWarning,
+                    stacklevel=2,
                 )
         return self
 
@@ -322,7 +324,7 @@ class CopexConfig(BaseModel):
         """Load configuration from TOML file."""
         try:
             import tomllib  # Python 3.11+
-        except Exception:
+        except ImportError:
             import tomli as tomllib  # type: ignore
 
         path = Path(path)
@@ -399,7 +401,7 @@ class CopexConfig(BaseModel):
             instructions_path = Path(self.instructions_file)
             if not instructions_path.exists():
                 raise FileNotFoundError(f"Instructions file not found: {instructions_path}")
-            with open(instructions_path, "r", encoding="utf-8") as f:
+            with open(instructions_path, encoding="utf-8") as f:
                 opts["instructions"] = f.read()
 
         # MCP servers
@@ -411,7 +413,7 @@ class CopexConfig(BaseModel):
                 raise FileNotFoundError(f"MCP config file not found: {config_path}")
             import json
 
-            with open(config_path, "r", encoding="utf-8") as f:
+            with open(config_path, encoding="utf-8") as f:
                 mcp_data = json.load(f)
                 if "servers" in mcp_data:
                     opts["mcp_servers"] = list(mcp_data["servers"].values())

@@ -7,7 +7,6 @@ import logging
 import random
 import time
 import warnings
-from collections import deque
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
@@ -16,113 +15,25 @@ from typing import Any
 from copilot import CopilotClient
 
 from copex.backoff import AdaptiveRetry, ErrorCategory, categorize_error
+from copex.circuit_breaker import (
+    CB_COOLDOWN_SECONDS as _CB_COOLDOWN_SECONDS,
+)
+from copex.circuit_breaker import (
+    CB_FAILURE_THRESHOLD as _CB_FAILURE_THRESHOLD,
+)
+from copex.circuit_breaker import (
+    DEFAULT_FALLBACK_CHAINS,
+    ModelAwareBreaker,
+    SlidingWindowBreaker,  # noqa: F401
+)
 from copex.config import CopexConfig
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
+from copex.sdk_patch import patch_copilot_client  # noqa: F401
+from copex.session_pool import SessionPool  # noqa: F401
+from copex.streaming import ChunkBatcher, Response, StreamChunk, StreamingMetrics  # noqa: F401
 
 logger = logging.getLogger(__name__)
-
-# ---------------------------------------------------------------------------
-# Patch: Remove ``--no-auto-update`` from the CLI startup args.
-#
-# The Copilot SDK passes ``--no-auto-update`` when spawning the CLI server in
-# headless mode.  This prevents the binary from fetching the latest model list
-# from the Copilot backend, causing newer models (e.g. ``claude-opus-4.6``,
-# ``claude-opus-4.6-fast``) to silently fall back to ``claude-sonnet-4.5``.
-#
-# We monkey-patch ``CopilotClient._start_cli_server`` to strip that flag so
-# the CLI always operates with the up-to-date model catalogue.
-# ---------------------------------------------------------------------------
-_original_start_cli_server = CopilotClient._start_cli_server  # type: ignore[attr-defined]
-
-
-async def _patched_start_cli_server(self: CopilotClient) -> None:
-    """Wrapper that removes ``--no-auto-update`` before starting the CLI."""
-    import os
-    import re
-    import subprocess
-
-    cli_path = self.options["cli_path"]
-
-    if not os.path.exists(cli_path):
-        raise RuntimeError(f"Copilot CLI not found at {cli_path}")
-
-    # Build args WITHOUT --no-auto-update
-    args = ["--headless", "--log-level", self.options["log_level"]]
-
-    if self.options.get("github_token"):
-        args.extend(["--auth-token-env", "COPILOT_SDK_AUTH_TOKEN"])
-    if not self.options.get("use_logged_in_user", True):
-        args.append("--no-auto-login")
-
-    if cli_path.endswith(".js"):
-        args = ["node", cli_path] + args
-    else:
-        args = [cli_path] + args
-
-    env = self.options.get("env")
-    if env is None:
-        env = dict(os.environ)
-    else:
-        env = dict(env)
-
-    if self.options.get("github_token"):
-        env["COPILOT_SDK_AUTH_TOKEN"] = self.options["github_token"]
-
-    if self.options["use_stdio"]:
-        args.append("--stdio")
-        self._process = subprocess.Popen(
-            args,
-            stdin=subprocess.PIPE,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            bufsize=0,
-            cwd=self.options["cwd"],
-            env=env,
-        )
-    else:
-        if self.options["port"] > 0:
-            args.extend(["--port", str(self.options["port"])])
-        self._process = subprocess.Popen(
-            args,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            cwd=self.options["cwd"],
-            env=env,
-        )
-
-    if self.options["use_stdio"]:
-        return
-
-    loop = asyncio.get_event_loop()
-    process = self._process
-
-    async def read_port() -> None:
-        if not process or not process.stdout:
-            raise RuntimeError("Process not started or stdout not available")
-        while True:
-            line = await loop.run_in_executor(None, process.stdout.readline)
-            if not line:
-                raise RuntimeError("CLI process exited before announcing port")
-            line_str = line.decode() if isinstance(line, bytes) else line
-            match = re.search(r"listening on port (\d+)", line_str, re.IGNORECASE)
-            if match:
-                self._actual_port = int(match.group(1))
-                return
-
-    try:
-        await asyncio.wait_for(read_port(), timeout=10.0)
-    except asyncio.TimeoutError:
-        raise RuntimeError("Timeout waiting for CLI server to start")
-
-
-CopilotClient._start_cli_server = _patched_start_cli_server  # type: ignore[attr-defined]
-logger.debug("Patched CopilotClient._start_cli_server to remove --no-auto-update")
-
-# Circuit breaker defaults
-_CB_FAILURE_THRESHOLD = 5
-_CB_COOLDOWN_SECONDS = 60.0
 
 MAX_RAW_EVENTS = 10_000
 
@@ -141,658 +52,6 @@ _ET_TOOL_CALL = EventType.TOOL_CALL.value
 _ET_TURN_END = EventType.ASSISTANT_TURN_END.value
 _ET_SESSION_IDLE = EventType.SESSION_IDLE.value
 _ET_USAGE = "assistant.usage"
-
-
-class SlidingWindowBreaker:
-    """Circuit breaker using a sliding window of recent request outcomes.
-
-    Unlike simple consecutive failure counting, this tracks a window of
-    the last N requests and opens the circuit when the failure rate
-    exceeds a threshold.
-
-    Args:
-        window_size: Number of recent requests to track (default: 10)
-        threshold: Failure rate threshold to open circuit (default: 0.5 = 50%)
-        cooldown_seconds: Seconds to wait before half-open state (default: 60)
-
-    Example:
-        breaker = SlidingWindowBreaker(window_size=10, threshold=0.5)
-        breaker.check()  # Raises if circuit is open
-        breaker.record_success()
-        breaker.record_failure()
-    """
-
-    def __init__(
-        self,
-        window_size: int = 10,
-        threshold: float = 0.5,
-        cooldown_seconds: float = 60.0,
-    ) -> None:
-        if not 0 < threshold <= 1:
-            raise ValueError("threshold must be between 0 and 1")
-        if window_size < 1:
-            raise ValueError("window_size must be >= 1")
-
-        self.window_size = window_size
-        self.threshold = threshold
-        self.cooldown_seconds = cooldown_seconds
-
-        # Sliding window: True = success, False = failure
-        self._window: deque[bool] = deque(maxlen=window_size)
-        self._opened_at: float | None = None
-        self._lock = asyncio.Lock()
-
-    @property
-    def failure_rate(self) -> float:
-        """Current failure rate in the sliding window."""
-        if not self._window:
-            return 0.0
-        failures = sum(1 for success in self._window if not success)
-        return failures / len(self._window)
-
-    @property
-    def is_open(self) -> bool:
-        """Check if circuit is currently open."""
-        if self._opened_at is None:
-            return False
-        elapsed = time.monotonic() - self._opened_at
-        return elapsed < self.cooldown_seconds
-
-    @property
-    def is_half_open(self) -> bool:
-        """Check if circuit is in half-open state (cooldown elapsed)."""
-        if self._opened_at is None:
-            return False
-        elapsed = time.monotonic() - self._opened_at
-        return elapsed >= self.cooldown_seconds
-
-    def check(self) -> None:
-        """Check circuit state; raise RuntimeError if open."""
-        if self._opened_at is not None:
-            elapsed = time.monotonic() - self._opened_at
-            if elapsed < self.cooldown_seconds:
-                remaining = self.cooldown_seconds - elapsed
-                raise RuntimeError(
-                    f"Circuit breaker open (failure rate {self.failure_rate:.0%}). "
-                    f"Retry in {remaining:.0f}s."
-                )
-            # Cooldown elapsed - half-open: reset for retry
-            self._opened_at = None
-            self._window.clear()
-
-    def record_success(self) -> None:
-        """Record a successful request."""
-        self._window.append(True)
-        if self._opened_at is not None:
-            # Successful request in half-open state closes the circuit
-            self._opened_at = None
-
-    def record_failure(self) -> None:
-        """Record a failed request, potentially opening the circuit."""
-        self._window.append(False)
-        # Only evaluate after window has enough samples
-        if len(self._window) >= self.window_size // 2:
-            if self.failure_rate >= self.threshold:
-                if self._opened_at is None:
-                    self._opened_at = time.monotonic()
-                    logger.warning(
-                        "Circuit breaker opened: failure rate %.0f%% "
-                        "exceeds threshold %.0f%%",
-                        self.failure_rate * 100,
-                        self.threshold * 100,
-                    )
-
-    def reset(self) -> None:
-        """Reset the circuit breaker to closed state."""
-        self._window.clear()
-        self._opened_at = None
-
-
-class ModelAwareBreaker:
-    """Per-model circuit breakers for granular failure isolation.
-
-    Different models may have different reliability characteristics.
-    This class maintains separate circuit breakers per model.
-
-    Args:
-        window_size: Window size for each breaker
-        threshold: Failure threshold for each breaker
-        cooldown_seconds: Cooldown for each breaker
-
-    Example:
-        breakers = ModelAwareBreaker()
-        breakers.check("gpt-5.2-codex")
-        breakers.record_success("gpt-5.2-codex")
-        breakers.record_failure("claude-opus-4.5")
-    """
-
-    def __init__(
-        self,
-        window_size: int = 10,
-        threshold: float = 0.5,
-        cooldown_seconds: float = 60.0,
-    ) -> None:
-        self.window_size = window_size
-        self.threshold = threshold
-        self.cooldown_seconds = cooldown_seconds
-        self._breakers: dict[str, SlidingWindowBreaker] = {}
-
-    def _get_breaker(self, model: str) -> SlidingWindowBreaker:
-        """Get or create a circuit breaker for a model."""
-        if model not in self._breakers:
-            self._breakers[model] = SlidingWindowBreaker(
-                window_size=self.window_size,
-                threshold=self.threshold,
-                cooldown_seconds=self.cooldown_seconds,
-            )
-        return self._breakers[model]
-
-    def check(self, model: str) -> None:
-        """Check if circuit is open for a model."""
-        self._get_breaker(model).check()
-
-    def record_success(self, model: str) -> None:
-        """Record a successful request for a model."""
-        self._get_breaker(model).record_success()
-
-    def record_failure(self, model: str) -> None:
-        """Record a failed request for a model."""
-        self._get_breaker(model).record_failure()
-
-    def reset(self, model: str | None = None) -> None:
-        """Reset breaker(s). If model is None, reset all."""
-        if model is None:
-            self._breakers.clear()
-        elif model in self._breakers:
-            self._breakers[model].reset()
-
-    def get_status(self) -> dict[str, dict[str, Any]]:
-        """Get status of all breakers."""
-        return {
-            model: {
-                "failure_rate": breaker.failure_rate,
-                "is_open": breaker.is_open,
-                "is_half_open": breaker.is_half_open,
-                "window_size": len(breaker._window),
-            }
-            for model, breaker in self._breakers.items()
-        }
-
-    def is_open(self, model: str) -> bool:
-        """Check if circuit is open for a model (without raising)."""
-        breaker = self._breakers.get(model)
-        return breaker.is_open if breaker else False
-
-    def get_available_model(
-        self,
-        preferred: str,
-        fallback_chain: list[str] | None = None,
-    ) -> str | None:
-        """Get the first available model from the fallback chain.
-
-        If the preferred model's circuit is open, returns the first
-        model in the fallback chain whose circuit is closed or
-        half-open. Returns None if all circuits are open.
-
-        Args:
-            preferred: The preferred model to use
-            fallback_chain: Optional list of fallback models in order
-
-        Returns:
-            The model to use, or None if all are unavailable
-
-        Example:
-            model = breaker.get_available_model(
-                "claude-opus-4.5",
-                fallback_chain=["claude-sonnet-4.5", "claude-haiku-4.5"]
-            )
-        """
-        # Check preferred model first
-        if not self.is_open(preferred):
-            return preferred
-
-        # Try fallback chain
-        if fallback_chain:
-            for fallback in fallback_chain:
-                if not self.is_open(fallback):
-                    logger.info(
-                        "Circuit open for %s, falling back to %s",
-                        preferred,
-                        fallback,
-                    )
-                    return fallback
-
-        return None
-
-
-# Default fallback chains for common model families
-DEFAULT_FALLBACK_CHAINS: dict[str, list[str]] = {
-    # Claude family: opus -> sonnet -> haiku
-    "claude-opus-4.6": ["claude-opus-4.6-fast", "claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
-    "claude-opus-4.6-fast": ["claude-opus-4.6", "claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
-    "claude-opus-4.5": ["claude-sonnet-4.5", "claude-haiku-4.5"],
-    "claude-sonnet-4.5": ["claude-sonnet-4", "claude-haiku-4.5"],
-    "claude-sonnet-4": ["claude-haiku-4.5"],
-    # GPT family: codex -> codex-max -> regular
-    "gpt-5.2-codex": ["gpt-5.1-codex", "gpt-5.2", "gpt-5.1"],
-    "gpt-5.1-codex": ["gpt-5.1-codex-max", "gpt-5.1", "gpt-5"],
-    "gpt-5.2": ["gpt-5.1", "gpt-5"],
-    "gpt-5.1": ["gpt-5", "gpt-5-mini"],
-    "gpt-5": ["gpt-5-mini", "gpt-4.1"],
-}
-
-
-class SessionPool:
-    """Connection pool for Copex sessions.
-
-    Maintains a pool of reusable sessions to reduce connection overhead.
-    Sessions are model-specific since different models require different
-    session configurations.  Uses LRU eviction when pool is full and
-    tracks hit/miss metrics.
-
-    Args:
-        max_sessions: Maximum sessions per model (default: 5)
-        max_idle_time: Seconds before idle session is evicted (default: 300)
-        pre_warm: Number of sessions to pre-create per model on warm-up (default: 0)
-
-    Example:
-        pool = SessionPool()
-        async with pool.acquire(client, config) as session:
-            await session.send({"prompt": "Hello"})
-    """
-
-    @dataclass
-    class _PooledSession:
-        session: Any
-        model: str
-        created_at: float
-        last_used: float
-        in_use: bool = False
-
-    def __init__(
-        self,
-        max_sessions: int = 5,
-        max_idle_time: float = 300.0,
-        pre_warm: int = 0,
-    ) -> None:
-        self.max_sessions = max_sessions
-        self.max_idle_time = max_idle_time
-        self.pre_warm = pre_warm
-        # Per-model pools keyed by model name
-        self._pools: dict[str, list[SessionPool._PooledSession]] = {}
-        # Per-model locks to reduce contention
-        self._model_locks: dict[str, asyncio.Lock] = {}
-        # Global lock only for creating new model entries
-        self._global_lock = asyncio.Lock()
-        self._cleanup_task: asyncio.Task[None] | None = None
-        # Pool hit/miss metrics
-        self._hits: int = 0
-        self._misses: int = 0
-        self._evictions: int = 0
-
-    async def _get_model_lock(self, model: str) -> asyncio.Lock:
-        """Get or create a per-model lock."""
-        if model not in self._model_locks:
-            async with self._global_lock:
-                if model not in self._model_locks:
-                    self._model_locks[model] = asyncio.Lock()
-        return self._model_locks[model]
-
-    async def warm(
-        self,
-        client: Any,
-        configs: list[CopexConfig],
-    ) -> None:
-        """Pre-warm the pool by creating sessions for the given configs.
-
-        Args:
-            client: CopilotClient instance
-            configs: List of configs whose models should be pre-warmed
-        """
-        if self.pre_warm <= 0:
-            return
-        for config in configs:
-            model = config.model.value
-            lock = await self._get_model_lock(model)
-            async with lock:
-                pool = self._pools.setdefault(model, [])
-                needed = min(self.pre_warm, self.max_sessions) - len(pool)
-                for _ in range(needed):
-                    try:
-                        session = await client.create_session(
-                            config.to_session_options()
-                        )
-                        pool.append(
-                            SessionPool._PooledSession(
-                                session=session,
-                                model=model,
-                                created_at=time.monotonic(),
-                                last_used=time.monotonic(),
-                            )
-                        )
-                    except Exception:
-                        logger.debug("Failed to pre-warm session", exc_info=True)
-                        break
-
-    async def start(self) -> None:
-        """Start the pool cleanup task."""
-        if self._cleanup_task is None:
-            self._cleanup_task = asyncio.create_task(self._cleanup_loop())
-
-    async def stop(self) -> None:
-        """Stop the pool and destroy all sessions."""
-        if self._cleanup_task:
-            self._cleanup_task.cancel()
-            try:
-                await self._cleanup_task
-            except asyncio.CancelledError:
-                pass
-            self._cleanup_task = None
-
-        # Destroy all pooled sessions
-        async with self._global_lock:
-            for pool in self._pools.values():
-                for ps in pool:
-                    try:
-                        await ps.session.destroy()
-                    except Exception:
-                        logger.debug("Failed to destroy pooled session", exc_info=True)
-            self._pools.clear()
-            self._model_locks.clear()
-
-    async def _cleanup_loop(self) -> None:
-        """Periodically clean up idle sessions."""
-        while True:
-            await asyncio.sleep(60)  # Check every minute
-            await self._evict_idle()
-
-    async def _evict_idle(self) -> None:
-        """Evict sessions that have been idle too long."""
-        now = time.monotonic()
-        for model in list(self._pools.keys()):
-            lock = await self._get_model_lock(model)
-            async with lock:
-                pool = self._pools.get(model)
-                if pool is None:
-                    continue
-                to_remove = []
-                for ps in pool:
-                    if not ps.in_use and (now - ps.last_used) > self.max_idle_time:
-                        to_remove.append(ps)
-
-                for ps in to_remove:
-                    pool.remove(ps)
-                    self._evictions += 1
-                    try:
-                        await ps.session.destroy()
-                    except Exception:
-                        logger.debug("Failed to destroy idle session", exc_info=True)
-
-                if not pool:
-                    del self._pools[model]
-
-    def _evict_lru(self, pool: list[SessionPool._PooledSession]) -> _PooledSession | None:
-        """Find the least-recently-used idle session for eviction."""
-        lru: SessionPool._PooledSession | None = None
-        for ps in pool:
-            if not ps.in_use:
-                if lru is None or ps.last_used < lru.last_used:
-                    lru = ps
-        return lru
-
-    @asynccontextmanager
-    async def acquire(
-        self,
-        client: Any,
-        config: CopexConfig,
-    ) -> AsyncIterator[Any]:
-        """Acquire a session from the pool.
-
-        Args:
-            client: CopilotClient instance
-            config: CopexConfig for session creation
-
-        Yields:
-            A session to use
-
-        Example:
-            async with pool.acquire(client, config) as session:
-                await session.send({"prompt": "Hello"})
-        """
-        model = config.model.value
-        session = None
-        pooled: SessionPool._PooledSession | None = None
-
-        lock = await self._get_model_lock(model)
-        async with lock:
-            pool = self._pools.setdefault(model, [])
-
-            # LRU: pick the most-recently-used idle session for best reuse
-            best: SessionPool._PooledSession | None = None
-            for ps in pool:
-                if not ps.in_use:
-                    if best is None or ps.last_used > best.last_used:
-                        best = ps
-            if best is not None:
-                best.in_use = True
-                best.last_used = time.monotonic()
-                session = best.session
-                pooled = best
-                self._hits += 1
-
-        # No available session - create new one
-        is_pooled = False
-        if session is None:
-            self._misses += 1
-            session = await client.create_session(config.to_session_options())
-            pooled = SessionPool._PooledSession(
-                session=session,
-                model=model,
-                created_at=time.monotonic(),
-                last_used=time.monotonic(),
-                in_use=True,
-            )
-            async with lock:
-                pool = self._pools.setdefault(model, [])
-                if len(pool) < self.max_sessions:
-                    pool.append(pooled)
-                    is_pooled = True
-                else:
-                    # LRU eviction: replace least-recently-used idle session
-                    lru = self._evict_lru(pool)
-                    if lru is not None:
-                        pool.remove(lru)
-                        self._evictions += 1
-                        pool.append(pooled)
-                        is_pooled = True
-                        try:
-                            await lru.session.destroy()
-                        except Exception:
-                            logger.debug(
-                                "Failed to destroy evicted session", exc_info=True
-                            )
-        else:
-            is_pooled = True
-
-        try:
-            yield session
-        finally:
-            # Return session to pool or destroy if not pooled
-            if pooled is not None:
-                pooled.in_use = False
-                pooled.last_used = time.monotonic()
-            if not is_pooled and session is not None:
-                try:
-                    await session.destroy()
-                except Exception:
-                    pass
-
-    def stats(self) -> dict[str, Any]:
-        """Get pool statistics including hit/miss metrics."""
-        result: dict[str, Any] = {
-            "_pool_metrics": {
-                "hits": self._hits,
-                "misses": self._misses,
-                "evictions": self._evictions,
-                "hit_rate": (
-                    self._hits / (self._hits + self._misses)
-                    if (self._hits + self._misses) > 0
-                    else 0.0
-                ),
-            },
-        }
-        for model, pool in self._pools.items():
-            result[model] = {
-                "total": len(pool),
-                "in_use": sum(1 for ps in pool if ps.in_use),
-                "available": sum(1 for ps in pool if not ps.in_use),
-            }
-        return result
-
-
-@dataclass
-class Response:
-    """Response from a Copilot prompt."""
-
-    content: str
-    reasoning: str | None = None
-    raw_events: list[dict[str, Any]] = field(default_factory=list)
-
-    # Request accounting (when available from the SDK)
-    prompt_tokens: int | None = None
-    completion_tokens: int | None = None
-    cost: float | None = None
-
-    retries: int = 0
-    auto_continues: int = 0
-    streaming_metrics: StreamingMetrics | None = None
-
-    @property
-    def usage(self) -> dict[str, int] | None:
-        """Return token usage in an OpenAI-compatible shape when available."""
-        if self.prompt_tokens is None and self.completion_tokens is None:
-            return None
-        return {
-            "prompt_tokens": int(self.prompt_tokens or 0),
-            "completion_tokens": int(self.completion_tokens or 0),
-        }
-
-
-@dataclass
-class StreamChunk:
-    """A streaming chunk from Copilot."""
-
-    type: str  # "message", "reasoning", "tool_call", "tool_result", "system"
-    delta: str = ""
-    is_final: bool = False
-    content: str | None = None  # Full content when is_final=True
-    # Tool call info
-    tool_id: str | None = None
-    tool_name: str | None = None
-    tool_args: dict[str, Any] | None = None
-    tool_result: str | None = None
-    tool_success: bool | None = None
-    tool_duration: float | None = None
-
-
-@dataclass
-class StreamingMetrics:
-    """Lightweight metrics captured during a single streaming response."""
-
-    first_chunk_time: float | None = None
-    last_chunk_time: float | None = None
-    total_chunks: int = 0
-    total_bytes: int = 0
-    message_chunks: int = 0
-    reasoning_chunks: int = 0
-    tool_chunks: int = 0
-    _start_time: float = 0.0
-
-    @property
-    def time_to_first_chunk_ms(self) -> float | None:
-        if self._start_time and self.first_chunk_time is not None:
-            return (self.first_chunk_time - self._start_time) * 1000
-        return None
-
-    @property
-    def chunks_per_second(self) -> float:
-        if self.first_chunk_time is None or self.last_chunk_time is None:
-            return 0.0
-        elapsed = self.last_chunk_time - self.first_chunk_time
-        if elapsed <= 0:
-            return float(self.total_chunks)
-        return self.total_chunks / elapsed
-
-    @property
-    def throughput_bytes_per_second(self) -> float:
-        if self.first_chunk_time is None or self.last_chunk_time is None:
-            return 0.0
-        elapsed = self.last_chunk_time - self.first_chunk_time
-        if elapsed <= 0:
-            return float(self.total_bytes)
-        return self.total_bytes / elapsed
-
-    def record_chunk(self, chunk: StreamChunk) -> None:
-        now = time.monotonic()
-        if self.first_chunk_time is None:
-            self.first_chunk_time = now
-        self.last_chunk_time = now
-        self.total_chunks += 1
-        self.total_bytes += len(chunk.delta)
-        if chunk.type == "message":
-            self.message_chunks += 1
-        elif chunk.type == "reasoning":
-            self.reasoning_chunks += 1
-        elif chunk.type in ("tool_call", "tool_result"):
-            self.tool_chunks += 1
-
-
-class ChunkBatcher:
-    """Batches rapid-fire delta chunks to reduce callback overhead.
-
-    For high-throughput streaming, invoking the on_chunk callback for
-    every single token is expensive. ChunkBatcher accumulates delta
-    chunks of the same type and flushes them when the type changes,
-    a non-delta chunk arrives, or a size threshold is reached.
-    """
-
-    __slots__ = ("_callback", "_max_bytes", "_pending_type", "_pending_parts", "_pending_bytes")
-
-    def __init__(
-        self,
-        callback: Callable[[StreamChunk], None],
-        max_bytes: int = 4096,
-    ) -> None:
-        self._callback = callback
-        self._max_bytes = max_bytes
-        self._pending_type: str | None = None
-        self._pending_parts: list[str] = []
-        self._pending_bytes = 0
-
-    def push(self, chunk: StreamChunk) -> None:
-        is_delta = chunk.delta and not chunk.is_final and chunk.type in ("message", "reasoning")
-        if is_delta:
-            if self._pending_type == chunk.type:
-                self._pending_parts.append(chunk.delta)
-                self._pending_bytes += len(chunk.delta)
-                if self._pending_bytes >= self._max_bytes:
-                    self.flush()
-            else:
-                self.flush()
-                self._pending_type = chunk.type
-                self._pending_parts.append(chunk.delta)
-                self._pending_bytes = len(chunk.delta)
-        else:
-            self.flush()
-            self._callback(chunk)
-
-    def flush(self) -> None:
-        if self._pending_parts:
-            merged = "".join(self._pending_parts)
-            self._callback(StreamChunk(type=self._pending_type or "message", delta=merged))
-            self._pending_parts.clear()
-            self._pending_bytes = 0
-            self._pending_type = None
 
 
 @dataclass
@@ -876,7 +135,7 @@ class Copex:
         if self._session:
             try:
                 await self._session.destroy()
-            except Exception:
+            except Exception:  # Cleanup: best-effort session teardown
                 logger.debug("Failed to destroy session during stop", exc_info=True)
             self._session = None
         if self._client:
@@ -888,7 +147,7 @@ class Copex:
         """Abort the currently processing message (best-effort)."""
         try:
             session = await self._ensure_session()
-        except Exception:
+        except Exception:  # Abort is best-effort; ignore session failures
             return
         try:
             await session.abort()
@@ -896,7 +155,7 @@ class Copex:
             # Aborting is best-effort; ignore failures.
             return
 
-    async def __aenter__(self) -> "Copex":
+    async def __aenter__(self) -> Copex:
         await self.start()
         return self
 
@@ -1064,6 +323,52 @@ class Copex:
         if self._current_model:
             self.get_model_breaker().record_failure(self._current_model)
 
+    def _check_post_tool_complete(self, state: _SendState) -> None:
+        if (
+            state.awaiting_post_tool_response
+            and state.tool_execution_seen
+            and state.pending_tools == 0
+        ):
+            state.awaiting_post_tool_response = False
+
+    def _handle_content_delta(
+        self,
+        state: _SendState,
+        delta: str,
+        content_type: str,
+        on_chunk: Callable[[StreamChunk], None] | None,
+    ) -> None:
+        if content_type == "message":
+            if delta:
+                state.received_content = True
+                state.content_parts.append(delta)
+            self._check_post_tool_complete(state)
+        else:
+            if delta:
+                state.reasoning_parts.append(delta)
+        if on_chunk:
+            chunk = StreamChunk(type=content_type, delta=delta)
+            state.streaming_metrics.record_chunk(chunk)
+            on_chunk(chunk)
+
+    def _handle_content_final(
+        self,
+        state: _SendState,
+        content: str,
+        content_type: str,
+        on_chunk: Callable[[StreamChunk], None] | None,
+    ) -> None:
+        if content_type == "message":
+            state.final_content = content
+            if content:
+                state.received_content = True
+            self._check_post_tool_complete(state)
+        else:
+            state.final_reasoning = content
+        if on_chunk:
+            final = state.final_content if content_type == "message" else state.final_reasoning
+            on_chunk(StreamChunk(type=content_type, delta="", is_final=True, content=final))
+
     def _handle_message_delta(
         self,
         event: Any,
@@ -1072,19 +377,7 @@ class Copex:
     ) -> None:
         data = event.data
         delta = getattr(data, "delta_content", None) or getattr(data, "transformed_content", None) or ""
-        if delta:
-            state.received_content = True
-            state.content_parts.append(delta)
-        if (
-            state.awaiting_post_tool_response
-            and state.tool_execution_seen
-            and state.pending_tools == 0
-        ):
-            state.awaiting_post_tool_response = False
-        if on_chunk:
-            chunk = StreamChunk(type="message", delta=delta)
-            state.streaming_metrics.record_chunk(chunk)
-            on_chunk(chunk)
+        self._handle_content_delta(state, delta, "message", on_chunk)
 
     def _handle_reasoning_delta(
         self,
@@ -1093,12 +386,7 @@ class Copex:
         on_chunk: Callable[[StreamChunk], None] | None,
     ) -> None:
         delta = getattr(event.data, "delta_content", None) or ""
-        if delta:
-            state.reasoning_parts.append(delta)
-        if on_chunk:
-            chunk = StreamChunk(type="reasoning", delta=delta)
-            state.streaming_metrics.record_chunk(chunk)
-            on_chunk(chunk)
+        self._handle_content_delta(state, delta, "reasoning", on_chunk)
 
     def _handle_message(
         self,
@@ -1109,24 +397,7 @@ class Copex:
         content = getattr(event.data, "content", "") or ""
         if not content:
             content = getattr(event.data, "transformed_content", "") or ""
-        state.final_content = content
-        if content:
-            state.received_content = True
-        if (
-            state.awaiting_post_tool_response
-            and state.tool_execution_seen
-            and state.pending_tools == 0
-        ):
-            state.awaiting_post_tool_response = False
-        if on_chunk:
-            on_chunk(
-                StreamChunk(
-                    type="message",
-                    delta="",
-                    is_final=True,
-                    content=state.final_content,
-                )
-            )
+        self._handle_content_final(state, content, "message", on_chunk)
 
     def _handle_reasoning(
         self,
@@ -1134,16 +405,8 @@ class Copex:
         state: _SendState,
         on_chunk: Callable[[StreamChunk], None] | None,
     ) -> None:
-        state.final_reasoning = getattr(event.data, "content", "") or ""
-        if on_chunk:
-            on_chunk(
-                StreamChunk(
-                    type="reasoning",
-                    delta="",
-                    is_final=True,
-                    content=state.final_reasoning,
-                )
-            )
+        content = getattr(event.data, "content", "") or ""
+        self._handle_content_final(state, content, "reasoning", on_chunk)
 
     def _extract_tool_id(self, data: Any) -> str | None:
         """Extract tool ID from event data using common fields."""
@@ -1248,7 +511,7 @@ class Copex:
 
             try:
                 tool_args = json.loads(tool_args)
-            except Exception:
+            except (json.JSONDecodeError, ValueError):
                 tool_args = {"raw": tool_args}
         if on_chunk:
             on_chunk(
@@ -1269,7 +532,7 @@ class Copex:
 
     async def _ensure_session(self) -> Any:
         """Ensure a session exists, creating one if needed."""
-        from copex.models import _NO_REASONING_MODELS
+        from copex.models import model_supports_reasoning
         if not self._started:
             await self.start()
         if self._session is None:
@@ -1279,7 +542,7 @@ class Copex:
             if self._current_model and self._current_model != self.config.model.value:
                 session_options["model"] = self._current_model
                 # If the fallback model doesn't support reasoning, drop it
-                if self._current_model in _NO_REASONING_MODELS:
+                if not model_supports_reasoning(self._current_model):
                     session_options.pop("reasoning_effort", None)
             self._session = await self._client.create_session(session_options)
         return self._session
@@ -1314,6 +577,7 @@ class Copex:
 
             return "\n\n".join(context_parts[-10:])  # Last 10 messages max
         except Exception:
+            logger.debug("Failed to extract session context", exc_info=True)
             return None
 
     async def _recover_session(
@@ -1325,14 +589,14 @@ class Copex:
             context = await self._get_session_context(self._session)
             try:
                 await self._session.destroy()
-            except Exception:
+            except Exception:  # Cleanup: must not fail recovery
                 logger.debug("Failed to destroy session during recovery", exc_info=True)
             self._session = None
 
         # Create fresh session
         try:
             session = await self._ensure_session()
-        except Exception:
+        except Exception:  # Propagated: session creation is critical
             logger.error("Failed to create fresh session during recovery", exc_info=True)
             raise
 
@@ -1401,8 +665,8 @@ class Copex:
             if self._session:
                 try:
                     await self._session.destroy()
-                except Exception:
-                    pass
+                except Exception:  # Cleanup: best-effort session teardown
+                    logger.debug("Failed to destroy session for model fallback", exc_info=True)
                 self._session = None
         else:
             self._current_model = original_model
@@ -1444,7 +708,7 @@ class Copex:
                 self._cb_record_success()
                 return result
 
-            except Exception as e:
+            except Exception as e:  # Catch-all: retry logic must handle any SDK error
                 last_error = e
                 error_str = str(e)
 
@@ -1458,7 +722,7 @@ class Copex:
                             retries=retries,
                         )
                         self._cb_record_failure()
-                        raise last_error
+                        raise last_error from e
                     retries = 0
                     session, prompt = await self._recover_session(on_chunk)
                     if on_chunk:
@@ -1521,7 +785,7 @@ class Copex:
                         retries=retries,
                     )
                     self._cb_record_failure()
-                    raise last_error or RuntimeError("Max retries exceeded")
+                    raise (last_error or RuntimeError("Max retries exceeded")) from e
 
     async def _send_once(
         self,
@@ -1544,17 +808,17 @@ class Copex:
             if inp is not None:
                 try:
                     st.prompt_tokens = int(inp)
-                except Exception:
+                except (TypeError, ValueError):
                     pass
             if out is not None:
                 try:
                     st.completion_tokens = int(out)
-                except Exception:
+                except (TypeError, ValueError):
                     pass
             if cost is not None:
                 try:
                     st.cost = float(cost)
-                except Exception:
+                except (TypeError, ValueError):
                     pass
 
         def _handle_turn_end(_e: Any, st: _SendState, _oc: Any) -> None:
@@ -1611,7 +875,7 @@ class Copex:
                 if handler is not None:
                     handler(event, state, on_chunk)
 
-            except Exception as e:
+            except Exception as e:  # Catch-all: on_event must not crash the event loop
                 logger.warning("Unhandled exception in on_event callback: %s", e, exc_info=True)
                 state.error_holder.append(e)
                 state.done.set()
@@ -1633,13 +897,13 @@ class Copex:
                     if idle_time >= self.config.timeout:
                         raise TimeoutError(
                             f"Response timed out after {idle_time:.1f}s of inactivity"
-                        )
+                        ) from None
                     # Had recent activity, keep waiting
         finally:
             # Remove event handler to avoid duplicates
             try:
                 unsubscribe()
-            except Exception:
+            except Exception:  # Cleanup: unsubscribe is best-effort
                 logger.debug("Failed to unsubscribe event handler", exc_info=True)
 
         # If we never got explicit content events, try to extract from history.
@@ -1658,7 +922,7 @@ class Copex:
                         )
                         if state.final_content:
                             break
-            except Exception:
+            except Exception:  # Cleanup: fallback extraction is best-effort
                 logger.debug("Failed to extract messages for history fallback", exc_info=True)
 
         if state.error_holder:
@@ -1730,7 +994,7 @@ class Copex:
             except RuntimeError:
                 try:
                     asyncio.run(session.destroy())
-                except Exception:
+                except Exception:  # Cleanup: sync destroy is best-effort
                     logger.debug("Failed to destroy session in new_session (sync)", exc_info=True)
             else:
 

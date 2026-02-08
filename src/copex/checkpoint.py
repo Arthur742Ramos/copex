@@ -52,7 +52,7 @@ class Checkpoint:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "Checkpoint":
+    def from_dict(cls, data: dict[str, Any]) -> Checkpoint:
         """Create from dictionary."""
         return cls(**data)
 
@@ -184,7 +184,7 @@ class CheckpointStore:
         if not path.exists():
             return None
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         return Checkpoint.from_dict(data)
@@ -220,7 +220,7 @@ class CheckpointStore:
         result = []
         for path in self.base_dir.glob("*.json"):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
 
                 if data.get("completed", False):
@@ -267,7 +267,7 @@ class CheckpointStore:
             by_loop[lid].append(cp)
 
         deleted = 0
-        for lid, checkpoints in by_loop.items():
+        for _lid, checkpoints in by_loop.items():
             # Sort by updated_at descending
             checkpoints.sort(key=lambda x: x["updated_at"], reverse=True)
 
@@ -291,7 +291,7 @@ class CheckpointStore:
         checkpoints = []
         for path in self.base_dir.glob("*.json"):
             try:
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
 
                 if loop_id and data.get("loop_id") != loop_id:

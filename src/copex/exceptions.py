@@ -261,3 +261,31 @@ class ConnectionError(CopexError):
         super().__init__(message, ctx)
         self.host = host
         self.port = port
+
+
+class CircuitBreakerOpen(CopexError):
+    """Raised when the circuit breaker is open and requests are rejected."""
+
+
+class SessionError(CopexError):
+    """Raised when session creation or management fails."""
+
+
+class SessionRecoveryFailed(SessionError):
+    """Raised when session recovery after an error fails."""
+
+
+class AllModelsUnavailable(CopexError):
+    """Raised when all models (primary + fallbacks) are unavailable."""
+
+
+class ToolExecutionError(CopexError):
+    """Raised when a tool execution fails."""
+
+
+class StreamingError(CopexError):
+    """Raised when streaming encounters an unrecoverable error."""
+
+
+class ConfigurationError(CopexError):
+    """Raised when configuration is invalid."""

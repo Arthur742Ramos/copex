@@ -28,7 +28,7 @@ import re
 import subprocess
 import time
 from collections import deque
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable, Iterable
 from dataclasses import dataclass, field
 from enum import Enum
 from pathlib import Path
@@ -69,6 +69,47 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return False
 
 
+class DynamicSemaphore:
+    """A semaphore that supports dynamic resizing of the concurrency limit.
+
+    Unlike ``asyncio.Semaphore``, the maximum number of concurrent holders
+    can be changed at runtime via :meth:`resize`.
+    """
+
+    def __init__(self, value: int) -> None:
+        self._limit = max(1, value)
+        self._active = 0
+        self._condition = asyncio.Condition()
+
+    @property
+    def limit(self) -> int:
+        return self._limit
+
+    async def resize(self, new_limit: int) -> None:
+        """Change the concurrency limit and wake waiting tasks if expanded."""
+        async with self._condition:
+            self._limit = max(1, new_limit)
+            self._condition.notify_all()
+
+    async def acquire(self) -> None:
+        async with self._condition:
+            while self._active >= self._limit:
+                await self._condition.wait()
+            self._active += 1
+
+    async def release(self) -> None:
+        async with self._condition:
+            self._active -= 1
+            self._condition.notify_all()
+
+    async def __aenter__(self) -> DynamicSemaphore:
+        await self.acquire()
+        return self
+
+    async def __aexit__(self, *args: object) -> None:
+        await self.release()
+
+
 class AdaptiveConcurrency:
     """Manages adaptive concurrency based on rate limit errors.
 
@@ -88,11 +129,17 @@ class AdaptiveConcurrency:
         self._restore_after = restore_after
         self._success_streak = 0
         self._lock = asyncio.Lock()
+        self._semaphore = DynamicSemaphore(initial)
 
     @property
     def current(self) -> int:
         """Current concurrency level."""
         return self._current
+
+    @property
+    def semaphore(self) -> DynamicSemaphore:
+        """The dynamic semaphore gating task execution."""
+        return self._semaphore
 
     async def on_rate_limit(self) -> int:
         """Called when a rate limit error occurs. Returns new concurrency level."""
@@ -107,7 +154,8 @@ class AdaptiveConcurrency:
                     old,
                     self._current,
                 )
-            return self._current
+        await self._semaphore.resize(self._current)
+        return self._current
 
     async def on_success(self) -> int:
         """Called on successful task completion. Returns new concurrency level."""
@@ -125,7 +173,8 @@ class AdaptiveConcurrency:
                         self._current,
                         self._restore_after,
                     )
-            return self._current
+        await self._semaphore.resize(self._current)
+        return self._current
 
     async def on_failure(self) -> None:
         """Called on non-rate-limit failure. Resets success streak."""
@@ -180,7 +229,7 @@ def _render_prompt_with_task_outputs(
     prompt: str,
     *,
     current_task_id: str,
-    results: dict[str, "FleetResult"],
+    results: dict[str, FleetResult],
 ) -> str:
     """Expand task output placeholders in a prompt.
 
@@ -595,6 +644,119 @@ def _normalize_mcp_servers(
     return normalized
 
 
+# ---------------------------------------------------------------------------
+# Shared helpers extracted from Fleet.run() / Fleet.run_streaming()
+# ---------------------------------------------------------------------------
+
+
+def _prepend_shared_context(
+    tasks: list[FleetTask], shared_context: str | None
+) -> list[FleetTask]:
+    """Return tasks with *shared_context* prepended to each prompt.
+
+    If *shared_context* is falsy the original list is returned unchanged.
+    Original tasks are never mutated.
+    """
+    if not shared_context:
+        return tasks
+    return [
+        FleetTask(
+            id=t.id,
+            prompt=f"{shared_context}\n\n{t.prompt}",
+            depends_on=t.depends_on,
+            model=t.model,
+            reasoning_effort=t.reasoning_effort,
+            cwd=t.cwd,
+            skills=t.skills,
+            exclude_tools=t.exclude_tools,
+            mcp_servers=t.mcp_servers,
+            timeout_sec=t.timeout_sec,
+            skills_dirs=t.skills_dirs,
+            on_dependency_failure=t.on_dependency_failure,
+        )
+        for t in tasks
+    ]
+
+
+async def _run_task_with_retry(
+    task: FleetTask,
+    config: FleetConfig,
+    run_once: Callable[[FleetTask, int], Awaitable[FleetResult]],
+    on_status: Callable[[str, str], None] | None = None,
+    adaptive: AdaptiveConcurrency | None = None,
+) -> FleetResult:
+    """Execute *task* with per-task retry logic and adaptive concurrency."""
+    max_retries = task.retries if task.retries is not None else config.default_retries
+    retry_delay = (
+        task.retry_delay if task.retry_delay is not None else config.default_retry_delay
+    )
+
+    result: FleetResult | None = None
+
+    for attempt in range(max_retries + 1):  # +1 for initial attempt
+        if attempt > 0:
+            # Calculate exponential backoff with jitter
+            delay = retry_delay * (2 ** (attempt - 1))
+            jitter = delay * 0.2 * (asyncio.get_event_loop().time() % 1)
+            await asyncio.sleep(delay + jitter)
+            if on_status:
+                on_status(task.id, f"retry-{attempt}")
+
+        result = await run_once(task, attempt)
+
+        if result.success:
+            if adaptive:
+                await adaptive.on_success()
+            return result
+
+        last_error = result.error
+
+        # Check if it's a rate limit error
+        if last_error and _is_rate_limit_error(last_error):
+            if adaptive:
+                await adaptive.on_rate_limit()
+            # Always retry rate limits if we have retries left
+            continue
+        elif adaptive:
+            await adaptive.on_failure()
+
+        # For non-rate-limit errors, check if we should retry
+        if attempt >= max_retries:
+            break
+
+    # All retries exhausted – result is guaranteed non-None because the loop
+    # runs at least once (max_retries >= 0).
+    assert result is not None  # noqa: S101
+    return result
+
+
+def _make_tracking_on_status(
+    on_status: Callable[[str, str], None] | None,
+    store: Any,
+    run_id: str | None,
+) -> Callable[[str, str], None]:
+    """Wrap *on_status* to also update the fleet store."""
+
+    def _tracking(task_id: str, status: str) -> None:
+        if store is not None and run_id is not None:
+            store.update_task_status(run_id, task_id, status)
+        if on_status:
+            on_status(task_id, status)
+
+    return _tracking
+
+
+def _track_git_files(
+    git_finalizer: GitFinalizer | None, results: Iterable[FleetResult]
+) -> None:
+    """Track modified files from successful responses for git finalization."""
+    if git_finalizer is not None:
+        for result in results:
+            if result.success and result.response:
+                for path in _extract_paths(result.response.content):
+                    git_finalizer.track(path)
+
+
 @dataclass
 class FleetTask:
     """A single task to be executed by a fleet agent."""
@@ -651,6 +813,8 @@ class FleetConfig:
     # Global retry configuration (can be overridden per-task)
     default_retries: int = 3
     default_retry_delay: float = 1.0  # Base delay in seconds
+    # Dependency wait timeout (0 = use task timeout / fleet timeout)
+    dep_timeout: float = 0.0
     # Adaptive concurrency settings
     adaptive_concurrency: bool = True  # Auto-reduce on rate limits
     min_concurrent: int = 1  # Minimum concurrency when adapting
@@ -813,8 +977,10 @@ class FleetCoordinator:
             else None
         )
 
-        # Dynamic semaphore that can be adjusted
-        semaphore = asyncio.Semaphore(config.max_concurrent)
+        # Use adaptive semaphore when available, otherwise a fixed one
+        semaphore: DynamicSemaphore | asyncio.Semaphore = (
+            adaptive.semaphore if adaptive else asyncio.Semaphore(config.max_concurrent)
+        )
 
         # Each task gets an event that is set when it finishes
         done_events: dict[str, asyncio.Event] = {t.id: asyncio.Event() for t in tasks}
@@ -840,63 +1006,37 @@ class FleetCoordinator:
 
         try:
 
-            async def _run_task_with_retry(task: FleetTask) -> FleetResult:
-                """Execute a task with per-task retry logic."""
-                # Determine retry config: task-specific or global
-                max_retries = task.retries if task.retries is not None else config.default_retries
-                retry_delay = (
-                    task.retry_delay if task.retry_delay is not None else config.default_retry_delay
-                )
-
-                last_error: Exception | None = None
-                retries_used = 0
-
-                for attempt in range(max_retries + 1):  # +1 for initial attempt
-                    if attempt > 0:
-                        # Calculate exponential backoff with jitter
-                        delay = retry_delay * (2 ** (attempt - 1))
-                        jitter = delay * 0.2 * (asyncio.get_event_loop().time() % 1)
-                        await asyncio.sleep(delay + jitter)
-                        retries_used = attempt
-                        if on_status:
-                            on_status(task.id, f"retry-{attempt}")
-
-                    result = await _run_task_once(task, retries_used)
-
-                    if result.success:
-                        # Notify adaptive concurrency of success
-                        if adaptive:
-                            await adaptive.on_success()
-                        return result
-
-                    last_error = result.error
-
-                    # Check if it's a rate limit error
-                    if last_error and _is_rate_limit_error(last_error):
-                        if adaptive:
-                            await adaptive.on_rate_limit()
-                            # Note: We can't dynamically resize the semaphore,
-                            # but the rate limit backoff will naturally slow things down
-                        # Always retry rate limits if we have retries left
-                        continue
-                    elif adaptive:
-                        await adaptive.on_failure()
-
-                    # For non-rate-limit errors, check if we should retry
-                    if attempt >= max_retries:
-                        break
-
-                # All retries exhausted
-                return result
-
             async def _run_task_once(task: FleetTask, retries_used: int = 0) -> FleetResult:
                 if on_status and retries_used == 0:
                     on_status(task.id, "queued")
 
                 # Wait for all dependencies to finish
                 dep_policy = _normalize_dep_failure_policy(task.on_dependency_failure)
+                dep_wait_timeout = (
+                    config.dep_timeout
+                    or (task.timeout_sec if task.timeout_sec is not None else config.timeout)
+                )
                 for dep in task.depends_on:
-                    await done_events[dep].wait()
+                    try:
+                        await asyncio.wait_for(
+                            done_events[dep].wait(), timeout=dep_wait_timeout
+                        )
+                    except asyncio.TimeoutError:
+                        error = RuntimeError(
+                            f"Task '{task.id}' timed out waiting for dependency '{dep}' "
+                            f"after {dep_wait_timeout}s"
+                        )
+                        result = FleetResult(
+                            task_id=task.id,
+                            success=False,
+                            error=error,
+                        )
+                        results[task.id] = result
+                        finished[task.id] = False
+                        done_events[task.id].set()
+                        if on_status:
+                            on_status(task.id, "blocked")
+                        return result
                 failed_deps = [d for d in task.depends_on if not finished.get(d, False)]
                 if failed_deps and dep_policy == DependencyFailurePolicy.BLOCK:
                     result = FleetResult(
@@ -985,7 +1125,7 @@ class FleetCoordinator:
                         total_cost=total_cost,
                         retries_used=retries_used,
                     )
-                except Exception as exc:
+                except Exception as exc:  # Catch-all: task failures are captured as FleetResult
                     elapsed = (time.monotonic() - start) * 1000
                     result = FleetResult(
                         task_id=task.id,
@@ -1001,7 +1141,9 @@ class FleetCoordinator:
 
             async def _run_task(task: FleetTask) -> FleetResult:
                 """Run a task with retries, then update shared state."""
-                result = await _run_task_with_retry(task)
+                result = await _run_task_with_retry(
+                    task, config, _run_task_once, on_status=on_status, adaptive=adaptive
+                )
 
                 results[task.id] = result
                 finished[task.id] = result.success
@@ -1166,7 +1308,7 @@ class FleetSummary:
     total_retries: int = 0
 
     @classmethod
-    def from_results(cls, results: list[FleetResult]) -> "FleetSummary":
+    def from_results(cls, results: list[FleetResult]) -> FleetSummary:
         """Create a summary from a list of fleet results."""
         summary = cls(total_tasks=len(results))
         for r in results:
@@ -1421,37 +1563,11 @@ class Fleet:
                 fleet._store.close()
                 fleet._store = None
 
-    async def run(
-        self,
-        on_status: Callable[[str, str], None] | None = None,
-    ) -> list[FleetResult]:
-        """Execute all tasks and return results."""
-        if not self._tasks:
-            return []
+    def _init_store_run(self, tasks: list[FleetTask]) -> None:
+        """Persist fleet run and tasks to store if configured.
 
-        # Prepend shared context without mutating original tasks
-        tasks = self._tasks
-        if self._fleet_config.shared_context:
-            ctx = self._fleet_config.shared_context
-            tasks = [
-                FleetTask(
-                    id=t.id,
-                    prompt=f"{ctx}\n\n{t.prompt}",
-                    depends_on=t.depends_on,
-                    model=t.model,
-                    reasoning_effort=t.reasoning_effort,
-                    cwd=t.cwd,
-                    skills=t.skills,
-                    exclude_tools=t.exclude_tools,
-                    mcp_servers=t.mcp_servers,
-                    timeout_sec=t.timeout_sec,
-                    skills_dirs=t.skills_dirs,
-                    on_dependency_failure=t.on_dependency_failure,
-                )
-                for t in self._tasks
-            ]
-
-        # Persist to store if configured (skip if resuming an existing run)
+        Skips if already resuming an existing run (``_run_id`` is set).
+        """
         if self._store is not None and self._run_id is None:
             self._run_id = self._store.create_run(
                 config={
@@ -1461,44 +1577,103 @@ class Fleet:
                 }
             )
             for task in tasks:
-                self._store.add_task(self._run_id, task.id, task.prompt, depends_on=task.depends_on)
+                self._store.add_task(
+                    self._run_id, task.id, task.prompt, depends_on=task.depends_on
+                )
+
+    def _validate_tasks(self) -> None:
+        """Validate all tasks upfront before execution.
+
+        Checks:
+        - skills_dirs paths exist and are directories
+        - MCP server configs have required fields
+        - Prompt template {{task:id.field}} references valid task IDs
+        """
+        task_ids = {t.id for t in self._tasks}
+        errors: list[str] = []
+
+        for task in self._tasks:
+            # Validate skills_dirs
+            for dir_path in task.skills_dirs:
+                p = Path(dir_path)
+                if not p.exists():
+                    errors.append(
+                        f"Task '{task.id}': skills directory not found: {p}"
+                    )
+                elif not p.is_dir():
+                    errors.append(
+                        f"Task '{task.id}': skills path is not a directory: {p}"
+                    )
+
+            # Validate MCP server configs
+            if task.mcp_servers is not None:
+                try:
+                    normalized = _normalize_mcp_servers(task.mcp_servers)
+                except ValueError as exc:
+                    errors.append(f"Task '{task.id}': {exc}")
+                    normalized = None
+                if normalized:
+                    for i, server in enumerate(normalized):
+                        if not server.get("command") and not server.get("url"):
+                            name = server.get("name", f"server[{i}]")
+                            errors.append(
+                                f"Task '{task.id}': MCP server '{name}' "
+                                f"requires 'command' or 'url'"
+                            )
+
+            # Validate prompt template references
+            for match in _TASK_OUTPUT_REF_RE.finditer(task.prompt):
+                ref_id = match.group("task_id")
+                if ref_id not in task_ids:
+                    errors.append(
+                        f"Task '{task.id}': prompt references unknown task "
+                        f"'{{{{task:{ref_id}.{match.group('field')}}}}}'"
+                    )
+
+        if errors:
+            detail = "\n".join(f"  - {e}" for e in errors)
+            raise ValueError(f"Fleet validation failed:\n{detail}")
+
+    async def run(
+        self,
+        on_status: Callable[[str, str], None] | None = None,
+    ) -> list[FleetResult]:
+        """Execute all tasks and return results."""
+        if not self._tasks:
+            return []
+
+        self._validate_tasks()
+
+        # Prepend shared context without mutating original tasks
+        tasks = _prepend_shared_context(self._tasks, self._fleet_config.shared_context)
+
+        # Persist to store if configured (skip if resuming an existing run)
+        self._init_store_run(tasks)
 
         # Wrap on_status to also update store
-        original_on_status = on_status
-        store = self._store
-        run_id = self._run_id
-
-        def _tracking_on_status(task_id: str, status: str) -> None:
-            if store is not None and run_id is not None:
-                store.update_task_status(run_id, task_id, status)
-            if original_on_status:
-                original_on_status(task_id, status)
+        tracking_on_status = _make_tracking_on_status(on_status, self._store, self._run_id)
 
         results = await self._coordinator.run(
             tasks,
             self._fleet_config,
-            on_status=_tracking_on_status,
+            on_status=tracking_on_status,
         )
 
         # Record results in store
-        if store is not None and run_id is not None:
+        if self._store is not None and self._run_id is not None:
             for result in results:
-                store.record_result(
-                    run_id,
+                self._store.record_result(
+                    self._run_id,
                     result.task_id,
                     success=result.success,
                     content=result.response.content if result.response else None,
                     error=str(result.error) if result.error else None,
                     duration_ms=result.duration_ms,
                 )
-            store.complete_run(run_id)
+            self._store.complete_run(self._run_id)
 
         # Git finalize: track modified files from successful responses
-        if self._git_finalizer is not None:
-            for result in results:
-                if result.success and result.response:
-                    for path in _extract_paths(result.response.content):
-                        self._git_finalizer.track(path)
+        _track_git_files(self._git_finalizer, results)
 
         return results
 
@@ -1534,6 +1709,8 @@ class Fleet:
             yield FleetEvent(event_type=FleetEventType.FLEET_COMPLETE, data={"total_tasks": 0})
             return
 
+        self._validate_tasks()
+
         # Initialize context and mailbox if provided
         ctx = context or FleetContext()
         mbox = mailbox or FleetMailbox()
@@ -1543,38 +1720,10 @@ class Fleet:
             mbox.create_inbox(task.id)
 
         # Prepend shared context without mutating original tasks
-        tasks = self._tasks
-        if self._fleet_config.shared_context:
-            shared_ctx = self._fleet_config.shared_context
-            tasks = [
-                FleetTask(
-                    id=t.id,
-                    prompt=f"{shared_ctx}\n\n{t.prompt}",
-                    depends_on=t.depends_on,
-                    model=t.model,
-                    reasoning_effort=t.reasoning_effort,
-                    cwd=t.cwd,
-                    skills=t.skills,
-                    exclude_tools=t.exclude_tools,
-                    mcp_servers=t.mcp_servers,
-                    timeout_sec=t.timeout_sec,
-                    skills_dirs=t.skills_dirs,
-                    on_dependency_failure=t.on_dependency_failure,
-                )
-                for t in self._tasks
-            ]
+        tasks = _prepend_shared_context(self._tasks, self._fleet_config.shared_context)
 
         # Persist to store if configured (skip if resuming an existing run)
-        if self._store is not None and self._run_id is None:
-            self._run_id = self._store.create_run(
-                config={
-                    "max_concurrent": self._fleet_config.max_concurrent,
-                    "timeout": self._fleet_config.timeout,
-                    "fail_fast": self._fleet_config.fail_fast,
-                }
-            )
-            for task in tasks:
-                self._store.add_task(self._run_id, task.id, task.prompt, depends_on=task.depends_on)
+        self._init_store_run(tasks)
         store = self._store
         run_id = self._run_id
 
@@ -1622,8 +1771,42 @@ class Fleet:
                 )
 
             dep_policy = _normalize_dep_failure_policy(task.on_dependency_failure)
+            dep_wait_timeout = (
+                self._fleet_config.dep_timeout
+                or (
+                    task.timeout_sec
+                    if task.timeout_sec is not None
+                    else self._fleet_config.timeout
+                )
+            )
             for dep in task.depends_on:
-                await done_events[dep].wait()
+                try:
+                    await asyncio.wait_for(
+                        done_events[dep].wait(), timeout=dep_wait_timeout
+                    )
+                except asyncio.TimeoutError:
+                    error_msg = (
+                        f"Task '{task.id}' timed out waiting for dependency '{dep}' "
+                        f"after {dep_wait_timeout}s"
+                    )
+                    result = FleetResult(
+                        task_id=task.id,
+                        success=False,
+                        error=RuntimeError(error_msg),
+                    )
+                    results[task.id] = result
+                    finished[task.id] = False
+                    done_events[task.id].set()
+                    await event_queue.put(
+                        FleetEvent(
+                            event_type=FleetEventType.TASK_BLOCKED,
+                            task_id=task.id,
+                            error=error_msg,
+                        )
+                    )
+                    if store is not None and run_id is not None:
+                        store.update_task_status(run_id, task.id, "blocked")
+                    return result
             failed_deps = [d for d in task.depends_on if not finished.get(d, False)]
             if failed_deps and dep_policy == DependencyFailurePolicy.BLOCK:
                 result = FleetResult(
@@ -1739,7 +1922,7 @@ class Fleet:
                         },
                     )
 
-            except Exception as exc:
+            except Exception as exc:  # Catch-all: task failures are captured as FleetResult
                 elapsed = (time.monotonic() - start) * 1000
                 result = FleetResult(
                     task_id=task.id,
@@ -1840,11 +2023,7 @@ class Fleet:
             store.complete_run(run_id)
 
         # Git finalize: track modified files from successful responses
-        if self._git_finalizer is not None:
-            for result in results.values():
-                if result.success and result.response:
-                    for path in _extract_paths(result.response.content):
-                        self._git_finalizer.track(path)
+        _track_git_files(self._git_finalizer, results.values())
 
         yield FleetEvent(
             event_type=FleetEventType.FLEET_COMPLETE,

@@ -13,11 +13,15 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import re
 from abc import ABC, abstractmethod
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Awaitable, Callable
+from typing import Any
+
+logger = logging.getLogger(__name__)
 
 # Allowlist pattern for MCP server commands: alphanumeric, hyphens, underscores, dots, slashes
 _ALLOWED_COMMAND_RE = re.compile(r"^[a-zA-Z0-9_./@-]+$")
@@ -207,7 +211,8 @@ class StdioTransport(MCPTransport):
 
             except asyncio.CancelledError:
                 break
-            except Exception:
+            except Exception:  # Catch-all: reader loop must not crash
+                logger.debug("Error in MCP reader loop", exc_info=True)
                 continue
 
         # Fail all pending futures since transport is closed
@@ -337,7 +342,8 @@ class MCPClient:
                 )
                 for t in result.get("tools", [])
             ]
-        except Exception:
+        except Exception:  # Graceful degradation: tools unavailable
+            logger.debug("Failed to list MCP tools", exc_info=True)
             self._tools = []
 
         # Get resources
@@ -358,7 +364,8 @@ class MCPClient:
                 )
                 for r in result.get("resources", [])
             ]
-        except Exception:
+        except Exception:  # Graceful degradation: resources unavailable
+            logger.debug("Failed to list MCP resources", exc_info=True)
             self._resources = []
 
     async def disconnect(self) -> None:
@@ -599,7 +606,7 @@ def load_mcp_config(path: Path | str | None = None) -> list[MCPServerConfig]:
     if file_size > _MAX_CONFIG_SIZE:
         raise ValueError(f"MCP config file too large ({file_size} bytes, max {_MAX_CONFIG_SIZE})")
 
-    with open(config_path, "r", encoding="utf-8") as f:
+    with open(config_path, encoding="utf-8") as f:
         data = json.load(f)
 
     servers = []

@@ -14,11 +14,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
 from pathlib import Path
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
     from copex.ralph import RalphWiggum
@@ -88,7 +89,7 @@ class PlanStep:
         if evaluator:
             try:
                 return evaluator(self.skip_condition, ctx)
-            except Exception:
+            except Exception:  # Evaluator failures default to "don't skip"
                 return False
 
         # Default simple evaluation
@@ -323,7 +324,7 @@ class PlanState:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "PlanState":
+    def from_dict(cls, data: dict[str, Any]) -> PlanState:
         """Create from dictionary."""
         return cls(
             task=data["task"],
@@ -353,7 +354,7 @@ class PlanState:
         return path
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "PlanState | None":
+    def load(cls, path: Path | None = None) -> PlanState | None:
         """
         Load state from file.
 
@@ -407,7 +408,7 @@ class PlanState:
         self.last_updated = datetime.now().isoformat()
 
     @classmethod
-    def from_plan(cls, plan: Plan) -> "PlanState":
+    def from_plan(cls, plan: Plan) -> PlanState:
         """Create state from a plan."""
         completed = [s.number for s in plan.steps if s.status == StepStatus.COMPLETED]
         current = plan.current_step
@@ -521,7 +522,7 @@ class PlanExecutor:
         if not steps:
             pattern = r"(?:STEP\s*)?(\d+)[.:]\s*(.+?)(?=(?:\n\s*)?(?:STEP\s*)?\d+[.:]|\Z)"
             matches = re.findall(pattern, content, re.IGNORECASE | re.DOTALL)
-            for i, (num, desc) in enumerate(matches, 1):
+            for i, (_num, desc) in enumerate(matches, 1):
                 description = " ".join(desc.strip().split())
                 if description:
                     steps.append(PlanStep(number=i, description=description))
@@ -658,7 +659,7 @@ class PlanExecutor:
                 if on_step_complete:
                     on_step_complete(step)
 
-            except Exception as e:
+            except Exception as e:  # Catch-all: step failures are recorded, not fatal
                 step.status = StepStatus.FAILED
                 step.error = str(e)
                 step.completed_at = datetime.now()
@@ -910,7 +911,7 @@ class PlanCheckpoint:
     step_contexts: dict[int, dict[str, Any]] = field(default_factory=dict)
 
     @classmethod
-    def from_state(cls, state: PlanState) -> "PlanCheckpoint":
+    def from_state(cls, state: PlanState) -> PlanCheckpoint:
         """Create a checkpoint from a PlanState."""
         # Build step contexts from completed steps
         step_contexts: dict[int, dict[str, Any]] = {}
@@ -925,7 +926,7 @@ class PlanCheckpoint:
         return cls(state=state, step_contexts=step_contexts)
 
     @classmethod
-    def load(cls, path: Path | None = None) -> "PlanCheckpoint | None":
+    def load(cls, path: Path | None = None) -> PlanCheckpoint | None:
         """Load checkpoint from state file."""
         state = PlanState.load(path)
         if state is None:

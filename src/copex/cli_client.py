@@ -77,8 +77,9 @@ class CopilotCLI:
         await self.stop()
 
     def _cleanup(self) -> None:
-        if self._config_dir:
-            shutil.rmtree(self._config_dir, ignore_errors=True)
+        config_dir = getattr(self, "_config_dir", None)
+        if config_dir:
+            shutil.rmtree(config_dir, ignore_errors=True)
             self._config_dir = None
 
     def __del__(self) -> None:

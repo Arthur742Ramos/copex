@@ -10,8 +10,9 @@ Enables:
 from __future__ import annotations
 
 import asyncio
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
-from typing import Any, Awaitable, Callable
+from typing import Any
 
 
 @dataclass
@@ -161,7 +162,7 @@ class ToolRegistry:
                 duration_ms=duration,
             )
 
-        except Exception as e:
+        except Exception as e:  # Catch-all: tool execution failures become ToolResult
             duration = (time.time() - start) * 1000
             return ToolResult(
                 name=name,
@@ -209,7 +210,7 @@ class ToolRegistry:
                 idx = task_map[task]
                 try:
                     result = await task
-                except Exception as exc:
+                except Exception as exc:  # Catch-all: parallel task failures become ToolResult
                     result = ToolResult(
                         name=calls[idx][0],
                         success=False,

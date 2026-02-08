@@ -1,10 +1,11 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
-__version__ = "2.1.1"
+__version__ = "2.2.0"
 
 # Re-export core components for convenience
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
 from .cache import StepCache, clear_global_cache, get_cache
+from .checkpoint import CheckpointedRalph, CheckpointStore
 from .cli_client import CopilotCLI
 from .client import Copex
 from .conditions import Condition, ConditionContext, all_of, any_of, when
@@ -12,8 +13,11 @@ from .config import CopexConfig, find_copilot_cli, make_client
 
 # Export new modules
 from .exceptions import (
+    AllModelsUnavailable,
     AuthenticationError,
+    CircuitBreakerOpen,
     ConfigError,
+    ConfigurationError,
     ConnectionError,
     CopexError,
     MCPError,
@@ -21,7 +25,11 @@ from .exceptions import (
     RateLimitError,
     RetryError,
     SecurityError,
+    SessionError,
+    SessionRecoveryFailed,
+    StreamingError,
     TimeoutError,
+    ToolExecutionError,
     ValidationError,
 )
 from .fleet import (
@@ -35,6 +43,7 @@ from .fleet import (
     summarize_fleet_results,
 )
 from .fleet_store import FleetStore, RunRecord, TaskRecord
+from .metrics import MetricsCollector, RequestMetrics, SessionMetrics
 from .models import (
     Model,
     ReasoningEffort,
@@ -42,8 +51,10 @@ from .models import (
     get_available_models,
     model_supports_reasoning,
     no_reasoning_models,
+    refresh_model_capabilities,
     resolve_model,
 )
+from .persistence import PersistentSession, SessionStore
 from .skills import SkillDiscovery, SkillInfo, get_skill_content, list_skills
 from .templates import (
     StepInstance,
@@ -69,6 +80,7 @@ __all__ = [
     "get_available_models",
     "model_supports_reasoning",
     "no_reasoning_models",
+    "refresh_model_capabilities",
     "resolve_model",
     # Skills
     "SkillDiscovery",
@@ -77,17 +89,24 @@ __all__ = [
     "get_skill_content",
     "list_skills",
     # Exceptions
-    "CopexError",
-    "ConfigError",
-    "MCPError",
-    "RetryError",
-    "PlanExecutionError",
-    "ValidationError",
-    "SecurityError",
-    "TimeoutError",
+    "AllModelsUnavailable",
     "AuthenticationError",
-    "RateLimitError",
+    "CircuitBreakerOpen",
+    "ConfigError",
+    "ConfigurationError",
     "ConnectionError",
+    "CopexError",
+    "MCPError",
+    "PlanExecutionError",
+    "RateLimitError",
+    "RetryError",
+    "SecurityError",
+    "SessionError",
+    "SessionRecoveryFailed",
+    "StreamingError",
+    "TimeoutError",
+    "ToolExecutionError",
+    "ValidationError",
     # Retry/Backoff
     "AdaptiveRetry",
     "with_retry",
@@ -128,4 +147,14 @@ __all__ = [
     "RunRecord",
     "TaskRecord",
     "summarize_fleet_results",
+    # Persistence
+    "SessionStore",
+    "PersistentSession",
+    # Checkpointing
+    "CheckpointStore",
+    "CheckpointedRalph",
+    # Metrics
+    "MetricsCollector",
+    "RequestMetrics",
+    "SessionMetrics",
 ]

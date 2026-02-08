@@ -6,10 +6,13 @@ This module also includes small helpers for validating combinations of model +
 
 from __future__ import annotations
 
+import asyncio
+import logging
 import re
 import subprocess
 from enum import Enum
-from typing import Tuple
+
+log = logging.getLogger(__name__)
 
 
 class Model(str, Enum):
@@ -45,16 +48,59 @@ _NO_REASONING_MODELS: set[str] = {
 }
 
 
+# Dynamic reasoning-support cache populated by ``refresh_model_capabilities()``.
+_reasoning_support: dict[str, bool] | None = None
+
+
+async def refresh_model_capabilities(*, timeout: float = 5.0) -> dict[str, bool]:
+    """Query the Copilot backend for per-model reasoning support.
+
+    Results are cached at module level.  On any failure the function falls back
+    to the hardcoded ``_NO_REASONING_MODELS`` set and returns that mapping.
+    """
+    global _reasoning_support
+    try:
+        from copilot import CopilotClient  # type: ignore[import-untyped]
+
+        client = CopilotClient()
+        await client.start()
+        models = await asyncio.wait_for(client.list_models(), timeout=timeout)
+        result: dict[str, bool] = {}
+        for m in models:
+            supports = getattr(
+                getattr(getattr(m, "capabilities", None), "supports", None),
+                "reasoning_effort",
+                None,
+            )
+            result[m.id] = bool(supports)
+        _reasoning_support = result
+        log.debug("Refreshed model capabilities: %d models", len(result))
+        return result
+    except Exception:
+        log.debug("Backend model query failed; using hardcoded fallback", exc_info=True)
+        return _fallback_reasoning_support()
+
+
+def _fallback_reasoning_support() -> dict[str, bool]:
+    """Build a reasoning-support dict from the hardcoded set."""
+    result: dict[str, bool] = {}
+    for m in Model:
+        result[m.value] = m.value not in _NO_REASONING_MODELS
+    return result
+
+
 def model_supports_reasoning(model: Model | str) -> bool:
     """Return True if the model supports the ``reasoning_effort`` parameter.
 
-    Based on backend ``models.list`` capabilities. Opus 4.6/4.6-fast and most
-    GPT models support reasoning; sonnet, haiku, opus 4.5, gemini, gpt-4.1 do not.
+    Uses dynamically discovered capabilities when available (populated by
+    :func:`refresh_model_capabilities`), otherwise falls back to the hardcoded
+    ``_NO_REASONING_MODELS`` set.
     """
     model_id = model.value if isinstance(model, Model) else str(model)
-    if model_id in _NO_REASONING_MODELS:
-        return False
-    return True
+    if _reasoning_support is not None:
+        if model_id in _reasoning_support:
+            return _reasoning_support[model_id]
+    return model_id not in _NO_REASONING_MODELS
 
 # ---------------------------------------------------------------------------
 # Dynamic model discovery
@@ -101,7 +147,7 @@ def discover_models() -> list[str]:
             if models:
                 _discovered_models = models
                 return _discovered_models
-    except Exception:
+    except (OSError, subprocess.SubprocessError):
         pass
 
     _discovered_models = [model.value for model in Model]
@@ -147,9 +193,11 @@ def get_available_models() -> list[str]:
 def no_reasoning_models() -> set[str]:
     """Return the set of models that do NOT support reasoning_effort.
 
-    Currently returns only the known set since model capabilities cannot be
-    inferred from ``--help`` output.
+    Uses dynamically discovered capabilities when available, otherwise returns
+    the hardcoded ``_NO_REASONING_MODELS`` set.
     """
+    if _reasoning_support is not None:
+        return {mid for mid, supports in _reasoning_support.items() if not supports}
     return set(_NO_REASONING_MODELS)
 
 
@@ -219,7 +267,7 @@ def normalize_reasoning_effort(
     reasoning: ReasoningEffort | str,
     *,
     downgrade_to: ReasoningEffort = ReasoningEffort.HIGH,
-) -> Tuple[ReasoningEffort, str | None]:
+) -> tuple[ReasoningEffort, str | None]:
     """Normalize a requested reasoning effort for a given model.
 
     If an unsupported effort is requested (currently: xhigh on non-supported
@@ -236,7 +284,7 @@ def normalize_reasoning_effort(
     model_id = model.value if isinstance(model, Model) else str(model)
 
     # Models that don't support reasoning at all
-    if model_id in _NO_REASONING_MODELS:
+    if not model_supports_reasoning(model_id):
         if effort != ReasoningEffort.NONE:
             return ReasoningEffort.NONE, (
                 f"Model '{model_id}' does not support reasoning effort. "

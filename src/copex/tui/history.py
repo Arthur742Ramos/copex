@@ -2,9 +2,9 @@
 
 import json
 import time
+from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
-from typing import Iterator
 
 
 @dataclass
@@ -62,7 +62,7 @@ class PromptHistory:
             return
 
         try:
-            with open(self.history_file, "r", encoding="utf-8") as f:
+            with open(self.history_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             self._entries = [
@@ -206,7 +206,7 @@ class PromptStash:
             return
 
         try:
-            with open(self.stash_file, "r", encoding="utf-8") as f:
+            with open(self.stash_file, encoding="utf-8") as f:
                 data = json.load(f)
 
             self._entries = [

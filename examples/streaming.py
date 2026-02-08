@@ -2,17 +2,17 @@
 
 import asyncio
 
-from robust_copilot import RobustCopilot, CopilotConfig, Model, ReasoningEffort
+from copex import Copex, CopexConfig, Model, ReasoningEffort
 
 
 async def main():
-    config = CopilotConfig(
+    config = CopexConfig(
         model=Model.GPT_5_2_CODEX,
         reasoning_effort=ReasoningEffort.XHIGH,
         streaming=True,
     )
 
-    async with RobustCopilot(config) as copilot:
+    async with Copex(config) as copilot:
         print("Streaming response:\n")
 
         async for chunk in copilot.stream("Write a Python function to find prime numbers"):

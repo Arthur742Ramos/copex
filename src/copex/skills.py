@@ -42,7 +42,7 @@ class SkillInfo:
                             break
                         if line.startswith("name:"):
                             name = line.split(":", 1)[1].strip().strip("\"'")
-        except Exception:
+        except (OSError, ValueError):
             pass
 
         return cls(name=name, path=skill_dir, description=description, source=source)
@@ -75,7 +75,7 @@ class SkillDiscovery:
             )
             if result.returncode == 0:
                 return Path(result.stdout.strip())
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             pass
         return None
 

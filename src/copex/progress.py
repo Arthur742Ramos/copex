@@ -13,10 +13,11 @@ from __future__ import annotations
 import json
 import sys
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from enum import Enum
-from typing import Any, Callable, TextIO
+from typing import Any, TextIO
 
 
 class ProgressStatus(str, Enum):

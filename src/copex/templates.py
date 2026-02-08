@@ -32,7 +32,7 @@ class StepTemplate:
     tags: list[str] = field(default_factory=list)
     metadata: dict[str, Any] = field(default_factory=dict)
 
-    def instantiate(self, **kwargs: Any) -> "StepInstance":
+    def instantiate(self, **kwargs: Any) -> StepInstance:
         """Create a concrete step instance from this template.
 
         Args:

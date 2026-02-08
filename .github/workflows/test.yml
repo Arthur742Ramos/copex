@@ -37,4 +37,4 @@ jobs:
         run: python -c "from copex import Copex, CopexConfig, Model, ReasoningEffort, find_copilot_cli; print('Imports OK')"
 
       - name: Run tests
-        run: pytest tests/ -v
+        run: pytest tests/ -v --cov=copex --cov-report=term-missing --cov-fail-under=30

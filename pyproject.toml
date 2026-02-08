@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "copex"
-version = "2.1.1"
+dynamic = ["version"]
 description = "Copilot Extended - Resilient wrapper for GitHub Copilot SDK with auto-retry, Ralph Wiggum loops, and more"
 readme = "README.md"
 requires-python = ">=3.10"
@@ -36,10 +36,13 @@ Repository = "https://github.com/Arthur742Ramos/copex"
 Issues = "https://github.com/Arthur742Ramos/copex/issues"
 
 [project.optional-dependencies]
-dev = ["pytest", "pytest-asyncio", "ruff"]
+dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]
 
 [project.scripts]
 copex = "copex.cli:app"
+
+[tool.hatch.version]
+path = "src/copex/__init__.py"
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/copex"]
@@ -52,12 +55,13 @@ line-length = 100
 target-version = "py310"
 
 [tool.ruff.lint]
-select = ["E", "F", "I", "W"]
+select = ["E", "F", "I", "W", "B", "UP"]
 ignore = ["E501"]
 
 [dependency-groups]
 dev = [
     "pytest>=9.0.2",
     "pytest-asyncio>=1.3.0",
+    "pytest-cov>=6.0",
 ]
 

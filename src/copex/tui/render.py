@@ -372,7 +372,7 @@ def render_palette(
     if not commands:
         elements.append(Text("  No matching commands", style=Theme.MUTED))
     else:
-        for i, (cmd_id, label, description, score) in enumerate(commands[:10]):
+        for i, (_cmd_id, label, description, _score) in enumerate(commands[:10]):
             line = Text()
 
             # Selection indicator

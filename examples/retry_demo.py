@@ -2,13 +2,13 @@
 
 import asyncio
 
-from robust_copilot import RobustCopilot, CopilotConfig
-from robust_copilot.config import RetryConfig
+from copex import Copex, CopexConfig
+from copex.config import RetryConfig
 
 
 async def main():
     # Configure aggressive retry for unreliable connections
-    config = CopilotConfig(
+    config = CopexConfig(
         retry=RetryConfig(
             max_retries=10,
             base_delay=0.5,
@@ -30,7 +30,7 @@ async def main():
         timeout=120.0,
     )
 
-    async with RobustCopilot(config) as copilot:
+    async with Copex(config) as copilot:
 
         def on_chunk(chunk):
             if chunk.type == "system":

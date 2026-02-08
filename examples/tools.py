@@ -6,7 +6,7 @@ from datetime import datetime
 from pydantic import BaseModel, Field
 from copilot import define_tool
 
-from robust_copilot import RobustCopilot
+from copex import Copex
 
 
 # Define tool parameters using Pydantic
@@ -40,7 +40,7 @@ async def calculate(params: CalculateParams) -> str:
 
 
 async def main():
-    async with RobustCopilot() as copilot:
+    async with Copex() as copilot:
         # Provide tools when sending the prompt
         response = await copilot.send(
             "What time is it? Also, what's 2^10 + 15*3?",

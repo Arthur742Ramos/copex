@@ -8,7 +8,7 @@ import sys
 import time
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import TYPE_CHECKING, Annotated, Any, Optional
+from typing import TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
     from copex.fleet import FleetTask
@@ -187,7 +187,7 @@ def model_callback(value: str | None) -> Model | None:
         return Model(value)
     except ValueError:
         valid = ", ".join(m.value for m in Model)
-        raise typer.BadParameter(f"Invalid model. Valid: {valid}")
+        raise typer.BadParameter(f"Invalid model. Valid: {valid}") from None
 
 
 def reasoning_callback(value: str | None) -> ReasoningEffort | None:
@@ -198,7 +198,7 @@ def reasoning_callback(value: str | None) -> ReasoningEffort | None:
         return ReasoningEffort(value)
     except ValueError:
         valid = ", ".join(r.value for r in ReasoningEffort)
-        raise typer.BadParameter(f"Invalid reasoning effort. Valid: {valid}")
+        raise typer.BadParameter(f"Invalid reasoning effort. Valid: {valid}") from None
 
 
 def _parse_exclude_tools(value: str | None) -> list[str]:
@@ -266,7 +266,7 @@ def main(
                 asyncio.run(_run_chat(config, prompt, show_reasoning=True, raw=non_interactive))
             except ValueError:
                 console.print(f"[red]Invalid model: {effective_model}[/red]")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
         else:
             # No prompt provided - launch interactive mode
             interactive(model=effective_model, reasoning=reasoning)
@@ -451,7 +451,7 @@ async def _reasoning_picker(current: ReasoningEffort) -> ReasoningEffort | None:
 @app.command()
 def chat(
     prompt: Annotated[
-        Optional[str], typer.Argument(help="Prompt to send (or read from stdin)")
+        str | None, typer.Argument(help="Prompt to send (or read from stdin)")
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
@@ -465,21 +465,21 @@ def chat(
         bool, typer.Option("--show-reasoning/--no-reasoning", help="Show model reasoning")
     ] = True,
     config_file: Annotated[
-        Optional[Path], typer.Option("--config", "-c", help="Config file path")
+        Path | None, typer.Option("--config", "-c", help="Config file path")
     ] = None,
     raw: Annotated[bool, typer.Option("--raw", help="Output raw text without formatting")] = False,
     ui_theme: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)"),
     ] = None,
     ui_density: Annotated[
-        Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
+        str | None, typer.Option("--ui-density", help="UI density (compact or extended)")
     ] = None,
     skill_dir: Annotated[
-        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+        list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
     disable_skill: Annotated[
-        Optional[list[str]], typer.Option("--disable-skill", help="Disable specific skill")
+        list[str] | None, typer.Option("--disable-skill", help="Disable specific skill")
     ] = None,
     no_auto_skills: Annotated[
         bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
@@ -496,15 +496,15 @@ def chat(
     # New options
     stdin: Annotated[bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")] = False,
     context: Annotated[
-        Optional[list[Path]],
+        list[Path] | None,
         typer.Option("--context", "-C", help="Include file(s) as context (can be repeated)"),
     ] = None,
     template: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--template", "-T", help="Jinja2 template for output formatting"),
     ] = None,
     output: Annotated[
-        Optional[Path], typer.Option("--output", "-o", help="Write response to file")
+        Path | None, typer.Option("--output", "-o", help="Write response to file")
     ] = None,
     use_cli: Annotated[
         bool,
@@ -528,7 +528,7 @@ def chat(
         config.model = Model(effective_model)
     except ValueError:
         console.print(f"[red]Invalid model: {effective_model}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     try:
         requested_effort = parse_reasoning_effort(reasoning)
@@ -540,7 +540,7 @@ def chat(
         config.reasoning_effort = normalized_effort
     except ValueError:
         console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     config.retry.max_retries = max_retries
     config.streaming = not no_stream
@@ -589,9 +589,9 @@ def chat(
                 content = ctx_path.read_text()
                 # Format with filename header
                 context_parts.append(f'<file path="{ctx_path}">\n{content}\n</file>')
-            except Exception as e:
+            except OSError as e:
                 console.print(f"[red]Error reading {ctx_path}: {e}[/red]")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
         if context_parts:
             context_content = "\n\n".join(context_parts)
@@ -654,7 +654,7 @@ async def _run_chat(
                 from jinja2 import Template
             except ImportError:
                 console.print("[red]Jinja2 not installed. Run: pip install jinja2[/red]")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
             response = await client.send(prompt)
 
@@ -674,7 +674,7 @@ async def _run_chat(
                 output_text = tmpl.render(**template_ctx)
             except Exception as e:
                 console.print(f"[red]Template error: {e}[/red]")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
             if output_path:
                 output_path.write_text(output_text)
@@ -725,9 +725,9 @@ async def _run_chat(
 
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted[/yellow]")
-    except Exception as e:
+    except Exception as e:  # Catch-all: top-level CLI error handler
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     finally:
         await client.stop()
 
@@ -894,7 +894,7 @@ app.add_typer(skills_app, name="skills")
 @skills_app.command("list")
 def skills_list(
     skill_dir: Annotated[
-        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+        list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
     no_auto: Annotated[bool, typer.Option("--no-auto", help="Disable auto-discovery")] = False,
 ) -> None:
@@ -927,7 +927,7 @@ def skills_list(
 def skills_show(
     name: Annotated[str, typer.Argument(help="Skill name to show")],
     skill_dir: Annotated[
-        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+        list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
 ) -> None:
     """Show the content of a specific skill."""
@@ -966,7 +966,7 @@ def tui(
         )
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     asyncio.run(run_tui(config))
 
@@ -975,11 +975,13 @@ def tui(
 def init(
     path: Annotated[
         Path, typer.Option("--path", "-p", help="Config file path")
-    ] = CopexConfig.default_path(),
+    ] = None,
 ) -> None:
     """Create a default config file."""
     import tomli_w
 
+    if path is None:
+        path = CopexConfig.default_path()
     path.parent.mkdir(parents=True, exist_ok=True)
 
     config = {
@@ -1013,20 +1015,20 @@ def interactive(
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
     ui_theme: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)"),
     ] = None,
     ui_density: Annotated[
-        Optional[str], typer.Option("--ui-density", help="UI density (compact or extended)")
+        str | None, typer.Option("--ui-density", help="UI density (compact or extended)")
     ] = None,
     classic: Annotated[
         bool, typer.Option("--classic", help="Use classic interactive mode (legacy)")
     ] = False,
     skill_dir: Annotated[
-        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+        list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
     disable_skill: Annotated[
-        Optional[list[str]], typer.Option("--disable-skill", help="Disable specific skill")
+        list[str] | None, typer.Option("--disable-skill", help="Disable specific skill")
     ] = None,
     no_auto_skills: Annotated[
         bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
@@ -1059,7 +1061,7 @@ def interactive(
             config.auto_discover_skills = False
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     if classic:
         # Use legacy interactive mode
@@ -1260,7 +1262,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
             try:
                 print_user_prompt(console, prompt)
                 await _stream_response_interactive(client, prompt, ui)
-            except Exception as e:
+            except Exception as e:  # Catch-all: show error and continue interactive loop
                 print_error(console, str(e))
 
     except KeyboardInterrupt:
@@ -1358,17 +1360,17 @@ def ralph_command(
         int, typer.Option("--max-iterations", "-n", help="Maximum iterations")
     ] = 30,
     completion_promise: Annotated[
-        Optional[str], typer.Option("--promise", "-p", help="Completion promise text")
+        str | None, typer.Option("--promise", "-p", help="Completion promise text")
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
     skill_dir: Annotated[
-        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+        list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
     disable_skill: Annotated[
-        Optional[list[str]], typer.Option("--disable-skill", help="Disable specific skill")
+        list[str] | None, typer.Option("--disable-skill", help="Disable specific skill")
     ] = None,
     no_auto_skills: Annotated[
         bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
@@ -1405,7 +1407,7 @@ def ralph_command(
             config.auto_discover_skills = False
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     # Use new RalphUI header - displayed in _run_ralph
     asyncio.run(_run_ralph(config, prompt, max_iterations, completion_promise))
@@ -1462,9 +1464,9 @@ async def _run_ralph(
         )
     except KeyboardInterrupt:
         console.print("\n[yellow]Loop cancelled[/yellow]")
-    except Exception as e:
+    except Exception as e:  # Catch-all: top-level CLI error handler
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     finally:
         await client.stop()
 
@@ -1496,9 +1498,9 @@ def login() -> None:
         else:
             console.print("\n[yellow]Login may have failed. Check status with:[/yellow]")
             console.print("  [bold]copex status[/bold]")
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @app.command("logout")
@@ -1516,9 +1518,9 @@ def logout() -> None:
         result = subprocess.run([gh_path, "auth", "logout"], check=False)
         if result.returncode == 0:
             console.print("[green]✓ Logged out[/green]")
-    except Exception as e:
+    except (OSError, subprocess.SubprocessError) as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @app.command("status")
@@ -1540,7 +1542,7 @@ def status() -> None:
                 [cli_path, "--version"], capture_output=True, text=True, timeout=5
             )
             copilot_version = result.stdout.strip() or result.stderr.strip()
-        except Exception:
+        except (OSError, subprocess.SubprocessError):
             pass
 
     console.print(
@@ -1562,7 +1564,7 @@ def status() -> None:
         console.print("\n[bold]GitHub Auth Status:[/bold]")
         try:
             subprocess.run([gh_path, "auth", "status"], check=False)
-        except Exception as e:
+        except (OSError, subprocess.SubprocessError) as e:
             console.print(f"[red]Error checking status: {e}[/red]")
     else:
         console.print("\n[yellow]GitHub CLI not found - cannot check auth status[/yellow]")
@@ -1572,7 +1574,7 @@ def status() -> None:
 @app.command("config")
 def config_cmd(
     config_file: Annotated[
-        Optional[Path], typer.Option("--config", "-c", help="Config file path")
+        Path | None, typer.Option("--config", "-c", help="Config file path")
     ] = None,
 ) -> None:
     """Validate and display the current Copex configuration."""
@@ -1590,7 +1592,7 @@ def config_cmd(
                 config = CopexConfig()
         except Exception as e:
             console.print(f"[red]Configuration error:[/red] {e}")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
     # Display warnings
     if caught_warnings:
@@ -1642,7 +1644,7 @@ def config_cmd(
 @app.command("plan")
 def plan_command(
     task: Annotated[
-        Optional[str], typer.Argument(help="Task to plan (optional with --resume)")
+        str | None, typer.Argument(help="Task to plan (optional with --resume)")
     ] = None,
     execute: Annotated[
         bool, typer.Option("--execute", "-e", help="Execute the plan after generating")
@@ -1654,20 +1656,20 @@ def plan_command(
         bool, typer.Option("--resume", help="Resume from last checkpoint (.copex-state.json)")
     ] = False,
     output: Annotated[
-        Optional[Path], typer.Option("--output", "-o", help="Save plan to file")
+        Path | None, typer.Option("--output", "-o", help="Save plan to file")
     ] = None,
     from_step: Annotated[
         int, typer.Option("--from-step", "-f", help="Resume execution from step number")
     ] = 1,
     load_plan: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--load", "-l", help="Load plan from file instead of generating"),
     ] = None,
     max_iterations: Annotated[
         int, typer.Option("--max-iterations", "-n", help="Max iterations per step (Ralph loop)")
     ] = 10,
     visualize: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--visualize", "-V", help="Show plan visualization (ascii, mermaid, tree)"),
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
@@ -1675,10 +1677,10 @@ def plan_command(
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
     skill_dir: Annotated[
-        Optional[list[str]], typer.Option("--skill-dir", "-S", help="Add skill directory")
+        list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
     disable_skill: Annotated[
-        Optional[list[str]], typer.Option("--disable-skill", help="Disable specific skill")
+        list[str] | None, typer.Option("--disable-skill", help="Disable specific skill")
     ] = None,
     no_auto_skills: Annotated[
         bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
@@ -1726,7 +1728,7 @@ def plan_command(
             config.auto_discover_skills = False
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     # --dry-run overrides --execute/--review/--resume to prevent execution
     should_execute = (execute or review or resume) and not dry_run
@@ -1929,9 +1931,9 @@ async def _run_plan(
     except KeyboardInterrupt:
         console.print("\n[yellow]Cancelled[/yellow]")
         console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
-    except Exception as e:
+    except Exception as e:  # Catch-all: top-level CLI error handler
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     finally:
         await client.stop()
 
@@ -2174,7 +2176,7 @@ def _format_fleet_spec_error(exc: ValidationError, idx: int) -> str:
     return f"tasks[{idx}]{loc_suffix} {err.get('msg', 'is invalid')}"
 
 
-def _parse_fleet_task_specs(raw_tasks: Any, *, key_name: str = "tasks") -> list["FleetTask"]:
+def _parse_fleet_task_specs(raw_tasks: Any, *, key_name: str = "tasks") -> list[FleetTask]:
     """Parse/validate task rows from JSON or TOML using one shared schema."""
     from copex.fleet import DependencyFailurePolicy, FleetTask
 
@@ -2224,13 +2226,13 @@ def _parse_fleet_task_specs(raw_tasks: Any, *, key_name: str = "tasks") -> list[
 @app.command("fleet")
 def fleet_command(
     prompts: Annotated[
-        Optional[list[str]], typer.Argument(help="Task prompts to run in parallel")
+        list[str] | None, typer.Argument(help="Task prompts to run in parallel")
     ] = None,
     file: Annotated[
-        Optional[Path], typer.Option("--file", "-f", help="TOML file with task definitions")
+        Path | None, typer.Option("--file", "-f", help="TOML file with task definitions")
     ] = None,
     config_file: Annotated[
-        Optional[Path], typer.Option("--config", help="JSON config file with task definitions")
+        Path | None, typer.Option("--config", help="JSON config file with task definitions")
     ] = None,
     max_concurrent: Annotated[
         int, typer.Option("--max-concurrent", help="Max concurrent tasks")
@@ -2243,10 +2245,10 @@ def fleet_command(
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
     mcp_config: Annotated[
-        Optional[Path], typer.Option("--mcp-config", help="Path to MCP config JSON file")
+        Path | None, typer.Option("--mcp-config", help="Path to MCP config JSON file")
     ] = None,
     shared_context: Annotated[
-        Optional[str], typer.Option("--shared-context", help="Context prepended to all tasks")
+        str | None, typer.Option("--shared-context", help="Context prepended to all tasks")
     ] = None,
     timeout: Annotated[
         float, typer.Option("--timeout", help="Per-task timeout in seconds")
@@ -2255,11 +2257,11 @@ def fleet_command(
         bool, typer.Option("--verbose", "-v", help="Print full task outputs after completion")
     ] = False,
     output_dir: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--output-dir", "-o", help="Directory to save each task result as a file"),
     ] = None,
     artifact: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--artifact", help="Write run artifact JSON"),
     ] = None,
     git_finalize: Annotated[
@@ -2270,15 +2272,15 @@ def fleet_command(
         ),
     ] = True,
     git_message: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--git-message", help="Commit message for git finalize"),
     ] = None,
     skills: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         typer.Option("--skills", help="Skill directories (.md files) to prepend to system prompt"),
     ] = None,
     exclude_tools: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--exclude-tools",
             help="Comma-separated tool patterns to exclude per task (e.g. shell(rm))",
@@ -2320,7 +2322,7 @@ def fleet_command(
             config.mcp_config_file = str(mcp_config)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     asyncio.run(
         _run_fleet(
@@ -2355,7 +2357,7 @@ def _build_council_tasks(
     debate: bool = False,
     preset: str | None = None,
     escalate: bool = False,
-) -> list["FleetTask"]:
+) -> list[FleetTask]:
     """Create the council workflow task graph with enhancements.
 
     Args:
@@ -2406,20 +2408,20 @@ def council_command(
         float, typer.Option("--timeout", help="Per-task timeout in seconds")
     ] = 900.0,
     shared_context: Annotated[
-        Optional[str], typer.Option("--shared-context", help="Context prepended to all tasks")
+        str | None, typer.Option("--shared-context", help="Context prepended to all tasks")
     ] = None,
     mcp_config: Annotated[
-        Optional[Path], typer.Option("--mcp-config", help="Path to MCP config JSON file")
+        Path | None, typer.Option("--mcp-config", help="Path to MCP config JSON file")
     ] = None,
     verbose: Annotated[
         bool, typer.Option("--verbose", "-v", help="Print full task outputs after completion")
     ] = False,
     output_dir: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--output-dir", "-o", help="Directory to save each task result as a file"),
     ] = None,
     artifact: Annotated[
-        Optional[Path],
+        Path | None,
         typer.Option("--artifact", help="Write run artifact JSON"),
     ] = None,
     git_finalize: Annotated[
@@ -2430,15 +2432,15 @@ def council_command(
         ),
     ] = True,
     git_message: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--git-message", help="Commit message for git finalize"),
     ] = None,
     skills: Annotated[
-        Optional[list[str]],
+        list[str] | None,
         typer.Option("--skills", help="Skill directories (.md files) to prepend to system prompt"),
     ] = None,
     exclude_tools: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--exclude-tools",
             help="Comma-separated tool patterns to exclude per task (e.g. shell(rm))",
@@ -2446,30 +2448,30 @@ def council_command(
     ] = None,
     # New council enhancement options
     investigator_model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--investigator-model",
             help="Model for all 3 investigators (overrides defaults)",
         ),
     ] = None,
     codex_model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--codex-model", help="Model for Codex investigator"),
     ] = None,
     gemini_model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--gemini-model", help="Model for Gemini investigator"),
     ] = None,
     opus_model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--opus-model", help="Model for Opus investigator (not chair)"),
     ] = None,
     chair_model: Annotated[
-        Optional[str],
+        str | None,
         typer.Option("--chair-model", help="Model for chair (default: claude-opus-4.6)"),
     ] = None,
     reasoning: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "-r", "--reasoning", help="Reasoning effort for all tasks (low/medium/high/xhigh)"
         ),
@@ -2482,7 +2484,7 @@ def council_command(
         ),
     ] = False,
     preset: Annotated[
-        Optional[str],
+        str | None,
         typer.Option(
             "--preset",
             help="Specialist preset: security, architecture, refactor, review",
@@ -2533,7 +2535,7 @@ def council_command(
             return Model(m)
         except ValueError:
             console.print(f"[red]Invalid model: {m}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
     inv_model = parse_model(investigator_model)
     cdx_model = parse_model(codex_model)
@@ -2548,7 +2550,7 @@ def council_command(
             effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
         except ValueError:
             console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
     config = CopexConfig(
         model=chr_model or Model.CLAUDE_OPUS_4_6,
@@ -2594,13 +2596,13 @@ def council_command(
     )
 
 
-def _load_fleet_json_config(path: Path) -> list["FleetTask"]:
+def _load_fleet_json_config(path: Path) -> list[FleetTask]:
     """Load and validate JSON fleet config."""
     if not path.exists():
         raise ValueError(f"Config file not found: {path}")
 
     try:
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
     except json.JSONDecodeError as exc:
         raise ValueError(
@@ -2614,11 +2616,11 @@ def _load_fleet_json_config(path: Path) -> list["FleetTask"]:
     return _parse_fleet_task_specs(raw_tasks, key_name="tasks")
 
 
-def _load_fleet_toml_config(path: Path) -> tuple[dict[str, Any], list["FleetTask"]]:
+def _load_fleet_toml_config(path: Path) -> tuple[dict[str, Any], list[FleetTask]]:
     """Load TOML fleet config and return (fleet_section, tasks)."""
     try:
         import tomllib  # Python 3.11+
-    except Exception:
+    except ImportError:
         import tomli as tomllib  # type: ignore
 
     if not path.exists():
@@ -2660,7 +2662,7 @@ async def _run_fleet(
     git_message: str | None = None,
     skills: list[str] | None = None,
     exclude_tools: list[str] | None = None,
-    tasks_override: list["FleetTask"] | None = None,
+    tasks_override: list[FleetTask] | None = None,
 ) -> None:
     """Run fleet tasks with live progress display."""
     from rich.table import Table
@@ -2709,7 +2711,7 @@ async def _run_fleet(
             tasks = _load_fleet_json_config(config_file)
         except ValueError as exc:
             console.print(f"[red]Error: {exc}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
         for task in tasks:
             task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
             task.exclude_tools = _merge_excludes(
@@ -2723,7 +2725,7 @@ async def _run_fleet(
             fleet_section, parsed_tasks = _load_fleet_toml_config(file)
         except ValueError as exc:
             console.print(f"[red]Error: {exc}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
         # Apply fleet-level config from file
         if "max_concurrent" in fleet_section:

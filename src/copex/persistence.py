@@ -60,7 +60,7 @@ class SessionData:
         }
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "SessionData":
+    def from_dict(cls, data: dict[str, Any]) -> SessionData:
         """Create from dictionary."""
         messages = [Message(**m) for m in data.get("messages", [])]
         return cls(
@@ -169,7 +169,7 @@ class SessionStore:
                 f"Session file too large ({file_size} bytes, max {_MAX_SESSION_FILE_SIZE})"
             )
 
-        with open(path, "r", encoding="utf-8") as f:
+        with open(path, encoding="utf-8") as f:
             data = json.load(f)
 
         return SessionData.from_dict(data)
@@ -194,7 +194,7 @@ class SessionStore:
             try:
                 if path.stat().st_size > _MAX_SESSION_FILE_SIZE:
                     continue
-                with open(path, "r", encoding="utf-8") as f:
+                with open(path, encoding="utf-8") as f:
                     data = json.load(f)
                 sessions.append(
                     {

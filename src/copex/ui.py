@@ -657,7 +657,7 @@ class CopexUI:
             return None
 
         elements = []
-        for i, entry in enumerate(self.state.history):
+        for _i, entry in enumerate(self.state.history):
             if entry.role == "user":
                 # User message
                 user_text = Text()

@@ -11,8 +11,9 @@ from __future__ import annotations
 
 import operator
 import re
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Callable, Mapping
+from typing import Any
 
 
 @dataclass
@@ -47,37 +48,37 @@ class Condition:
             return True
 
     @classmethod
-    def always(cls) -> "Condition":
+    def always(cls) -> Condition:
         """Create a condition that always evaluates to True."""
         return cls("true")
 
     @classmethod
-    def never(cls) -> "Condition":
+    def never(cls) -> Condition:
         """Create a condition that always evaluates to False."""
         return cls("false")
 
     @classmethod
-    def step_completed(cls, step_index: int) -> "Condition":
+    def step_completed(cls, step_index: int) -> Condition:
         """Create a condition that checks if a step completed successfully."""
         return cls(f"${{step.{step_index}.status}} == 'completed'")
 
     @classmethod
-    def step_failed(cls, step_index: int) -> "Condition":
+    def step_failed(cls, step_index: int) -> Condition:
         """Create a condition that checks if a step failed."""
         return cls(f"${{step.{step_index}.status}} == 'failed'")
 
     @classmethod
-    def step_output_contains(cls, step_index: int, substring: str) -> "Condition":
+    def step_output_contains(cls, step_index: int, substring: str) -> Condition:
         """Create a condition that checks if a step's output contains a string."""
         return cls(f"'{substring}' in ${{step.{step_index}.output}}")
 
     @classmethod
-    def env_equals(cls, var_name: str, value: str) -> "Condition":
+    def env_equals(cls, var_name: str, value: str) -> Condition:
         """Create a condition that checks an environment variable."""
         return cls(f"${{env.{var_name}}} == '{value}'")
 
     @classmethod
-    def custom(cls, func: Callable[[dict[str, Any]], bool]) -> "CustomCondition":
+    def custom(cls, func: Callable[[dict[str, Any]], bool]) -> CustomCondition:
         """Create a condition with a custom evaluation function."""
         return CustomCondition(func)
 
@@ -89,7 +90,7 @@ class CustomCondition(Condition):
         super().__init__("custom")
         self._func = func
 
-    def evaluate(self, context: "ConditionContext") -> bool:
+    def evaluate(self, context: ConditionContext) -> bool:
         """Evaluate using the custom function."""
         return self._func(context.to_dict())
 
@@ -135,7 +136,7 @@ class ConditionContext:
         }
 
     @classmethod
-    def empty(cls) -> "ConditionContext":
+    def empty(cls) -> ConditionContext:
         """Create an empty context."""
         import os
 
@@ -175,7 +176,7 @@ def _resolve_reference(ref_type: str, ref_path: str, context: ConditionContext) 
         try:
             step_index = int(parts[0])
         except ValueError:
-            raise ValueError(f"Invalid step index: {parts[0]}")
+            raise ValueError(f"Invalid step index: {parts[0]}") from None
 
         field = parts[1]
         if field == "output":

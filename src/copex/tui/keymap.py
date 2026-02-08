@@ -1,8 +1,9 @@
 """Keybinding definitions for Copex TUI."""
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from enum import Enum
-from typing import TYPE_CHECKING, Callable
+from typing import TYPE_CHECKING
 
 # NOTE: Avoid __future__.annotations for standalone import in tests (Python 3.14
 # dataclasses resolves string annotations via sys.modules).

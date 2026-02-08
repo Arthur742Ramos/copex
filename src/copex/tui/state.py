@@ -1,9 +1,10 @@
 """TUI state management for Copex."""
 
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import TYPE_CHECKING, Any, Callable
+from typing import TYPE_CHECKING, Any
 
 # NOTE:
 # These modules are intentionally importable as standalone files in tests

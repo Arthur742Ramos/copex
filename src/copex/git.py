@@ -89,5 +89,5 @@ class GitFinalizer:
                 commit_hash=commit_hash,
                 files_staged=files_staged,
             )
-        except Exception as exc:
+        except Exception as exc:  # Catch-all: any git failure returns error result
             return GitFinalizeResult(success=False, error=str(exc))

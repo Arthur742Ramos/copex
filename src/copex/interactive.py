@@ -448,7 +448,7 @@ PROMPT_STYLE = Style.from_dict(
 )
 
 
-async def run_interactive(config: "CopexConfig") -> None:
+async def run_interactive(config: CopexConfig) -> None:
     """Run the beautiful interactive chat loop."""
     from pathlib import Path
 
@@ -605,7 +605,7 @@ async def run_interactive(config: "CopexConfig") -> None:
         await client.stop()
 
 
-async def _stream_message(console: Console, client: "Copex", prompt: str) -> None:
+async def _stream_message(console: Console, client: Copex, prompt: str) -> None:
     """Stream a message with beautiful live updates."""
 
     state = StreamState(model=client.config.model.value)
@@ -676,7 +676,7 @@ async def _stream_message(console: Console, client: "Copex", prompt: str) -> Non
             state.output_tokens = response.completion_tokens
             state.retries = response.retries
             state.phase = "done"
-        except Exception as e:
+        except Exception as e:  # Catch-all: show error and continue interactive session
             state.phase = "error"
             # Don't re-raise - show error and continue session
             console.print()
@@ -764,7 +764,7 @@ def _print_help(console: Console) -> None:
     console.print()
 
 
-def _print_status(console: Console, client: "Copex") -> None:
+def _print_status(console: Console, client: Copex) -> None:
     """Print current status - clean format."""
     from pathlib import Path
 
@@ -792,7 +792,7 @@ def _print_status(console: Console, client: "Copex") -> None:
     console.print()
 
 
-def _print_models(console: Console, current: "Model") -> None:
+def _print_models(console: Console, current: Model) -> None:
     """Print available models."""
     from copex.models import Model
 

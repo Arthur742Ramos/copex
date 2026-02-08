@@ -44,7 +44,7 @@ class CacheEntry:
         return asdict(self)
 
     @classmethod
-    def from_dict(cls, data: dict[str, Any]) -> "CacheEntry":
+    def from_dict(cls, data: dict[str, Any]) -> CacheEntry:
         """Create from dictionary."""
         return cls(**data)
 
@@ -157,7 +157,7 @@ class StepCache:
                     hasher.update(content)
                 except OSError:
                     # File doesn't exist or can't be read - include path only
-                    hasher.update(f"missing:{path}".encode("utf-8"))
+                    hasher.update(f"missing:{path}".encode())
 
         return hasher.hexdigest()[:16]  # Truncate for readability
 

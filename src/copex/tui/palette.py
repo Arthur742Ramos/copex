@@ -1,8 +1,9 @@
 """Command palette with fuzzy matching for Copex TUI."""
 
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable
+from typing import Any
 
 # NOTE:
 # Avoid __future__.annotations here; these modules are imported in tests via

@@ -11,9 +11,10 @@ import logging
 import random
 import re
 import time
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from enum import Enum
-from typing import Any, Callable, Sequence, Type
+from typing import Any
 
 from copex.exceptions import RateLimitError, RetryError
 
@@ -270,7 +271,7 @@ class AdaptiveRetry:
         self,
         operation: Callable[[], Any],
         *,
-        retryable_exceptions: Sequence[Type[Exception]] | None = None,
+        retryable_exceptions: Sequence[type[Exception]] | None = None,
     ) -> Any:
         """Execute an operation with adaptive retry.
 
@@ -290,7 +291,7 @@ class AdaptiveRetry:
         while True:
             try:
                 return await operation()
-            except Exception as e:
+            except Exception as e:  # Catch-all: retry handler must intercept any error
                 category = categorize_error(e)
                 strategy = self.get_strategy(category)
                 state.record_error(e, category)
@@ -344,7 +345,7 @@ class AdaptiveRetry:
 
     def wrap(
         self,
-        retryable_exceptions: Sequence[Type[Exception]] | None = None,
+        retryable_exceptions: Sequence[type[Exception]] | None = None,
     ) -> Callable[[Callable[..., Any]], Callable[..., Any]]:
         """Decorator to wrap a function with adaptive retry.
 

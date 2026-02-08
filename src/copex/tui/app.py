@@ -328,7 +328,7 @@ class TuiApp:
                     self.state.session.model = model_enum
                     if self._config:
                         self._config.model = model_enum
-                except Exception:
+                except (ValueError, ImportError):
                     self.state.session.model = cmd.value
             elif cmd.id.startswith("reasoning:"):
                 try:
@@ -338,7 +338,7 @@ class TuiApp:
                     self.state.session.reasoning_effort = effort_enum
                     if self._config:
                         self._config.reasoning_effort = effort_enum
-                except Exception:
+                except (ValueError, ImportError):
                     self.state.session.reasoning_effort = cmd.value
             self.state.close_palette()
 
@@ -659,7 +659,7 @@ class TuiApp:
 
         # Results
         max_results = 8
-        for i, (cmd, score) in enumerate(results[:max_results]):
+        for i, (cmd, _score) in enumerate(results[:max_results]):
             selected = i == self.state.palette_selected
             prefix = "▸" if selected else " "
             label_style = "class:palette.selected" if selected else "class:palette.item"
@@ -1135,7 +1135,7 @@ class TuiApp:
             # self.state.messages).
             self.state.clear_current_response()
 
-        except Exception as e:
+        except Exception as e:  # Catch-all: streaming errors shown to user, session continues
             self.state.session.is_streaming = False
             self.state.session.current_activity = "error"
             self.console.print(f"[red]Error: {e}[/red]")
@@ -1247,7 +1247,7 @@ class TuiApp:
         if cost_val is not None:
             try:
                 cost = float(cost_val)
-            except Exception:
+            except (TypeError, ValueError):
                 cost = None
 
         return total_tokens, cost, prompt_tokens, completion_tokens

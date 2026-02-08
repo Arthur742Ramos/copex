@@ -10,8 +10,9 @@ from __future__ import annotations
 import os
 import re
 import shlex
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any
 
 from copex.exceptions import SecurityError
 
@@ -253,7 +254,7 @@ def validate_path(
                 f"Path traversal detected: {path} is not under {base_dir}",
                 violation_type="path_traversal",
                 context={"path": str(path), "base_dir": str(base_dir)},
-            )
+            ) from None
 
     # Check existence
     if must_exist and not resolved.exists():
