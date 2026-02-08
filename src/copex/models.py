@@ -33,10 +33,28 @@ class Model(str, Enum):
     GEMINI_3_PRO = "gemini-3-pro-preview"
 
 
-# Models that do NOT support reasoning_effort configuration
+# Models that do NOT support reasoning_effort configuration.
+# Source: backend ``models.list`` → capabilities.supports.reasoning_effort
 _NO_REASONING_MODELS: set[str] = {
-    Model.CLAUDE_OPUS_4_6_FAST.value,
+    Model.CLAUDE_SONNET_4_5.value,
+    Model.CLAUDE_SONNET_4.value,
+    Model.CLAUDE_HAIKU_4_5.value,
+    Model.CLAUDE_OPUS_4_5.value,
+    Model.GEMINI_3_PRO.value,
+    Model.GPT_4_1.value,
 }
+
+
+def model_supports_reasoning(model: Model | str) -> bool:
+    """Return True if the model supports the ``reasoning_effort`` parameter.
+
+    Based on backend ``models.list`` capabilities. Opus 4.6/4.6-fast and most
+    GPT models support reasoning; sonnet, haiku, opus 4.5, gemini, gpt-4.1 do not.
+    """
+    model_id = model.value if isinstance(model, Model) else str(model)
+    if model_id in _NO_REASONING_MODELS:
+        return False
+    return True
 
 # ---------------------------------------------------------------------------
 # Dynamic model discovery
@@ -206,6 +224,7 @@ def normalize_reasoning_effort(
 
     If an unsupported effort is requested (currently: xhigh on non-supported
     models), we downgrade to "high" and return a warning message.
+    Models in ``_NO_REASONING_MODELS`` are forced to ``NONE``.
 
     Returns:
       (normalized_effort, warning_message)
@@ -214,8 +233,18 @@ def normalize_reasoning_effort(
     if effort is None:
         return downgrade_to, None
 
+    model_id = model.value if isinstance(model, Model) else str(model)
+
+    # Models that don't support reasoning at all
+    if model_id in _NO_REASONING_MODELS:
+        if effort != ReasoningEffort.NONE:
+            return ReasoningEffort.NONE, (
+                f"Model '{model_id}' does not support reasoning effort. "
+                f"Setting to 'none'."
+            )
+        return ReasoningEffort.NONE, None
+
     if effort == ReasoningEffort.XHIGH and not model_supports_xhigh(model):
-        model_id = model.value if isinstance(model, Model) else str(model)
         return downgrade_to, (
             f"Model '{model_id}' does not support reasoning effort '{effort.value}'. "
             f"Downgrading to '{downgrade_to.value}'."

@@ -1,6 +1,6 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
-__version__ = "2.1.0"
+__version__ = "2.1.1"
 
 # Re-export core components for convenience
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
@@ -40,6 +40,7 @@ from .models import (
     ReasoningEffort,
     discover_models,
     get_available_models,
+    model_supports_reasoning,
     no_reasoning_models,
     resolve_model,
 )
@@ -66,6 +67,7 @@ __all__ = [
     "ReasoningEffort",
     "discover_models",
     "get_available_models",
+    "model_supports_reasoning",
     "no_reasoning_models",
     "resolve_model",
     # Skills

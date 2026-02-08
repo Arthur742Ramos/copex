@@ -9,7 +9,13 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
-from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
+from copex.models import (
+    Model,
+    ReasoningEffort,
+    model_supports_reasoning,
+    normalize_reasoning_effort,
+    parse_reasoning_effort,
+)
 
 
 def _parse_node_version(path: Path) -> tuple[int, ...]:
@@ -354,7 +360,6 @@ class CopexConfig(BaseModel):
 
     def to_session_options(self) -> dict[str, Any]:
         """Convert to create_session options."""
-        from copex.models import _NO_REASONING_MODELS
         from copex.skills import SkillDiscovery
 
         model_id = self.model.value
@@ -363,7 +368,7 @@ class CopexConfig(BaseModel):
             "streaming": self.streaming,
         }
         # Only include reasoning_effort for models that support it
-        if model_id not in _NO_REASONING_MODELS:
+        if model_supports_reasoning(self.model) and self.reasoning_effort.value != "none":
             opts["reasoning_effort"] = self.reasoning_effort.value
 
         # Skills (named skills like 'code-review')

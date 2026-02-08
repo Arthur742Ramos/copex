@@ -14,16 +14,16 @@ def test_normalize_reasoning_effort_opus_xhigh_downgrades_to_high() -> None:
     assert warning_msg is not None
 
 
-def test_config_claude_opus_4_5_xhigh_downgrades_to_high() -> None:
+def test_config_claude_opus_4_5_xhigh_forced_to_none() -> None:
     with pytest.warns(UserWarning):
         cfg = CopexConfig(model=Model.CLAUDE_OPUS_4_5, reasoning_effort="xhigh")
-    assert cfg.reasoning_effort == ReasoningEffort.HIGH
+    assert cfg.reasoning_effort == ReasoningEffort.NONE
 
 
-def test_config_claude_opus_4_5_xh_alias_downgrades_to_high() -> None:
+def test_config_claude_opus_4_5_xh_alias_forced_to_none() -> None:
     with pytest.warns(UserWarning):
         cfg = CopexConfig(model=Model.CLAUDE_OPUS_4_5, reasoning_effort="xh")
-    assert cfg.reasoning_effort == ReasoningEffort.HIGH
+    assert cfg.reasoning_effort == ReasoningEffort.NONE
 
 
 def test_config_gpt_5_2_xhigh_stays_xhigh() -> None:
