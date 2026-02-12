@@ -46,7 +46,6 @@ _NO_REASONING_MODELS: set[str] = {
     Model.CLAUDE_OPUS_4_5.value,
     Model.GEMINI_3_PRO.value,
     Model.GPT_4_1.value,
-    Model.GPT_5_3_CODEX.value,
 }
 
 
