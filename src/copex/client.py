@@ -196,6 +196,11 @@ class Copex:
         error_str = str(error).lower()
         return "tool_use_id" in error_str and "tool_result" in error_str
 
+    def _is_thinking_signature_error(self, error: str | Exception) -> bool:
+        """Detect invalid thinking block signature errors that require session recovery."""
+        error_str = str(error).lower()
+        return "signature" in error_str and "thinking" in error_str
+
     @staticmethod
     def _parse_tool_exclude(value: str) -> _ToolExcludePattern | None:
         trimmed = value.strip()
@@ -712,6 +717,30 @@ class Copex:
             except Exception as e:  # Catch-all: retry logic must handle any SDK error
                 last_error = e
                 error_str = str(e)
+
+                if self._is_thinking_signature_error(e) and self.config.auto_continue:
+                    auto_continues += 1
+                    if auto_continues > self.config.retry.max_auto_continues:
+                        collector.complete_request(
+                            request.request_id,
+                            success=False,
+                            error=str(last_error),
+                            retries=retries,
+                        )
+                        self._cb_record_failure()
+                        raise last_error from e
+                    retries = 0
+                    session, prompt = await self._recover_session(on_chunk)
+                    if on_chunk:
+                        on_chunk(
+                            StreamChunk(
+                                type="system",
+                                delta="\n[Invalid thinking block signature; recovered session]\n",
+                            )
+                        )
+                    delay = self._calculate_delay(0, error=e)
+                    await asyncio.sleep(delay)
+                    continue
 
                 if self._is_tool_state_error(e) and self.config.auto_continue:
                     auto_continues += 1
