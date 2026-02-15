@@ -44,6 +44,7 @@ from .fleet import (
 )
 from .fleet_store import FleetStore, RunRecord, TaskRecord
 from .metrics import MetricsCollector, RequestMetrics, SessionMetrics
+from .stats import RunStats, StatsTracker, load_start_commit, load_state, save_start_commit
 from .models import (
     Model,
     ReasoningEffort,
@@ -153,6 +154,12 @@ __all__ = [
     # Checkpointing
     "CheckpointStore",
     "CheckpointedRalph",
+    # Stats
+    "RunStats",
+    "StatsTracker",
+    "save_start_commit",
+    "load_start_commit",
+    "load_state",
     # Metrics
     "MetricsCollector",
     "RequestMetrics",

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import subprocess
 import sys
 import time
 from datetime import datetime, timezone
@@ -46,6 +47,22 @@ from copex.ui import (
 # Effective default: last used model or claude-opus-4.5
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
 
+
+def _record_start_commit() -> None:
+    """Record current git HEAD so `copex diff` can reference it later."""
+    import subprocess
+
+    try:
+        result = subprocess.run(
+            ["git", "rev-parse", "HEAD"],
+            capture_output=True, text=True, check=True,
+        )
+        from copex.stats import save_start_commit
+        save_start_commit(result.stdout.strip())
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        pass  # Not a git repo – nothing to record
+
+
 app = typer.Typer(
     name="copex",
     help="Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops.",
@@ -62,7 +79,7 @@ _copex_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="chat plan ralph fleet council interactive render models skills status config init login logout tui completions"
+    opts="chat plan ralph fleet council interactive render models skills status config init login logout tui completions stats diff"
 
     case "${prev}" in
         -m|--model)
@@ -112,6 +129,8 @@ _copex() {
         'logout:Logout from GitHub'
         'tui:Start the TUI'
         'completions:Generate shell completions'
+        'stats:Show run statistics'
+        'diff:Show changes since last run'
     )
     models=(
         'claude-opus-4.5'
@@ -242,6 +261,9 @@ def main(
     ] = False,
 ) -> None:
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
+    # Record HEAD commit before any command runs (for `copex diff`)
+    _record_start_commit()
+
     if ctx.invoked_subcommand is None:
         effective_model = model or _DEFAULT_MODEL.value
 
@@ -2232,7 +2254,7 @@ def fleet_command(
         list[str] | None, typer.Argument(help="Task prompts to run in parallel")
     ] = None,
     file: Annotated[
-        Path | None, typer.Option("--file", "-f", help="TOML file with task definitions")
+        Path | None, typer.Option("--file", "-f", help="TOML or JSONL file with task definitions")
     ] = None,
     config_file: Annotated[
         Path | None, typer.Option("--config", help="JSON config file with task definitions")
@@ -2240,6 +2262,9 @@ def fleet_command(
     max_concurrent: Annotated[
         int, typer.Option("--max-concurrent", help="Max concurrent tasks")
     ] = 5,
+    parallel: Annotated[
+        int | None, typer.Option("--parallel", help="Max parallel tasks (alias for --max-concurrent)")
+    ] = None,
     fail_fast: Annotated[
         bool, typer.Option("--fail-fast", help="Stop all tasks on first failure")
     ] = False,
@@ -2289,6 +2314,30 @@ def fleet_command(
             help="Comma-separated tool patterns to exclude per task (e.g. shell(rm))",
         ),
     ] = None,
+    dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--dry-run",
+            is_flag=True,
+            help="Preview fleet actions without executing",
+        ),
+    ] = False,
+    commit_msg: Annotated[
+        str | None,
+        typer.Option(
+            "--commit-msg",
+            "-cm",
+            help="Git commit message (used after successful build; implies --git-finalize)",
+        ),
+    ] = None,
+    retry: Annotated[
+        int,
+        typer.Option("--retry", "-R", help="Retry N times on build failure after fleet completes"),
+    ] = 0,
+    progress: Annotated[
+        bool,
+        typer.Option("--progress", "-P", help="Show real-time file change progress"),
+    ] = False,
 ) -> None:
     """
     Run multiple tasks in parallel with fleet execution.
@@ -2296,6 +2345,7 @@ def fleet_command(
     Examples:
         copex fleet "Write tests" "Fix linting" "Update docs"
         copex fleet --file tasks.toml
+        copex fleet -f tasks.jsonl --parallel 3
         copex fleet --config tasks.json
         copex fleet "Task A" "Task B" --max-concurrent 3 --fail-fast
     """
@@ -2305,6 +2355,10 @@ def fleet_command(
     if not prompts and not file and not config_file:
         console.print("[red]Error: Provide task prompts, --file, or --config[/red]")
         raise typer.Exit(1)
+
+    # --parallel is an alias for --max-concurrent
+    if parallel is not None:
+        max_concurrent = parallel
 
     effective_model = model or _DEFAULT_MODEL.value
     try:
@@ -2327,6 +2381,69 @@ def fleet_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
 
+    # --commit-msg implies git finalize with the given message
+    if commit_msg:
+        git_finalize = True
+        git_message = commit_msg
+
+    # --dry-run: preview what fleet would do without executing
+    if dry_run:
+        from rich.table import Table
+
+        from copex.fleet import FleetTask as _FT
+
+        # Build task list for preview (same logic as _run_fleet)
+        preview_tasks: list[_FT] = []
+        if config_file:
+            try:
+                preview_tasks = _parse_fleet_task_specs(
+                    json.loads(config_file.read_text()), key_name="tasks"
+                )
+            except Exception:
+                try:
+                    preview_tasks = _load_fleet_json_config(config_file)
+                except Exception as exc:
+                    console.print(f"[red]Error loading config: {exc}[/red]")
+                    raise typer.Exit(1) from None
+        elif file:
+            try:
+                _, preview_tasks = _load_fleet_toml_config(file)
+            except ValueError as exc:
+                console.print(f"[red]Error loading TOML: {exc}[/red]")
+                raise typer.Exit(1) from None
+        for i, prompt in enumerate(prompts or []):
+            preview_tasks.append(_FT(id=f"task-{i + 1}", prompt=prompt))
+
+        console.print(
+            Panel(
+                f"[bold]Model:[/bold] {model_enum.value}\n"
+                f"[bold]Reasoning effort:[/bold] {normalized_effort.value}\n"
+                f"[bold]Max concurrent:[/bold] {max_concurrent}\n"
+                f"[bold]Fail fast:[/bold] {fail_fast}\n"
+                f"[bold]Timeout:[/bold] {timeout:.0f}s\n"
+                f"[bold]Git finalize:[/bold] {git_finalize}"
+                + (f"  →  [cyan]{git_message}[/cyan]" if git_message else ""),
+                title="🔍 Dry Run — Fleet Configuration",
+                border_style="yellow",
+            )
+        )
+
+        tbl = Table(title="Tasks", expand=True)
+        tbl.add_column("ID", style="cyan", no_wrap=True)
+        tbl.add_column("Prompt", max_width=70)
+        tbl.add_column("Model Override", style="dim")
+        tbl.add_column("Depends On", style="dim")
+        for t in preview_tasks:
+            tbl.add_row(
+                t.id,
+                t.prompt[:70],
+                t.model or "—",
+                ", ".join(t.depends_on) if t.depends_on else "—",
+            )
+        console.print(tbl)
+        console.print("\n[yellow bold]DRY RUN: No changes made[/yellow bold]")
+        raise typer.Exit(0)
+
     asyncio.run(
         _run_fleet(
             config=config,
@@ -2344,6 +2461,8 @@ def fleet_command(
             git_message=git_message,
             skills=skills or [],
             exclude_tools=_parse_exclude_tools(exclude_tools),
+            retry=retry,
+            progress=progress,
         )
     )
 
@@ -2666,8 +2785,12 @@ async def _run_fleet(
     skills: list[str] | None = None,
     exclude_tools: list[str] | None = None,
     tasks_override: list[FleetTask] | None = None,
+    retry: int = 0,
+    progress: bool = False,
 ) -> None:
     """Run fleet tasks with live progress display."""
+    import threading
+
     from rich.table import Table
 
     from copex.fleet import Fleet, FleetConfig, FleetTask
@@ -2722,31 +2845,50 @@ async def _run_fleet(
                 task.exclude_tools or [],
             )
 
-    # Load tasks from TOML file
+    # Load tasks from TOML or JSONL file
     elif file:
-        try:
-            fleet_section, parsed_tasks = _load_fleet_toml_config(file)
-        except ValueError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
-            raise typer.Exit(1) from None
+        if file.suffix == ".jsonl":
+            # JSONL multi-task file
+            try:
+                from copex.multi_fleet import load_jsonl_tasks
 
-        # Apply fleet-level config from file
-        if "max_concurrent" in fleet_section:
-            fleet_config.max_concurrent = fleet_section["max_concurrent"]
-        if "shared_context" in fleet_section:
-            fleet_config.shared_context = fleet_section["shared_context"]
-        if "timeout" in fleet_section:
-            fleet_config.timeout = fleet_section["timeout"]
-        if "fail_fast" in fleet_section:
-            fleet_config.fail_fast = fleet_section["fail_fast"]
+                parsed_tasks = load_jsonl_tasks(file)
+            except ValueError as exc:
+                console.print(f"[red]Error: {exc}[/red]")
+                raise typer.Exit(1) from None
 
-        for task in parsed_tasks:
-            task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
-            task.exclude_tools = _merge_excludes(
-                fleet_excluded,
-                task.exclude_tools or [],
-            )
-            tasks.append(task)
+            for task in parsed_tasks:
+                task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
+                task.exclude_tools = _merge_excludes(
+                    fleet_excluded,
+                    task.exclude_tools or [],
+                )
+                tasks.append(task)
+        else:
+            # TOML file
+            try:
+                fleet_section, parsed_tasks = _load_fleet_toml_config(file)
+            except ValueError as exc:
+                console.print(f"[red]Error: {exc}[/red]")
+                raise typer.Exit(1) from None
+
+            # Apply fleet-level config from file
+            if "max_concurrent" in fleet_section:
+                fleet_config.max_concurrent = fleet_section["max_concurrent"]
+            if "shared_context" in fleet_section:
+                fleet_config.shared_context = fleet_section["shared_context"]
+            if "timeout" in fleet_section:
+                fleet_config.timeout = fleet_section["timeout"]
+            if "fail_fast" in fleet_section:
+                fleet_config.fail_fast = fleet_section["fail_fast"]
+
+            for task in parsed_tasks:
+                task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
+                task.exclude_tools = _merge_excludes(
+                    fleet_excluded,
+                    task.exclude_tools or [],
+                )
+                tasks.append(task)
 
     # Add CLI prompt tasks
     if tasks_override is None and not config_file:
@@ -2806,6 +2948,52 @@ async def _run_fleet(
 
     start_time = time.time()
 
+    # --progress: background thread that watches for file changes
+    _progress_stop = threading.Event()
+    _progress_thread: threading.Thread | None = None
+
+    if progress:
+        cwd = Path(config.cwd) if config.cwd else Path.cwd()
+
+        def _snapshot_files(root: Path) -> dict[Path, tuple[float, int]]:
+            """Return {path: (mtime, line_count)} for tracked files."""
+            snap: dict[Path, tuple[float, int]] = {}
+            for p in root.rglob("*"):
+                if p.is_file() and ".git" not in p.parts and not p.name.startswith("."):
+                    try:
+                        st = p.stat()
+                        snap[p] = (st.st_mtime, sum(1 for _ in open(p, errors="replace")))
+                    except (OSError, UnicodeDecodeError):
+                        pass
+            return snap
+
+        _baseline = _snapshot_files(cwd)
+
+        def _progress_worker() -> None:
+            while not _progress_stop.wait(timeout=3.0):
+                elapsed = time.time() - start_time
+                mins, secs = divmod(int(elapsed), 60)
+                current = _snapshot_files(cwd)
+                for p, (mtime, lines) in current.items():
+                    base = _baseline.get(p)
+                    if base is None:
+                        rel = p.relative_to(cwd)
+                        console.print(
+                            f"  [dim][{mins}m {secs:02d}s] Created: {rel} (+{lines} lines)[/dim]"
+                        )
+                        _baseline[p] = (mtime, lines)
+                    elif mtime > base[0]:
+                        diff = lines - base[1]
+                        sign = "+" if diff >= 0 else ""
+                        rel = p.relative_to(cwd)
+                        console.print(
+                            f"  [dim][{mins}m {secs:02d}s] Modified: {rel} ({sign}{diff} lines)[/dim]"
+                        )
+                        _baseline[p] = (mtime, lines)
+
+        _progress_thread = threading.Thread(target=_progress_worker, daemon=True)
+        _progress_thread.start()
+
     async with Fleet(config, fleet_config) as fleet:
         for task in tasks:
             fleet.add(
@@ -2835,6 +3023,80 @@ async def _run_fleet(
                 return results
 
             results = await _run_with_updates()
+
+    # Stop progress watcher
+    if _progress_thread is not None:
+        _progress_stop.set()
+        _progress_thread.join(timeout=5.0)
+
+    # --retry: detect build commands and retry on failure
+    if retry > 0:
+        _BUILD_CMDS = [
+            "lake build", "cargo build", "npm run build", "yarn build",
+            "make", "go build", "dotnet build", "gradle build",
+            "mvn compile", "tsc", "pnpm build",
+        ]
+
+        def _detect_build_cmd() -> str | None:
+            """Try to detect a build command from task prompts or common project files."""
+            cwd_path = Path(config.cwd) if config.cwd else Path.cwd()
+            # Check for lakefile / Cargo.toml / package.json etc.
+            detectors: list[tuple[str, str]] = [
+                ("lakefile.lean", "lake build"),
+                ("Cargo.toml", "cargo build"),
+                ("package.json", "npm run build"),
+                ("Makefile", "make"),
+                ("go.mod", "go build ./..."),
+                ("build.gradle", "gradle build"),
+                ("pom.xml", "mvn compile"),
+                ("tsconfig.json", "tsc --noEmit"),
+            ]
+            for marker, cmd in detectors:
+                if (cwd_path / marker).exists():
+                    return cmd
+            return None
+
+        build_cmd = _detect_build_cmd()
+        if build_cmd:
+            console.print(f"[blue]🔨 Detected build command: {build_cmd}[/blue]")
+            for attempt in range(1, retry + 1):
+                console.print(f"[yellow]Running build check ({attempt}/{retry})…[/yellow]")
+                build_result = subprocess.run(
+                    build_cmd,
+                    shell=True,
+                    capture_output=True,
+                    text=True,
+                    cwd=config.cwd or None,
+                )
+                if build_result.returncode == 0:
+                    console.print("[green]✅ Build succeeded![/green]")
+                    break
+                else:
+                    errors_text = (build_result.stderr or build_result.stdout or "unknown error").strip()
+                    # Truncate very long error output
+                    if len(errors_text) > 4000:
+                        errors_text = errors_text[:4000] + "\n... (truncated)"
+                    console.print(
+                        f"[red]Build failed (attempt {attempt}/{retry}).[/red]\n"
+                        f"[dim]{errors_text[:500]}[/dim]"
+                    )
+                    if attempt >= retry:
+                        console.print("[red]❌ All retry attempts exhausted. Build still failing.[/red]")
+                        break
+                    # Use fleet to fix the errors
+                    fix_prompt = (
+                        f"Build failed with errors:\n{errors_text}\n\n"
+                        f"Please fix these errors. The build command is: {build_cmd}"
+                    )
+                    console.print(f"[yellow]Retry {attempt}/{retry}: fixing build errors…[/yellow]")
+                    async with Fleet(config, fleet_config) as retry_fleet:
+                        retry_fleet.add(fix_prompt, task_id=f"retry-{attempt}")
+                        retry_results = await retry_fleet.run()
+                        for r in retry_results:
+                            if not r.success:
+                                console.print(f"[red]Retry task failed: {r.error}[/red]")
+        else:
+            console.print("[dim]--retry: no build system detected, skipping build check[/dim]")
 
     total_time = time.time() - start_time
     successes = sum(1 for r in results if r.success)
@@ -3028,6 +3290,206 @@ def completions_command(
         console.print(f"[red]Unknown shell: {shell}[/red]")
         console.print("Supported shells: bash, zsh, fish")
         raise typer.Exit(1)
+
+
+# ──────────────────────────────────────────────────────────────────────
+# copex stats
+# ──────────────────────────────────────────────────────────────────────
+
+@app.command("stats")
+def stats_command() -> None:
+    """Show statistics for recent copex runs.
+
+    Displays: last model, reasoning effort, token usage, estimated cost,
+    total runs & tokens today.
+    """
+    from copex.stats import StatsTracker, load_state
+
+    tracker = StatsTracker()
+    state = load_state()
+    last = tracker.last_run()
+
+    if not last and not state.get("last_run"):
+        console.print("[yellow]No copex runs recorded yet.[/yellow]")
+        console.print("Run a command first, then check back here.")
+        return
+
+    last = last or state.get("last_run", {})
+
+    # ── Last run ──
+    console.print()
+    console.print(Panel("[bold]Last Copex Run[/bold]", style="cyan", expand=False))
+
+    def _val(label: str, value: str, color: str = "white") -> None:
+        console.print(f"  [dim]{label:<22}[/dim] [{color}]{value}[/{color}]")
+
+    _val("Model", last.get("model", "unknown"), "green")
+    _val("Reasoning effort", last.get("reasoning_effort", "—"), "green")
+    _val("Command", last.get("command", "—"), "blue")
+
+    prompt_tok = last.get("prompt_tokens", 0)
+    comp_tok = last.get("completion_tokens", 0)
+    total_tok = last.get("total_tokens", 0)
+    _val("Prompt tokens", f"{prompt_tok:,}")
+    _val("Completion tokens", f"{comp_tok:,}")
+    _val("Total tokens", f"{total_tok:,}", "yellow")
+
+    cost = last.get("estimated_cost_usd", 0.0)
+    _val("Estimated cost", f"${cost:.4f}", "yellow")
+
+    dur = last.get("duration_ms", 0)
+    if dur:
+        if dur > 60_000:
+            _val("Duration", f"{dur / 1000:.1f}s ({dur / 60_000:.1f}m)")
+        else:
+            _val("Duration", f"{dur / 1000:.1f}s")
+
+    ts = last.get("timestamp", "")
+    if ts:
+        _val("Timestamp", ts, "dim")
+
+    success = last.get("success", True)
+    _val("Status", "✓ success" if success else "✗ failed", "green" if success else "red")
+
+    # ── Today's summary ──
+    today_runs = tracker.runs_today()
+    console.print()
+    console.print(Panel("[bold]Today's Summary[/bold]", style="cyan", expand=False))
+    _val("Total runs", str(len(today_runs)), "blue")
+    today_tokens = sum(r.get("total_tokens", 0) for r in today_runs)
+    _val("Total tokens", f"{today_tokens:,}", "yellow")
+    today_cost = sum(r.get("estimated_cost_usd", 0.0) for r in today_runs)
+    _val("Total est. cost", f"${today_cost:.4f}", "yellow")
+    successes = sum(1 for r in today_runs if r.get("success", True))
+    _val("Success rate", f"{successes}/{len(today_runs)}", "green" if successes == len(today_runs) else "red")
+    console.print()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# copex diff
+# ──────────────────────────────────────────────────────────────────────
+
+@app.command("diff")
+def diff_command(
+    full: Annotated[bool, typer.Option("--full", help="Show full diff instead of stat summary")] = False,
+) -> None:
+    """Show what changed since the last copex run started.
+
+    Uses git to compare HEAD against the commit recorded when copex last ran.
+    """
+    import subprocess
+
+    from copex.stats import load_start_commit, load_state
+
+    state = load_state()
+    start_commit = load_start_commit()
+
+    # Check we're in a git repo
+    try:
+        subprocess.run(
+            ["git", "rev-parse", "--is-inside-work-tree"],
+            capture_output=True, text=True, check=True,
+        )
+    except (subprocess.CalledProcessError, FileNotFoundError):
+        console.print("[red]Not inside a git repository.[/red]")
+        raise typer.Exit(1)
+
+    if not start_commit:
+        console.print("[yellow]No start commit recorded.[/yellow]")
+        console.print("copex records HEAD at the start of each run.")
+        console.print("Run a copex command first, then use [bold]copex diff[/bold].")
+        return
+
+    # Current HEAD
+    head = subprocess.run(
+        ["git", "rev-parse", "HEAD"],
+        capture_output=True, text=True, check=False,
+    ).stdout.strip()
+
+    if head == start_commit:
+        console.print("[green]No changes since last copex run.[/green]")
+        return
+
+    console.print()
+    start_short = start_commit[:8]
+    head_short = head[:8]
+    console.print(
+        Panel(
+            f"[bold]Changes since copex run[/bold]  [dim]{start_short}..{head_short}[/dim]",
+            style="cyan",
+            expand=False,
+        )
+    )
+
+    start_time = state.get("last_start_time", "")
+    if start_time:
+        console.print(f"  [dim]Run started:[/dim] {start_time}")
+
+    # --stat summary
+    diff_range = f"{start_commit}..HEAD"
+    stat_result = subprocess.run(
+        ["git", "diff", "--stat", diff_range],
+        capture_output=True, text=True, check=False,
+    )
+    if stat_result.stdout.strip():
+        console.print()
+        console.print("[bold]Files changed:[/bold]")
+        console.print(stat_result.stdout.rstrip())
+
+    # Detailed numbers
+    numstat = subprocess.run(
+        ["git", "diff", "--numstat", diff_range],
+        capture_output=True, text=True, check=False,
+    )
+    added_lines = 0
+    removed_lines = 0
+    files_modified = 0
+    for line in numstat.stdout.strip().splitlines():
+        parts = line.split("\t")
+        if len(parts) >= 3:
+            files_modified += 1
+            try:
+                added_lines += int(parts[0])
+            except ValueError:
+                pass
+            try:
+                removed_lines += int(parts[1])
+            except ValueError:
+                pass
+
+    # New files (added since start)
+    new_files = subprocess.run(
+        ["git", "diff", "--diff-filter=A", "--name-only", diff_range],
+        capture_output=True, text=True, check=False,
+    )
+    new_file_list = [f for f in new_files.stdout.strip().splitlines() if f]
+
+    console.print()
+    console.print(f"  [dim]Files modified:[/dim]  [white]{files_modified}[/white]")
+    console.print(f"  [dim]Files added:[/dim]    [green]{len(new_file_list)}[/green]")
+    console.print(f"  [dim]Lines added:[/dim]    [green]+{added_lines:,}[/green]")
+    console.print(f"  [dim]Lines removed:[/dim]  [red]-{removed_lines:,}[/red]")
+
+    if new_file_list:
+        console.print()
+        console.print("[bold]New files:[/bold]")
+        for nf in new_file_list:
+            console.print(f"  [green]+[/green] {nf}")
+
+    # Full diff
+    if full:
+        console.print()
+        console.print(Panel("[bold]Full diff[/bold]", style="cyan", expand=False))
+        full_diff = subprocess.run(
+            ["git", "diff", diff_range],
+            capture_output=True, text=True, check=False,
+        )
+        if full_diff.stdout:
+            console.print(full_diff.stdout)
+        else:
+            console.print("[dim]No diff output.[/dim]")
+
+    console.print()
 
 
 if __name__ == "__main__":
