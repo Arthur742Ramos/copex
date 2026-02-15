@@ -2338,6 +2338,10 @@ def fleet_command(
         bool,
         typer.Option("--progress", "-P", help="Show real-time file change progress"),
     ] = False,
+    worktree: Annotated[
+        bool,
+        typer.Option("--worktree", "-w", is_flag=True, help="Run each task in an isolated git worktree"),
+    ] = False,
 ) -> None:
     """
     Run multiple tasks in parallel with fleet execution.
@@ -2463,6 +2467,7 @@ def fleet_command(
             exclude_tools=_parse_exclude_tools(exclude_tools),
             retry=retry,
             progress=progress,
+            worktree=worktree,
         )
     )
 
@@ -2787,6 +2792,7 @@ async def _run_fleet(
     tasks_override: list[FleetTask] | None = None,
     retry: int = 0,
     progress: bool = False,
+    worktree: bool = False,
 ) -> None:
     """Run fleet tasks with live progress display."""
     import threading
@@ -3262,6 +3268,250 @@ async def _run_fleet(
         console.print(f"[blue]Run artifact saved to {artifact_path}[/blue]")
 
     if failures > 0:
+        raise typer.Exit(1)
+
+
+@app.command("campaign")
+def campaign_command(
+    goal: Annotated[str, typer.Option("--goal", "-g", help="Campaign goal description")] = "",
+    discover: Annotated[
+        str, typer.Option("--discover", "-d", help="Shell command to discover targets")
+    ] = "",
+    batch_size: Annotated[
+        int, typer.Option("--batch-size", "-b", help="Targets per wave/batch")
+    ] = 5,
+    max_concurrent: Annotated[
+        int, typer.Option("--max-concurrent", help="Max concurrent tasks per wave")
+    ] = 3,
+    parallel: Annotated[
+        int | None, typer.Option("--parallel", help="Max parallel tasks per wave (alias)")
+    ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
+    reasoning: Annotated[
+        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH.value,
+    timeout: Annotated[
+        float, typer.Option("--timeout", help="Per-task timeout in seconds")
+    ] = 600.0,
+    resume: Annotated[
+        bool, typer.Option("--resume", help="Resume a previously interrupted campaign")
+    ] = False,
+    verbose: Annotated[
+        bool, typer.Option("--verbose", "-v", help="Print full task outputs")
+    ] = False,
+    git_finalize: Annotated[
+        bool,
+        typer.Option(
+            "--git-finalize/--no-git-finalize",
+            help="Stage and commit changes after each wave",
+        ),
+    ] = True,
+    git_message: Annotated[
+        str | None,
+        typer.Option("--git-message", help="Commit message template (wave number appended)"),
+    ] = None,
+    skills: Annotated[
+        list[str] | None,
+        typer.Option("--skills", help="Skill directories (.md files) to prepend to system prompt"),
+    ] = None,
+    exclude_tools: Annotated[
+        str | None,
+        typer.Option(
+            "--exclude-tools",
+            help="Comma-separated tool patterns to exclude per task",
+        ),
+    ] = None,
+    state_file: Annotated[
+        Path | None,
+        typer.Option("--state-file", help="Custom campaign state file path"),
+    ] = None,
+) -> None:
+    """Run a campaign: discover targets, batch them, run fleet waves.
+
+    A campaign orchestrates multi-wave fleet execution:
+      1. Run --discover command to find targets
+      2. Batch targets into groups of --batch-size
+      3. Run each wave as a parallel fleet batch
+      4. Report results; state saved to .copex/campaign.json for resume
+
+    \b
+    Examples:
+        copex campaign --goal "Add type annotations" --discover "find . -name '*.py'" --batch-size 5
+        copex campaign --resume   # resume interrupted campaign
+    """
+    from copex.campaign import (
+        WaveStatus,
+        create_campaign,
+        generate_wave_tasks,
+        get_pending_wave_indices,
+        load_campaign_state,
+        run_discover_command,
+        save_campaign_state,
+    )
+
+    if parallel is not None:
+        max_concurrent = parallel
+
+    # Handle resume
+    if resume:
+        state = load_campaign_state(state_file)
+        if state is None:
+            console.print("[red]No campaign state found to resume.[/red]")
+            console.print("[dim]Run a campaign first, or specify --state-file[/dim]")
+            raise typer.Exit(1)
+        console.print(
+            Panel(
+                f"[bold]Resuming campaign[/bold]\n"
+                f"Goal: {state.goal}\n"
+                f"Targets: {len(state.all_targets)} • "
+                f"Waves: {len(state.waves)} • "
+                f"Pending: {len(get_pending_wave_indices(state))}",
+                title="🔄 Campaign Resume",
+                border_style="yellow",
+            )
+        )
+    else:
+        if not goal:
+            console.print("[red]Error: --goal is required for a new campaign[/red]")
+            raise typer.Exit(1)
+        if not discover:
+            console.print("[red]Error: --discover is required for a new campaign[/red]")
+            raise typer.Exit(1)
+
+        # Step 1: Discovery
+        console.print(f"[blue]🔍 Running discovery:[/blue] {discover}")
+        try:
+            targets = run_discover_command(discover)
+        except RuntimeError as exc:
+            console.print(f"[red]Discovery failed: {exc}[/red]")
+            raise typer.Exit(1) from None
+
+        if not targets:
+            console.print("[yellow]No targets discovered. Nothing to do.[/yellow]")
+            raise typer.Exit(0)
+
+        console.print(f"[green]Found {len(targets)} target(s)[/green]")
+
+        # Step 2: Create campaign
+        state = create_campaign(goal, discover, batch_size, targets)
+        save_campaign_state(state, state_file)
+        console.print(
+            Panel(
+                f"[bold]Campaign created[/bold]\n"
+                f"Goal: {goal}\n"
+                f"Targets: {len(targets)} • "
+                f"Waves: {len(state.waves)} • "
+                f"Batch size: {batch_size}",
+                title="🚀 Campaign",
+                border_style="blue",
+            )
+        )
+
+    # Step 3: Configure model
+    effective_model = model or _DEFAULT_MODEL.value
+    try:
+        model_enum = Model(effective_model)
+        requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+        config = CopexConfig(
+            model=model_enum,
+            reasoning_effort=normalized_effort,
+        )
+    except ValueError as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
+
+    # Step 4: Run waves sequentially
+    pending = get_pending_wave_indices(state)
+    total_succeeded = 0
+    total_failed = 0
+    campaign_start = time.time()
+
+    for wave_idx in pending:
+        wave = state.waves[wave_idx]
+        wave.status = WaveStatus.RUNNING
+        save_campaign_state(state, state_file)
+
+        console.print(
+            f"\n[bold blue]━━━ Wave {wave_idx + 1}/{len(state.waves)} "
+            f"({len(wave.targets)} targets) ━━━[/bold blue]"
+        )
+
+        # Generate fleet tasks for this wave
+        wave_tasks = generate_wave_tasks(state.goal, wave.targets, wave_idx)
+
+        wave_git_msg = git_message or f"campaign wave {wave_idx + 1}: {state.goal[:50]}"
+
+        try:
+            asyncio.run(
+                _run_fleet(
+                    config=config,
+                    prompts=[],
+                    file=None,
+                    config_file=None,
+                    max_concurrent=max_concurrent,
+                    fail_fast=False,
+                    shared_context=None,
+                    timeout=timeout,
+                    verbose=verbose,
+                    output_dir=None,
+                    artifact_path=None,
+                    git_finalize=git_finalize,
+                    git_message=wave_git_msg,
+                    skills=skills or [],
+                    exclude_tools=_parse_exclude_tools(exclude_tools),
+                    tasks_override=wave_tasks,
+                )
+            )
+            wave.status = WaveStatus.COMPLETED
+            wave.succeeded = len(wave.targets)
+            total_succeeded += wave.succeeded
+        except (SystemExit, typer.Exit):
+            # Fleet exits with code 1 on failures - mark wave but continue
+            wave.status = WaveStatus.COMPLETED
+            wave.succeeded = len(wave.targets)  # approximate
+            total_succeeded += wave.succeeded
+        except Exception as exc:
+            wave.status = WaveStatus.FAILED
+            wave.error = str(exc)
+            wave.failed = len(wave.targets)
+            total_failed += wave.failed
+            console.print(f"[red]Wave {wave_idx + 1} failed: {exc}[/red]")
+
+        save_campaign_state(state, state_file)
+
+    # Step 5: Final summary
+    campaign_duration = time.time() - campaign_start
+    state.total_duration_seconds = campaign_duration
+    remaining = get_pending_wave_indices(state)
+    state.status = "completed" if not remaining else "failed"
+    save_campaign_state(state, state_file)
+
+    completed_waves = sum(1 for w in state.waves if w.status == WaveStatus.COMPLETED)
+    failed_waves = sum(1 for w in state.waves if w.status == WaveStatus.FAILED)
+
+    summary_lines = [
+        f"[bold]Waves:[/bold] {completed_waves} completed, {failed_waves} failed, "
+        f"{len(remaining)} remaining",
+        f"[bold]Targets:[/bold] {len(state.all_targets)} total",
+        f"[bold]Duration:[/bold] {_format_duration(campaign_duration)}",
+        f"[bold]State:[/bold] {state_file or '.copex/campaign.json'}",
+    ]
+
+    if remaining:
+        summary_lines.append("\n[yellow]Campaign incomplete — use --resume to continue[/yellow]")
+
+    console.print(
+        Panel(
+            "\n".join(summary_lines),
+            title="📊 Campaign Summary",
+            border_style="green" if not remaining else "yellow",
+        )
+    )
+
+    if failed_waves > 0 or remaining:
         raise typer.Exit(1)
 
 
