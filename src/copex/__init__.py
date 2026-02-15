@@ -1,6 +1,6 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
-__version__ = "2.5.0"
+__version__ = "2.6.0"
 
 # Re-export core components for convenience
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
