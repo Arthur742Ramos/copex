@@ -3000,6 +3000,39 @@ async def _run_fleet(
         _progress_thread = threading.Thread(target=_progress_worker, daemon=True)
         _progress_thread.start()
 
+    # ── Worktree isolation setup ───────────────────────────────────
+    worktree_managers: dict[str, "WorktreeManager"] = {}  # task_id -> manager  # noqa: F821
+    if worktree:
+        from copex.worktree import WorktreeManager
+
+        repo_root = WorktreeManager.get_repo_root(Path.cwd())
+        if repo_root is None:
+            console.print("[red]Error: --worktree requires a git repository[/red]")
+            raise typer.Exit(1)
+        if WorktreeManager.has_uncommitted_changes(repo_root):
+            console.print(
+                "[yellow]Warning: uncommitted changes in working tree. "
+                "Worktrees will be based on HEAD (uncommitted changes won't be included).[/yellow]"
+            )
+        for task in tasks:
+            mgr = WorktreeManager(repo_root=repo_root)
+            create_result = mgr.create_worktree()
+            if not create_result.success:
+                console.print(
+                    f"[red]Failed to create worktree for task '{task.id}': "
+                    f"{create_result.error}[/red]"
+                )
+                # Clean up already-created worktrees
+                for prev_mgr in worktree_managers.values():
+                    prev_mgr.cleanup_worktree()
+                raise typer.Exit(1)
+            worktree_managers[task.id] = mgr
+            # Override task cwd to the worktree path
+            task.cwd = str(mgr.worktree_path)
+            console.print(
+                f"  [dim]🌲 Task '{task.id}' → worktree {mgr.worktree_path}[/dim]"
+            )
+
     async with Fleet(config, fleet_config) as fleet:
         for task in tasks:
             fleet.add(
@@ -3029,6 +3062,58 @@ async def _run_fleet(
                 return results
 
             results = await _run_with_updates()
+
+    # ── Worktree merge-back & cleanup ────────────────────────────────
+    if worktree and worktree_managers:
+        merge_failures: list[str] = []
+        for r in results:
+            mgr = worktree_managers.get(r.task_id)
+            if mgr is None:
+                continue
+            if r.success:
+                commit_res = mgr.commit_in_worktree(
+                    f"fleet({r.task_id}): apply changes"
+                )
+                if commit_res.success and commit_res.commit_hash:
+                    merge_res = mgr.merge_back()
+                    if merge_res.success:
+                        console.print(
+                            f"  [green]✅ Task '{r.task_id}' merged back "
+                            f"({commit_res.commit_hash[:8]})[/green]"
+                        )
+                    else:
+                        merge_failures.append(
+                            f"Task '{r.task_id}': {merge_res.error}"
+                        )
+                        console.print(
+                            f"  [red]❌ Task '{r.task_id}' merge failed: "
+                            f"{merge_res.error}[/red]"
+                        )
+                elif commit_res.error == "No changes to commit":
+                    console.print(
+                        f"  [dim]Task '{r.task_id}': no changes to merge[/dim]"
+                    )
+                else:
+                    console.print(
+                        f"  [red]❌ Task '{r.task_id}' commit failed: "
+                        f"{commit_res.error}[/red]"
+                    )
+            else:
+                console.print(
+                    f"  [dim]Task '{r.task_id}' failed — skipping merge[/dim]"
+                )
+
+            # Always clean up
+            mgr.cleanup_worktree()
+
+        if merge_failures:
+            console.print(
+                Panel(
+                    "\n".join(merge_failures),
+                    title="⚠️  Worktree Merge Failures",
+                    border_style="red",
+                )
+            )
 
     # Stop progress watcher
     if _progress_thread is not None:
