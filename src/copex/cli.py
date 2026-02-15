@@ -2410,11 +2410,20 @@ def fleet_command(
                     console.print(f"[red]Error loading config: {exc}[/red]")
                     raise typer.Exit(1) from None
         elif file:
-            try:
-                _, preview_tasks = _load_fleet_toml_config(file)
-            except ValueError as exc:
-                console.print(f"[red]Error loading TOML: {exc}[/red]")
-                raise typer.Exit(1) from None
+            if file.suffix == ".jsonl":
+                try:
+                    from copex.multi_fleet import load_jsonl_tasks
+
+                    preview_tasks = load_jsonl_tasks(file)
+                except ValueError as exc:
+                    console.print(f"[red]Error loading JSONL: {exc}[/red]")
+                    raise typer.Exit(1) from None
+            else:
+                try:
+                    _, preview_tasks = _load_fleet_toml_config(file)
+                except ValueError as exc:
+                    console.print(f"[red]Error loading TOML: {exc}[/red]")
+                    raise typer.Exit(1) from None
         for i, prompt in enumerate(prompts or []):
             preview_tasks.append(_FT(id=f"task-{i + 1}", prompt=prompt))
 
