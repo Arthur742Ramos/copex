@@ -28,8 +28,15 @@ from rich.panel import Panel
 from copex import __version__
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig, load_last_model, make_client, save_last_model
+from copex.exceptions import ValidationError as CopexValidationError
 from copex.log_render import render_jsonl
-from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
+from copex.models import (
+    Model,
+    ReasoningEffort,
+    normalize_reasoning_effort,
+    parse_reasoning_effort,
+    resolve_model,
+)
 from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
@@ -46,6 +53,23 @@ from copex.ui import (
 
 # Effective default: last used model or claude-opus-4.5
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
+
+
+class _ResolvedModel(str):
+    @property
+    def value(self) -> str:
+        return str(self)
+
+
+def _resolve_cli_model(model: str) -> Model | _ResolvedModel:
+    try:
+        resolved = resolve_model(model)
+    except CopexValidationError as exc:
+        raise ValueError(str(exc)) from exc
+    try:
+        return Model(resolved)
+    except ValueError:
+        return _ResolvedModel(resolved)
 
 
 def _record_start_commit() -> None:
@@ -198,15 +222,11 @@ def version_callback(value: bool) -> None:
         raise typer.Exit()
 
 
-def model_callback(value: str | None) -> Model | None:
+def model_callback(value: str | None) -> Model | _ResolvedModel | None:
     """Validate model name."""
     if value is None:
         return None
-    try:
-        return Model(value)
-    except ValueError:
-        valid = ", ".join(m.value for m in Model)
-        raise typer.BadParameter(f"Invalid model. Valid: {valid}") from None
+    return _resolve_cli_model(value)
 
 
 def reasoning_callback(value: str | None) -> ReasoningEffort | None:
@@ -271,7 +291,7 @@ def main(
         if prompt is not None:
             try:
                 config = CopexConfig()
-                config.model = Model(effective_model)
+                config.model = _resolve_cli_model(effective_model)
                 if use_cli:
                     config.use_cli = True
                 requested_effort = parse_reasoning_effort(reasoning)
@@ -547,7 +567,7 @@ def chat(
     # Override with CLI options
     effective_model = model or _DEFAULT_MODEL.value
     try:
-        config.model = Model(effective_model)
+        config.model = _resolve_cli_model(effective_model)
     except ValueError:
         console.print(f"[red]Invalid model: {effective_model}[/red]")
         raise typer.Exit(1) from None
@@ -979,16 +999,13 @@ def tui(
 
     effective_model = model or _DEFAULT_MODEL.value
     try:
-        model_enum = Model(effective_model)
+        model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
         normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
         if warning:
             console.print(f"[yellow]{warning}[/yellow]")
 
-        config = CopexConfig(
-            model=model_enum,
-            reasoning_effort=normalized_effort,
-        )
+        config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
@@ -1062,16 +1079,13 @@ def interactive(
     """Start an interactive chat session."""
     effective_model = model or _DEFAULT_MODEL.value
     try:
-        model_enum = Model(effective_model)
+        model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
         normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
         if warning:
             console.print(f"[yellow]{warning}[/yellow]")
 
-        config = CopexConfig(
-            model=model_enum,
-            reasoning_effort=normalized_effort,
-        )
+        config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
         if ui_theme:
             config.ui_theme = ui_theme
         if ui_density:
@@ -1229,7 +1243,7 @@ async def _interactive_loop(config: CopexConfig) -> None:
                     continue
                 model_name = parts[1].strip()
                 try:
-                    new_model = Model(model_name)
+                    new_model = _resolve_cli_model(model_name)
                     client.config.model = new_model
                     save_last_model(new_model)  # Persist for next run
 
@@ -1412,16 +1426,13 @@ def ralph_command(
     """
     effective_model = model or _DEFAULT_MODEL.value
     try:
-        model_enum = Model(effective_model)
+        model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
         normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
         if warning:
             console.print(f"[yellow]{warning}[/yellow]")
 
-        config = CopexConfig(
-            model=model_enum,
-            reasoning_effort=normalized_effort,
-        )
+        config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
 
         # Skills options
         if skill_dir:
@@ -1733,16 +1744,13 @@ def plan_command(
 
     effective_model = model or _DEFAULT_MODEL.value
     try:
-        model_enum = Model(effective_model)
+        model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
         normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
         if warning:
             console.print(f"[yellow]{warning}[/yellow]")
 
-        config = CopexConfig(
-            model=model_enum,
-            reasoning_effort=normalized_effort,
-        )
+        config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
 
         # Skills options
         if skill_dir:
@@ -2366,16 +2374,13 @@ def fleet_command(
 
     effective_model = model or _DEFAULT_MODEL.value
     try:
-        model_enum = Model(effective_model)
+        model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
         normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
         if warning:
             console.print(f"[yellow]{warning}[/yellow]")
 
-        config = CopexConfig(
-            model=model_enum,
-            reasoning_effort=normalized_effort,
-        )
+        config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
         if mcp_config:
             if not mcp_config.exists():
                 console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
@@ -2664,11 +2669,11 @@ def council_command(
     """
 
     # Parse model options
-    def parse_model(m: str | None) -> Model | None:
+    def parse_model(m: str | None) -> Model | _ResolvedModel | None:
         if m is None:
             return None
         try:
-            return Model(m)
+            return _resolve_cli_model(m)
         except ValueError:
             console.print(f"[red]Invalid model: {m}[/red]")
             raise typer.Exit(1) from None
@@ -3504,15 +3509,12 @@ def campaign_command(
     # Step 3: Configure model
     effective_model = model or _DEFAULT_MODEL.value
     try:
-        model_enum = Model(effective_model)
+        model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
         normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
         if warning:
             console.print(f"[yellow]{warning}[/yellow]")
-        config = CopexConfig(
-            model=model_enum,
-            reasoning_effort=normalized_effort,
-        )
+        config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
