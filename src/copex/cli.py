@@ -617,7 +617,7 @@ def chat(
 
     if not prompt:
         console.print("[red]No prompt provided[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     # Handle context files
     context_content = ""
@@ -626,7 +626,7 @@ def chat(
         for ctx_path in context:
             if not ctx_path.exists():
                 console.print(f"[red]Context file not found: {ctx_path}[/red]")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
             try:
                 content = ctx_path.read_text()
                 # Format with filename header
@@ -921,7 +921,7 @@ def render_command(
 
     if not input_path.exists():
         console.print(f"[red]File not found: {input_path}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     with input_path.open("r", encoding="utf-8") as handle:
         render_jsonl(handle, console)
@@ -982,7 +982,7 @@ def skills_show(
 
     if content is None:
         console.print(f"[red]Skill not found: {name}[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     console.print(Markdown(content))
 
@@ -1522,7 +1522,7 @@ def login() -> None:
         console.print("  Windows: [bold]winget install GitHub.cli[/bold]")
         console.print("  macOS:   [bold]brew install gh[/bold]")
         console.print("  Linux:   [bold]sudo apt install gh[/bold]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     console.print("[blue]Opening browser for GitHub authentication...[/blue]\n")
 
@@ -1548,7 +1548,7 @@ def logout() -> None:
     gh_path = shutil.which("gh")
     if not gh_path:
         console.print("[red]Error: GitHub CLI (gh) not found.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     try:
         result = subprocess.run([gh_path, "auth", "logout"], check=False)
@@ -1740,7 +1740,7 @@ def plan_command(
     # Validate: need task OR resume OR load_plan
     if not task and not resume and not load_plan:
         console.print("[red]Error: Provide a task, --resume, or --load[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     effective_model = model or _DEFAULT_MODEL.value
     try:
@@ -1828,7 +1828,7 @@ async def _run_plan(
             if state is None:
                 console.print("[red]No checkpoint found (.copex-state.json)[/red]")
                 console.print("[dim]Run a plan with --execute first to create a checkpoint[/dim]")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
 
             plan = state.plan
             from_step = state.current_step
@@ -1846,7 +1846,7 @@ async def _run_plan(
             # Load from plan file
             if not load_plan.exists():
                 console.print(f"[red]Plan file not found: {load_plan}[/red]")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
             plan = Plan.load(load_plan)
             console.print(f"[green]✓ Loaded plan from {load_plan}[/green]\n")
         else:
@@ -2363,10 +2363,10 @@ def fleet_command(
     """
     if config_file and (prompts or file):
         console.print("[red]Error: Use --config without prompts or --file[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
     if not prompts and not file and not config_file:
         console.print("[red]Error: Provide task prompts, --file, or --config[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     # --parallel is an alias for --max-concurrent
     if parallel is not None:
@@ -2384,7 +2384,7 @@ def fleet_command(
         if mcp_config:
             if not mcp_config.exists():
                 console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
             config.mcp_config_file = str(mcp_config)
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
@@ -2700,7 +2700,7 @@ def council_command(
     if mcp_config:
         if not mcp_config.exists():
             console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
         config.mcp_config_file = str(mcp_config)
 
     council_tasks = _build_council_tasks(
@@ -2924,7 +2924,7 @@ async def _run_fleet(
 
     if not tasks:
         console.print("[red]No tasks to run[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     # Track statuses for live display
     statuses: dict[str, str] = {t.id: "pending" for t in tasks}
@@ -3015,14 +3015,14 @@ async def _run_fleet(
         _progress_thread.start()
 
     # ── Worktree isolation setup ───────────────────────────────────
-    worktree_managers: dict[str, "WorktreeManager"] = {}  # task_id -> manager  # noqa: F821
+    worktree_managers: dict[str, WorktreeManager] = {}  # task_id -> manager  # noqa: F821
     if worktree:
         from copex.worktree import WorktreeManager
 
         repo_root = WorktreeManager.get_repo_root(Path.cwd())
         if repo_root is None:
             console.print("[red]Error: --worktree requires a git repository[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
         if WorktreeManager.has_uncommitted_changes(repo_root):
             console.print(
                 "[yellow]Warning: uncommitted changes in working tree. "
@@ -3039,7 +3039,7 @@ async def _run_fleet(
                 # Clean up already-created worktrees
                 for prev_mgr in worktree_managers.values():
                     prev_mgr.cleanup_worktree()
-                raise typer.Exit(1)
+                raise typer.Exit(1) from None
             worktree_managers[task.id] = mgr
             # Override task cwd to the worktree path
             task.cwd = str(mgr.worktree_path)
@@ -3367,7 +3367,7 @@ async def _run_fleet(
         console.print(f"[blue]Run artifact saved to {artifact_path}[/blue]")
 
     if failures > 0:
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @app.command("campaign")
@@ -3457,7 +3457,7 @@ def campaign_command(
         if state is None:
             console.print("[red]No campaign state found to resume.[/red]")
             console.print("[dim]Run a campaign first, or specify --state-file[/dim]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
         console.print(
             Panel(
                 f"[bold]Resuming campaign[/bold]\n"
@@ -3472,10 +3472,10 @@ def campaign_command(
     else:
         if not goal:
             console.print("[red]Error: --goal is required for a new campaign[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
         if not discover:
             console.print("[red]Error: --discover is required for a new campaign[/red]")
-            raise typer.Exit(1)
+            raise typer.Exit(1) from None
 
         # Step 1: Discovery
         console.print(f"[blue]🔍 Running discovery:[/blue] {discover}")
@@ -3608,7 +3608,7 @@ def campaign_command(
     )
 
     if failed_waves > 0 or remaining:
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 @app.command("completions")
@@ -3635,7 +3635,7 @@ def completions_command(
     else:
         console.print(f"[red]Unknown shell: {shell}[/red]")
         console.print("Supported shells: bash, zsh, fish")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
 
 # ──────────────────────────────────────────────────────────────────────
@@ -3738,7 +3738,7 @@ def diff_command(
         )
     except (subprocess.CalledProcessError, FileNotFoundError):
         console.print("[red]Not inside a git repository.[/red]")
-        raise typer.Exit(1)
+        raise typer.Exit(1) from None
 
     if not start_commit:
         console.print("[yellow]No start commit recorded.[/yellow]")

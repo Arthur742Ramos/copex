@@ -44,7 +44,6 @@ from .fleet import (
 )
 from .fleet_store import FleetStore, RunRecord, TaskRecord
 from .metrics import MetricsCollector, RequestMetrics, SessionMetrics
-from .stats import RunStats, StatsTracker, load_start_commit, load_state, save_start_commit
 from .models import (
     Model,
     ReasoningEffort,
@@ -57,6 +56,7 @@ from .models import (
 )
 from .persistence import PersistentSession, SessionStore
 from .skills import SkillDiscovery, SkillInfo, get_skill_content, list_skills
+from .stats import RunStats, StatsTracker, load_start_commit, load_state, save_start_commit
 from .templates import (
     StepInstance,
     StepTemplate,
