@@ -34,6 +34,7 @@ class Model(str, Enum):
     CLAUDE_OPUS_4_5 = "claude-opus-4.5"
     CLAUDE_OPUS_4_6 = "claude-opus-4.6"
     CLAUDE_OPUS_4_6_FAST = "claude-opus-4.6-fast"
+    CLAUDE_OPUS_4_6_1M = "claude-opus-4.6-1m"
     CLAUDE_SONNET_4_6 = "claude-sonnet-4.6"
     GEMINI_3_PRO = "gemini-3-pro-preview"
 

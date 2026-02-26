@@ -240,8 +240,9 @@ class ModelAwareBreaker:
 # Default fallback chains for common model families
 DEFAULT_FALLBACK_CHAINS: dict[str, list[str]] = {
     # Claude family: opus -> sonnet -> haiku
-    "claude-opus-4.6": ["claude-opus-4.6-fast", "claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
-    "claude-opus-4.6-fast": ["claude-opus-4.6", "claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
+    "claude-opus-4.6": ["claude-opus-4.6-fast", "claude-opus-4.6-1m", "claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
+    "claude-opus-4.6-fast": ["claude-opus-4.6", "claude-opus-4.6-1m", "claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
+    "claude-opus-4.6-1m": ["claude-opus-4.6", "claude-opus-4.6-fast", "claude-opus-4.5", "claude-sonnet-4.5", "claude-haiku-4.5"],
     "claude-opus-4.5": ["claude-sonnet-4.5", "claude-haiku-4.5"],
     "claude-sonnet-4.5": ["claude-sonnet-4", "claude-haiku-4.5"],
     "claude-sonnet-4": ["claude-haiku-4.5"],
