@@ -473,6 +473,20 @@ class CopexConfig(BaseModel):
         if self.excluded_tools:
             opts["excluded_tools"] = self.excluded_tools
 
+        # Permission handler — required by github-copilot-sdk >= 0.1.29.
+        # Copex handles user-facing approval/deny at the tool-call level via
+        # its own ApprovalWorkflow, so the SDK-level handler just needs to
+        # reflect the configured approval_mode as a transport-level gate.
+        from copex.approval import normalize_approval_mode, ApprovalMode
+
+        mode = normalize_approval_mode(self.approval_mode)
+        if mode in (ApprovalMode.DENY_ALL, ApprovalMode.DRY_RUN):
+            opts["on_permission_request"] = lambda _req, _ctx: {"kind": "denied-by-rules"}
+        else:
+            # auto-approve, manual, policy-based: approve at transport level;
+            # ApprovalWorkflow handles the actual user-facing decision.
+            opts["on_permission_request"] = lambda _req, _ctx: {"kind": "approved"}
+
         return opts
 
 
