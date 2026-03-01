@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.9.0 (2026-02-28)
+
+### Features
+- Dynamic squad team creation: `SquadTeam.from_repo()` analyzes repo structure to automatically compose the right team (Developer, Tester, Docs, DevOps, Frontend, Backend roles detected from directory structure)
+- 3 new squad roles: DEVOPS (⚙️), FRONTEND (⚛️), BACKEND (🔧)
+- Squad coordinator now defaults to dynamic team creation instead of static `default()` team
+
+### Bug Fixes
+- Fixed ruff lint errors (unsorted imports, unused imports) that caused CI failures
+- Fixed sync-squad-labels workflow to handle HTTP 422 (already_exists) errors gracefully
+
 ## v2.7.0 (2026-03-01)
 
 ### New Features
