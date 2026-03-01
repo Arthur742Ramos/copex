@@ -108,7 +108,7 @@ _copex_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="chat plan ralph fleet council interactive map render models skills status config init login logout tui completions stats diff squad audit agent edit undo"
+    opts="chat plan ralph fleet council interactive map render models skills memory status config init login logout tui completions stats diff squad audit agent edit undo"
 
     case "${prev}" in
         -m|--model)
@@ -152,6 +152,7 @@ _copex() {
         'render:Render JSONL session logs'
         'models:List available models'
         'skills:Manage skills'
+        'memory:Manage persistent project memory'
         'status:Check Copilot status'
         'config:Show configuration'
         'init:Create default config'
@@ -207,7 +208,7 @@ _copex "$@"
 FISH_COMPLETION = """
 # copex fish completion
 
-set -l commands chat plan ralph fleet council interactive map render models skills status config init login logout tui completions stats diff squad audit agent edit undo
+set -l commands chat plan ralph fleet council interactive map render models skills memory status config init login logout tui completions stats diff squad audit agent edit undo
 set -l models claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini
 set -l reasoning low medium high xhigh
 
@@ -382,6 +383,55 @@ def main(
         else:
             # No prompt provided - launch interactive mode
             interactive(model=effective_model, reasoning=reasoning)
+
+
+@memory_app.command("show")
+def memory_show() -> None:
+    """Display current project memory."""
+    memory = ProjectMemory(Path.cwd())
+    content = memory.read_memory().strip()
+    if not content:
+        console.print("[yellow]No project memory found at .copex/memory.md[/yellow]")
+        return
+    console.print(Markdown(content))
+
+
+@memory_app.command("add")
+def memory_add(
+    entry: Annotated[str, typer.Argument(help="Memory entry to persist.")],
+) -> None:
+    """Add a manual memory entry."""
+    memory = ProjectMemory(Path.cwd())
+    if memory.add_entry(entry, kind="manual"):
+        console.print("[green]Added memory entry.[/green]")
+    else:
+        console.print("[yellow]Entry already exists or was empty.[/yellow]")
+
+
+@memory_app.command("clear")
+def memory_clear() -> None:
+    """Reset project memory."""
+    memory = ProjectMemory(Path.cwd())
+    memory.clear()
+    console.print("[green]Project memory reset.[/green]")
+
+
+@memory_app.command("import")
+def memory_import() -> None:
+    """Import guidance from common assistant memory files."""
+    memory = ProjectMemory(Path.cwd())
+    imported = memory.import_external_guidance()
+    if imported:
+        console.print("[green]Imported guidance from:[/green]")
+        for path in imported:
+            console.print(f"  - {path.name}")
+        return
+
+    detected = memory.detect_external_guidance_files()
+    if detected:
+        console.print("[yellow]No new guidance entries to import.[/yellow]")
+    else:
+        console.print("[yellow]No CLAUDE.md/.cursorrules/.aider.conf.yml/AGENTS.md found.[/yellow]")
 
 
 class SlashCompleter(Completer):
