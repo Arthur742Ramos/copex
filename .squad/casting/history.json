@@ -1,0 +1,21 @@
+{
+  "universe_usage_history": [
+    {
+      "universe": "The Simpsons",
+      "used_at": "2026-03-01T01:04:51Z",
+      "repo": "copex"
+    }
+  ],
+  "assignment_cast_snapshots": {
+    "copex-2026-03-01": {
+      "assignment_id": "copex-2026-03-01",
+      "universe": "The Simpsons",
+      "created_at": "2026-03-01T01:04:51Z",
+      "agents": {
+        "burns": "Lead",
+        "frink": "Core Dev",
+        "hibbert": "Tester"
+      }
+    }
+  }
+}

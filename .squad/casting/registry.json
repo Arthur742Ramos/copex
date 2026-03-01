@@ -1,0 +1,28 @@
+{
+  "agents": {
+    "burns": {
+      "persistent_name": "Burns",
+      "universe": "The Simpsons",
+      "role": "Lead",
+      "created_at": "2026-03-01T01:04:51Z",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "frink": {
+      "persistent_name": "Frink",
+      "universe": "The Simpsons",
+      "role": "Core Dev",
+      "created_at": "2026-03-01T01:04:51Z",
+      "legacy_named": false,
+      "status": "active"
+    },
+    "hibbert": {
+      "persistent_name": "Hibbert",
+      "universe": "The Simpsons",
+      "role": "Tester",
+      "created_at": "2026-03-01T01:04:51Z",
+      "legacy_named": false,
+      "status": "active"
+    }
+  }
+}
