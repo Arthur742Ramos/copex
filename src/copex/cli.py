@@ -3900,7 +3900,7 @@ async def _run_squad(
 
     def on_status(task_id: str, status: str) -> None:
         if not json_output:
-            from copex.squad import SquadRole, _ROLE_EMOJIS
+            from copex.squad import _ROLE_EMOJIS, SquadRole
 
             try:
                 role = SquadRole(task_id)

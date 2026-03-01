@@ -18,7 +18,6 @@ Usage::
 from __future__ import annotations
 
 import json
-import os
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -26,7 +25,7 @@ from pathlib import Path
 from typing import Any
 
 from copex.config import CopexConfig
-from copex.fleet import Fleet, FleetConfig, FleetResult, FleetTask
+from copex.fleet import Fleet, FleetConfig, FleetResult
 
 
 class SquadRole(str, Enum):
@@ -36,6 +35,9 @@ class SquadRole(str, Enum):
     DEVELOPER = "developer"
     TESTER = "tester"
     DOCS = "docs"
+    DEVOPS = "devops"
+    FRONTEND = "frontend"
+    BACKEND = "backend"
 
 
 _ROLE_PROMPTS: dict[SquadRole, str] = {
@@ -60,6 +62,18 @@ _ROLE_PROMPTS: dict[SquadRole, str] = {
         "README files, docstrings, and examples. Ensure documentation stays "
         "in sync with code changes."
     ),
+    SquadRole.DEVOPS: (
+        "You are the DevOps Engineer. Manage CI/CD, Docker, infrastructure, "
+        "and deployment configurations."
+    ),
+    SquadRole.FRONTEND: (
+        "You are the Frontend Developer. Build UI components, handle "
+        "client-side logic, and ensure good UX."
+    ),
+    SquadRole.BACKEND: (
+        "You are the Backend Developer. Build APIs, services, database "
+        "interactions, and server-side logic."
+    ),
 }
 
 _ROLE_EMOJIS: dict[SquadRole, str] = {
@@ -67,7 +81,90 @@ _ROLE_EMOJIS: dict[SquadRole, str] = {
     SquadRole.DEVELOPER: "🔧",
     SquadRole.TESTER: "🧪",
     SquadRole.DOCS: "📝",
+    SquadRole.DEVOPS: "⚙️",
+    SquadRole.FRONTEND: "⚛️",
+    SquadRole.BACKEND: "🔧",
 }
+
+_SOURCE_EXTENSIONS = frozenset({
+    ".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp",
+})
+
+_FRONTEND_DIRS = frozenset({
+    "frontend", "web", "ui", "app", "pages", "components",
+})
+
+_BACKEND_DIRS = frozenset({
+    "api", "server", "backend", "services",
+})
+
+
+def _has_source_files(root: Path) -> bool:
+    """Check for source code files (shallow scan, fast exit)."""
+    for ext in _SOURCE_EXTENSIONS:
+        try:
+            if next(root.rglob(f"*{ext}"), None) is not None:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _has_test_files(root: Path) -> bool:
+    """Check for test directories or test file patterns."""
+    for name in ("tests", "test"):
+        if (root / name).is_dir():
+            return True
+    test_patterns = ("*_test.*", "test_*.*", "*.spec.*")
+    for pat in test_patterns:
+        try:
+            if next(root.rglob(pat), None) is not None:
+                return True
+        except OSError:
+            pass
+    return False
+
+
+def _has_docs(root: Path) -> bool:
+    """Check for documentation signals."""
+    if (root / "docs").is_dir():
+        return True
+    if (root / "README.md").is_file():
+        return True
+    try:
+        md_files = list(root.glob("*.md"))
+        return len(md_files) >= 2
+    except OSError:
+        return False
+
+
+def _has_devops(root: Path) -> bool:
+    """Check for DevOps-related files."""
+    signals = [
+        root / "Dockerfile",
+        root / "Makefile",
+        root / "Jenkinsfile",
+        root / ".github" / "workflows",
+    ]
+    for p in signals:
+        if p.exists():
+            return True
+    try:
+        if next(root.glob("docker-compose*"), None) is not None:
+            return True
+    except OSError:
+        pass
+    return False
+
+
+def _has_frontend(root: Path) -> bool:
+    """Check for frontend directory signals under root."""
+    return any((root / d).is_dir() for d in _FRONTEND_DIRS)
+
+
+def _has_backend(root: Path) -> bool:
+    """Check for backend directory signals under root."""
+    return any((root / d).is_dir() for d in _BACKEND_DIRS)
 
 
 @dataclass
@@ -107,6 +204,44 @@ class SquadTeam:
                 SquadAgent.default_for_role(SquadRole.DOCS),
             ]
         )
+
+    @classmethod
+    def from_repo(cls, path: Path | None = None) -> SquadTeam:
+        """Create a team adapted to the repo structure at path.
+
+        Scans the directory for signals (source files, tests, docs, Docker,
+        frontend/backend dirs) and builds a team with matching roles.
+        Always includes LEAD. Falls back to Lead + Developer minimum.
+        """
+        root = path or Path.cwd()
+        roles: list[SquadRole] = [SquadRole.LEAD]
+
+        has_source = _has_source_files(root)
+        has_tests = _has_test_files(root)
+        has_docs = _has_docs(root)
+        has_devops = _has_devops(root)
+        has_src = (root / "src").is_dir()
+        has_frontend = has_src and _has_frontend(root)
+        has_backend = has_src and _has_backend(root)
+
+        if has_source:
+            roles.append(SquadRole.DEVELOPER)
+        if has_tests:
+            roles.append(SquadRole.TESTER)
+        if has_docs:
+            roles.append(SquadRole.DOCS)
+        if has_devops:
+            roles.append(SquadRole.DEVOPS)
+        if has_frontend:
+            roles.append(SquadRole.FRONTEND)
+        if has_backend:
+            roles.append(SquadRole.BACKEND)
+
+        # Minimum viable team: Lead + Developer
+        if SquadRole.DEVELOPER not in roles:
+            roles.append(SquadRole.DEVELOPER)
+
+        return cls(agents=[SquadAgent.default_for_role(r) for r in roles])
 
     def get_agent(self, role: SquadRole) -> SquadAgent | None:
         """Get agent by role."""
@@ -207,7 +342,7 @@ class SquadCoordinator:
         fleet_config: FleetConfig | None = None,
     ) -> None:
         self._config = config
-        self._team = team or SquadTeam.default()
+        self._team = team or SquadTeam.from_repo()
         self._fleet_config = fleet_config or FleetConfig(
             max_concurrent=3,
             timeout=600.0,
@@ -278,14 +413,27 @@ class SquadCoordinator:
         if role == SquadRole.LEAD:
             return []
         if role == SquadRole.DOCS:
-            # Docs depends on both Developer and Tester (runs last)
+            # Docs runs last — depends on all other non-lead roles
             deps = []
-            for dep_role in (SquadRole.DEVELOPER, SquadRole.TESTER):
+            for r, tid in task_ids.items():
+                if r != SquadRole.LEAD and r != SquadRole.DOCS:
+                    deps.append(tid)
+            return deps
+        if role == SquadRole.TESTER:
+            # Tester depends on implementation agents
+            deps = []
+            for dep_role in (
+                SquadRole.DEVELOPER, SquadRole.FRONTEND, SquadRole.BACKEND,
+            ):
                 dep_id = task_ids.get(dep_role)
                 if dep_id:
                     deps.append(dep_id)
+            if not deps:
+                lead_id = task_ids.get(SquadRole.LEAD)
+                if lead_id:
+                    deps.append(lead_id)
             return deps
-        # Developer and Tester both depend on Lead (run in parallel after Lead)
+        # DEVELOPER, FRONTEND, BACKEND, DEVOPS all depend on Lead
         lead_id = task_ids.get(SquadRole.LEAD)
         return [lead_id] if lead_id else []
 

@@ -150,16 +150,32 @@ jobs:
                 });
                 core.info(`Updated label: ${label.name}`);
               } catch (err) {
-                if (err.status === 404) {
-                  // Label doesn't exist — create it
-                  await github.rest.issues.createLabel({
-                    owner: context.repo.owner,
-                    repo: context.repo.repo,
-                    name: label.name,
-                    color: label.color,
-                    description: label.description
-                  });
-                  core.info(`Created label: ${label.name}`);
+                if (err.status === 404 || err.status === 422) {
+                  // Label doesn't exist (404) or already exists from race/retry (422) — create or update
+                  try {
+                    await github.rest.issues.createLabel({
+                      owner: context.repo.owner,
+                      repo: context.repo.repo,
+                      name: label.name,
+                      color: label.color,
+                      description: label.description
+                    });
+                    core.info(`Created label: ${label.name}`);
+                  } catch (createErr) {
+                    if (createErr.status === 422) {
+                      // Label already exists — update instead
+                      await github.rest.issues.updateLabel({
+                        owner: context.repo.owner,
+                        repo: context.repo.repo,
+                        name: label.name,
+                        color: label.color,
+                        description: label.description
+                      });
+                      core.info(`Updated existing label: ${label.name}`);
+                    } else {
+                      throw createErr;
+                    }
+                  }
                 } else {
                   throw err;
                 }
