@@ -10,12 +10,15 @@ Enables:
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 import uuid
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -283,11 +286,17 @@ class FleetStore:
 
     def _row_to_task(self, row: sqlite3.Row) -> TaskRecord:
         """Convert a database row to a TaskRecord."""
+        depends_on_json = row["depends_on_json"]
+        try:
+            depends_on = json.loads(depends_on_json) if depends_on_json else []
+        except json.JSONDecodeError:
+            logger.warning("Corrupted depends_on JSON for task %s", row["task_id"])
+            depends_on = []
         return TaskRecord(
             task_id=row["task_id"],
             run_id=row["run_id"],
             prompt=row["prompt"],
-            depends_on=json.loads(row["depends_on_json"]),
+            depends_on=depends_on,
             status=row["status"],
             created_at=row["created_at"],
             started_at=row["started_at"],

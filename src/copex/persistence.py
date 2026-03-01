@@ -10,6 +10,7 @@ Allows saving sessions to disk and resuming later, useful for:
 from __future__ import annotations
 
 import json
+import logging
 import re
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
@@ -17,6 +18,8 @@ from pathlib import Path
 from typing import Any
 
 from copex.models import Model, ReasoningEffort
+
+logger = logging.getLogger(__name__)
 
 # Windows reserved device names (case-insensitive)
 _WINDOWS_RESERVED_RE = re.compile(r"^(CON|PRN|AUX|NUL|COM[0-9]|LPT[0-9])(\..+)?$", re.IGNORECASE)
@@ -206,6 +209,7 @@ class SessionStore:
                     }
                 )
             except (json.JSONDecodeError, KeyError):
+                logger.warning("Skipping corrupted session file: %s", f.name)
                 continue
 
         # Sort by updated_at descending

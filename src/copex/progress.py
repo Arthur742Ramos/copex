@@ -187,6 +187,8 @@ class ProgressReporter:
         item = self._get_item(id)
         if item:
             prev_status = item.status
+            if prev_status in (ProgressStatus.COMPLETED, ProgressStatus.FAILED):
+                return
             item.status = ProgressStatus.COMPLETED
             item.completed_at = time.time()
             if message:
@@ -202,6 +204,8 @@ class ProgressReporter:
         item = self._get_item(id)
         if item:
             prev_status = item.status
+            if prev_status in (ProgressStatus.COMPLETED, ProgressStatus.FAILED):
+                return
             item.status = ProgressStatus.FAILED
             item.completed_at = time.time()
             item.error = error

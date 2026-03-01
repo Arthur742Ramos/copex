@@ -260,7 +260,7 @@ class WorktreeManager:
         if result.returncode != 0:
             stderr = result.stderr.strip()
             # Attempt to abort the cherry-pick on conflict
-            if "conflict" in stderr.lower() or "CONFLICT" in stderr:
+            if "conflict" in stderr.lower():
                 logger.warning("Cherry-pick conflict for %s, aborting", self._commit_hash)
                 subprocess.run(
                     ["git", "cherry-pick", "--abort"],

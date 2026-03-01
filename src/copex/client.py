@@ -597,6 +597,35 @@ class Copex:
             logger.debug("Failed to extract session context", exc_info=True)
             return None
 
+    async def _try_auto_recovery(
+        self,
+        error: Exception,
+        auto_continues: int,
+        retries: int,
+        collector: MetricsCollector,
+        request: Any,
+        on_chunk: Callable[[StreamChunk], None] | None,
+        message: str,
+    ) -> tuple[int, int, Any, str] | None:
+        """Attempt auto-recovery for session errors.
+
+        Returns (auto_continues, retries, session, prompt) on success, None if limit exceeded.
+        """
+        auto_continues += 1
+        if auto_continues > self.config.retry.max_auto_continues:
+            collector.complete_request(
+                request.request_id,
+                success=False,
+                error=str(error),
+                retries=retries,
+            )
+            self._cb_record_failure()
+            return None
+        session, prompt = await self._recover_session(on_chunk)
+        if on_chunk:
+            on_chunk(StreamChunk(type="system", delta=message))
+        return auto_continues, 0, session, prompt
+
     async def _recover_session(
         self, on_chunk: Callable[[StreamChunk], None] | None
     ) -> tuple[Any, str]:
@@ -771,49 +800,25 @@ class Copex:
                 error_str = str(e)
 
                 if self._is_thinking_signature_error(e) and self.config.auto_continue:
-                    auto_continues += 1
-                    if auto_continues > self.config.retry.max_auto_continues:
-                        collector.complete_request(
-                            request.request_id,
-                            success=False,
-                            error=str(last_error),
-                            retries=retries,
-                        )
-                        self._cb_record_failure()
+                    recovered = await self._try_auto_recovery(
+                        e, auto_continues, retries, collector, request, on_chunk,
+                        "\n[Invalid thinking block signature; recovered session]\n",
+                    )
+                    if recovered is None:
                         raise last_error from e
-                    retries = 0
-                    session, prompt = await self._recover_session(on_chunk)
-                    if on_chunk:
-                        on_chunk(
-                            StreamChunk(
-                                type="system",
-                                delta="\n[Invalid thinking block signature; recovered session]\n",
-                            )
-                        )
+                    auto_continues, retries, session, prompt = recovered
                     delay = self._calculate_delay(0, error=e)
                     await asyncio.sleep(delay)
                     continue
 
                 if self._is_tool_state_error(e) and self.config.auto_continue:
-                    auto_continues += 1
-                    if auto_continues > self.config.retry.max_auto_continues:
-                        collector.complete_request(
-                            request.request_id,
-                            success=False,
-                            error=str(last_error),
-                            retries=retries,
-                        )
-                        self._cb_record_failure()
+                    recovered = await self._try_auto_recovery(
+                        e, auto_continues, retries, collector, request, on_chunk,
+                        "\n[Tool state mismatch detected; recovered session]\n",
+                    )
+                    if recovered is None:
                         raise last_error from e
-                    retries = 0
-                    session, prompt = await self._recover_session(on_chunk)
-                    if on_chunk:
-                        on_chunk(
-                            StreamChunk(
-                                type="system",
-                                delta="\n[Tool state mismatch detected; recovered session]\n",
-                            )
-                        )
+                    auto_continues, retries, session, prompt = recovered
                     delay = self._calculate_delay(0, error=e)
                     await asyncio.sleep(delay)
                     continue
