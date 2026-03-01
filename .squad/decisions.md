@@ -56,3 +56,76 @@
 - Intermediate turns with tool calls have `stop_reason=None`; final turns use `end_turn`, `max_turns`, or `error`
 - 57 tests total across 11 test classes, all passing
 - FakeClient pattern is canonical for testing agent loop
+
+---
+
+### Code Review: Agent + Squad + CLI Modules (2026-03-01)
+**Reviewer:** Burns (Lead/Architect)
+
+**Scope:** agent.py, squad.py, cli.py commands, __init__.py exports
+
+**Verdicts:**
+- `agent.py` — APPROVED (unchanged since prior review)
+- `squad.py` — APPROVED WITH NOTES
+- `cli.py` (agent/squad commands) — APPROVED WITH NOTES
+- `__init__.py` — APPROVED
+
+**Architecture Notes:**
+- Squad correctly delegates to Fleet for parallel execution (no reimplementation)
+- Dependency DAG (Lead → Developer∥Tester → Docs) uses Fleet template interpolation correctly
+- Default squad mode in CLI is good UX; `--no-squad` opt-out is clean
+
+**Items for Follow-up (non-blocking):**
+1. Tests needed for SquadCoordinator: default team creation, dependency ordering, prompt building with templates, result aggregation, error propagation
+2. Minor type issue: `on_status` callback typed as `Any` → should be `Callable[[str, str], None] | None`
+3. Encapsulation: `_ROLE_EMOJIS` is private but imported by cli.py → either make public (`ROLE_EMOJIS`) or use `SquadAgent.emoji`
+
+**Decision:** APPROVED WITH NOTES — code is clean, well-integrated, follows established Copex patterns. Ship-ready.
+
+---
+
+### Test Coverage Audit: Agent + Squad (2026-03-01)
+**By:** Hibbert (Tester)
+
+**Results:**
+- Full test suite: 547 tests, all passing (~4 min runtime)
+- `agent.py`: 93% → **100%** coverage (6 new tests for `_extract_tool_calls` raw_events fallback)
+- `squad.py`: 84% → **95%** coverage (10 new tests: pyproject.toml, run() integration, CLI)
+
+**Bug Fixed:**
+- `squad.py` line 332: imported `tomli` directly instead of `try: tomllib / except: tomli` pattern
+- This caused pyproject.toml context discovery to fail silently on Python 3.11+ without tomli installed
+- Fixed to match pattern in config.py
+
+**Remaining Gaps (Acceptable):**
+- 8 uncovered lines in squad.py (334-335, 346-347, 355-356, 367-368) — all `except Exception: pass` in `_discover_project_context`
+- These are defensive I/O error handlers; testing would require filesystem monkeypatching (low value)
+
+**Verdict:** Excellent — both modules at 95%+ coverage. All critical paths tested.
+
+---
+
+### Documentation Audit: Agent + Squad Features (2026-03-01)
+**By:** Brockman (Docs/DevRel)
+
+**Work Completed:**
+- README.md: added Agent/Squad sections, updated Features list & CLI Commands table (+150 lines)
+- CHANGELOG.md: added v2.7.0 release entry covering AgentSession, SquadCoordinator, default mode (+30 lines)
+- IMPROVEMENTS.md: added feature summary and metrics (was empty, +25 lines)
+- examples/agent_loop.py: basic agent loop, JSON Lines output, streaming (+60 lines)
+- examples/squad_orchestration.py: squad task, context auto-discovery, JSON output, custom team (+70 lines)
+
+**Quality Metrics:**
+- ✅ All examples copy-pasteable and follow project style
+- ✅ Code examples verified against agent.py and squad.py
+- ✅ CLI commands documented with flags
+- ✅ Python API documented with usage patterns
+- ✅ Clear distinction between single-agent and multi-agent modes
+- ✅ Default behavior explained (`copex chat` runs squad by default)
+
+**No Changes Required:**
+- agent.py, squad.py — comprehensive docstrings already present
+- docs/ — UI design docs in place; architecture docs not needed yet
+- Tests — documentation-only update
+
+**Decision:** Documentation complete and in sync with v2.7.0 implementation.

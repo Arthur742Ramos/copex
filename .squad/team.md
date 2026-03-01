@@ -15,6 +15,7 @@
 | Burns | Lead | `.squad/agents/burns/charter.md` | ✅ Active |
 | Frink | Core Dev | `.squad/agents/frink/charter.md` | ✅ Active |
 | Hibbert | Tester | `.squad/agents/hibbert/charter.md` | ✅ Active |
+| Brockman | Docs / DevRel | `.squad/agents/brockman/charter.md` | ✅ Active |
 | Scribe | Session Logger | `.squad/agents/scribe/charter.md` | 📋 Silent |
 | Ralph | Work Monitor | — | 🔄 Monitor |
 

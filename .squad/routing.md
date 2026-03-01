@@ -13,6 +13,7 @@ How to decide who handles what.
 | MCP integration, tools | Frink | mcp.py, tools.py |
 | Code review | Burns | Review PRs, check quality, suggest improvements |
 | Testing | Hibbert | Write tests, find edge cases, verify fixes |
+| Documentation, README, docstrings | Brockman | docs/, README.md, CHANGELOG.md, examples/, API docs |
 | Scope & priorities | Burns | What to build next, trade-offs, decisions |
 | Async issue work (bugs, tests, small features) | @copilot 🤖 | Well-defined tasks matching capability profile |
 | Session logging | Scribe | Automatic — never needs routing |
@@ -25,6 +26,7 @@ How to decide who handles what.
 | `squad:burns` | Architecture review, design decisions | Burns |
 | `squad:frink` | Implementation, SDK work, CLI, async code | Frink |
 | `squad:hibbert` | Test writing, quality review, edge cases | Hibbert |
+| `squad:brockman` | Documentation updates, README, docstrings, examples | Brockman |
 | `squad:copilot` | Assign to @copilot for autonomous work (if enabled) | @copilot 🤖 |
 
 ### How Issue Assignment Works

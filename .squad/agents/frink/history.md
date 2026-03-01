@@ -27,3 +27,12 @@
 - **CLI command:** `copex squad` accepts squad config JSON, outputs SquadResult JSON with outcomes and durations
 - **Public API exports:** Added to __init__.py (SquadCoordinator, SquadTeam, SquadAgent, SquadResult, SquadAgentResult, SquadRole)
 - **Status:** Fully implemented, 50 tests passing, production-ready
+
+### Repo-Aware Squad (2026-03-01)
+- **Feature:** `_discover_project_context()` on `SquadCoordinator` auto-reads README.md (first 2000 chars), pyproject.toml name/description, and top-level directory structure
+- **Injection:** Project context injected into all agent prompts via `_build_agent_prompt()`, between role prompt and task
+- **Caching:** Lazy discovery — only runs once per `run()` call, cached in `_project_context`
+- **New role:** `SquadRole.DOCS` = "docs" with 📝 emoji — Documentation Expert for README, docstrings, examples
+- **Default team:** Now 4 agents: Lead → Developer + Tester (parallel) → Docs (runs last, depends on both dev + tester)
+- **Graceful fallback:** Empty string returned if no README/pyproject found
+- **Tests:** 8 new tests (58 total), all passing
