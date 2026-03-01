@@ -13,3 +13,4 @@
 - **Session logs:** `.squad/log/{timestamp}-{topic}.md` brief facts-only record of who worked, what was done, decisions, outcomes.
 - **Decision merging:** Read inbox files, append to decisions.md, delete inbox files, deduplicate exact headers.
 - **Cross-agent propagation:** Update affected agents' history.md with team update notices in format: `📌 Team update ({timestamp}): {summary} — {Name}`
+- **Squad as Default (2026-03-01):** Frink made squad orchestration the DEFAULT mode for `copex -p "prompt"`. Added `--no-squad` flag for fallback to single-agent mode. SquadCoordinator now runs Lead first, then Dev+Tester in parallel. Maintains backward compatibility with explicit subcommands.
