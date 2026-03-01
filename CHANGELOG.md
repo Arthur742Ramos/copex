@@ -1,5 +1,16 @@
 # Changelog
 
+## v2.10.0 (2026-03-01)
+
+### Features
+- **AI-powered repo analysis**: `SquadTeam.from_repo_ai()` uses CopilotCLI with `claude-opus-4.6-fast` to intelligently analyze repository structure and determine optimal team composition
+- **Model passthrough**: Squad sub-agents now use the same model the user specified (e.g., `copex -m claude-opus-4.6-fast` propagates to all agents)
+- **`--no-ai` flag**: Skip AI analysis and use fast pattern-matching fallback for squad team creation
+
+### Bug Fixes
+- Fixed ANSI escape code issues in CLI help output tests (Rich/Typer color codes broke `--json`/`--model`/`--reasoning` assertions)
+- Strip ANSI codes before asserting in test_agent.py and test_squad.py
+
 ## v2.9.0 (2026-02-28)
 
 ### Features
