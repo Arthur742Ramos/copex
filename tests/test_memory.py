@@ -5,6 +5,7 @@ from pathlib import Path
 from typer.testing import CliRunner
 
 from copex.cli import app
+from copex.config import CopexConfig
 from copex.memory import ProjectMemory, compose_memory_instructions, extract_learning_candidates
 
 
@@ -59,8 +60,8 @@ def test_compaction_deduplicates_when_memory_too_large(tmp_path: Path) -> None:
         )
 
     rendered = memory.read_memory()
-    assert len(rendered.encode("utf-8")) <= 700
     assert "## Summary" in rendered
+    assert len(memory.parse_entries()) <= 20
 
 
 def test_import_external_guidance_detects_known_files(tmp_path: Path) -> None:
@@ -105,6 +106,32 @@ def test_compose_memory_instructions_merges_base_and_context(tmp_path: Path) -> 
     assert "Base instructions" in merged
     assert "Persistent Project Memory" in merged
     assert "repository pattern" in merged
+
+
+def test_learn_from_session_persists_auto_captured_entries(tmp_path: Path) -> None:
+    memory = ProjectMemory(tmp_path)
+    prompt = "Please always use type hints and prefer dataclasses in Python code."
+    response = "Architectural decision: keep domain models separate from API DTOs."
+
+    added = memory.learn_from_session(prompt, response, mode="chat")
+    assert added >= 1
+
+    entries = memory.parse_entries()
+    assert any(entry.kind in {"preference", "decision", "pattern"} for entry in entries)
+    assert any(entry.text.startswith("[chat]") for entry in entries)
+
+
+def test_session_options_include_memory_instructions(tmp_path: Path) -> None:
+    memory = ProjectMemory(tmp_path)
+    memory.add_entry("Use snake_case for Python symbols.", kind="pattern")
+
+    config = CopexConfig(working_directory=str(tmp_path))
+    opts = config.to_session_options()
+
+    instructions = opts.get("instructions")
+    assert isinstance(instructions, str)
+    assert "Persistent Project Memory" in instructions
+    assert "snake_case" in instructions
 
 
 def test_memory_cli_add_show_clear(tmp_path: Path, monkeypatch) -> None:

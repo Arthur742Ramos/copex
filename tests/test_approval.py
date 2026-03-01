@@ -10,6 +10,8 @@ from copex.approval import (
     ApprovalAction,
     ApprovalMode,
     ApprovalWorkflow,
+    ProposedFileChange,
+    build_preview,
     normalize_approval_mode,
 )
 from copex.config import CopexConfig
@@ -151,3 +153,93 @@ def test_dry_run_mode_rejects_and_sets_dry_run_flag(tmp_path: Path):
 def test_policy_mode_requires_policy_function():
     with pytest.raises(ValueError, match="policy_func"):
         ApprovalWorkflow(mode="policy-based")
+
+
+@pytest.fixture
+def edit_change_fixture(tmp_path: Path) -> ProposedFileChange:
+    file_path = tmp_path / "sample.txt"
+    return ProposedFileChange(
+        path=file_path,
+        display_path="sample.txt",
+        existed_before=True,
+        before_content="old\n",
+        after_content="new\n",
+    )
+
+
+def test_build_preview_snapshot_for_edit_change(edit_change_fixture: ProposedFileChange):
+    preview = build_preview(edit_change_fixture)
+    expected_diff = "\n".join(
+        [
+            "--- a/sample.txt",
+            "+++ b/sample.txt",
+            "@@ -1 +1 @@",
+            "-old",
+            "+new",
+        ]
+    )
+    assert preview.operation == "edit"
+    assert preview.summary == "edit (+1/-1)"
+    assert preview.unified_diff == expected_diff
+    assert preview.metadata == {
+        "path": "sample.txt",
+        "operation": "edit",
+        "existed_before": True,
+        "exists_after": True,
+        "before_lines": 1,
+        "after_lines": 1,
+        "before_bytes": 4,
+        "after_bytes": 4,
+    }
+    assert preview.diff_truncated is False
+
+
+def test_build_preview_operation_and_metadata_for_add_and_delete(tmp_path: Path):
+    add_preview = build_preview(
+        ProposedFileChange(
+            path=tmp_path / "new.txt",
+            display_path="new.txt",
+            existed_before=False,
+            before_content="",
+            after_content="alpha\nbeta\n",
+        )
+    )
+    delete_preview = build_preview(
+        ProposedFileChange(
+            path=tmp_path / "old.txt",
+            display_path="old.txt",
+            existed_before=True,
+            before_content="alpha\nbeta\n",
+            after_content="",
+        )
+    )
+
+    assert add_preview.operation == "add"
+    assert add_preview.summary == "add (+2/-0)"
+    assert add_preview.metadata["exists_after"] is True
+    assert delete_preview.operation == "delete"
+    assert delete_preview.summary == "delete (+0/-2)"
+    assert delete_preview.metadata["exists_after"] is False
+
+
+def test_build_preview_truncates_large_diff_safely(tmp_path: Path):
+    before = "\n".join(f"old-{i}" for i in range(80)) + "\n"
+    after = "\n".join(f"new-{i}" for i in range(80)) + "\n"
+    preview = build_preview(
+        ProposedFileChange(
+            path=tmp_path / "large.txt",
+            display_path="large.txt",
+            existed_before=True,
+            before_content=before,
+            after_content=after,
+        ),
+        max_diff_lines=12,
+        max_diff_chars=2_000,
+    )
+
+    assert preview.diff_truncated is True
+    assert "diff truncated" in preview.unified_diff
+    assert preview.unified_diff.endswith(
+        f"... [diff truncated: 12/{preview.diff_lines_total} lines shown]"
+    )
+    assert preview.diff_lines_total > len(preview.unified_diff.splitlines())

@@ -4,6 +4,15 @@ __version__ = "2.15.0"
 
 # Re-export core components for convenience
 from .agent import AgentResult, AgentSession, AgentTurn
+from .approval import (
+    ApprovalAction,
+    ApprovalMode,
+    ApprovalWorkflow,
+    AuditEntry,
+    AuditLogger,
+    ChangePreview,
+    ChangeStatistics,
+)
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
 from .cache import StepCache, clear_global_cache, get_cache
 from .checkpoint import CheckpointedRalph, CheckpointStore
@@ -92,6 +101,14 @@ __all__ = [
     "AgentSession",
     "AgentTurn",
     "AgentResult",
+    # Approval
+    "ApprovalAction",
+    "ApprovalMode",
+    "ApprovalWorkflow",
+    "AuditEntry",
+    "AuditLogger",
+    "ChangePreview",
+    "ChangeStatistics",
     # Core
     "Copex",
     "CopilotCLI",

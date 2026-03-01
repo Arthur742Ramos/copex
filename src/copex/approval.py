@@ -65,10 +65,14 @@ class ChangePreview:
     """Computed preview for a single file change."""
 
     file_path: str
+    operation: str
+    metadata: dict[str, Any]
     summary: str
     unified_diff: str
     lines_added: int
     lines_removed: int
+    diff_truncated: bool = False
+    diff_lines_total: int = 0
     risk_flags: list[str] = field(default_factory=list)
 
 
@@ -187,6 +191,10 @@ SECURITY_PATH_MARKERS = (
     "ssh",
     "key",
 )
+PATCH_OP_MAP = {"add": "add", "update": "edit", "delete": "delete"}
+PATCH_OPERATION_RE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+)$", re.MULTILINE)
+DEFAULT_MAX_DIFF_LINES = 400
+DEFAULT_MAX_DIFF_CHARS = 20_000
 
 
 def default_audit_log_path(cwd: Path | None = None) -> Path:
@@ -281,8 +289,8 @@ def _count_diff_lines(diff_text: str) -> tuple[int, int]:
 def _build_unified_diff(path: str, before: str, after: str) -> str:
     import difflib
 
-    before_lines = before.splitlines(keepends=True)
-    after_lines = after.splitlines(keepends=True)
+    before_lines = before.splitlines()
+    after_lines = after.splitlines()
     diff = difflib.unified_diff(
         before_lines,
         after_lines,
@@ -307,18 +315,91 @@ def _assess_risk(path: str, lines_removed: int) -> list[str]:
 
 def _build_summary(
     *,
-    existed_before: bool,
-    after_content: str | None,
+    operation: str,
     lines_added: int,
     lines_removed: int,
 ) -> str:
-    if not existed_before and after_content is not None:
-        action = "create"
-    elif existed_before and after_content == "":
-        action = "delete"
+    return f"{operation} (+{lines_added}/-{lines_removed})"
+
+
+def _patch_operation_for_path(proposed_diff: str, path: str) -> str | None:
+    expected = path.replace("\\", "/").strip()
+    for match in PATCH_OPERATION_RE.finditer(proposed_diff):
+        op = match.group(1).strip().lower()
+        raw_path = match.group(2).strip().replace("\\", "/")
+        if raw_path == expected:
+            return PATCH_OP_MAP.get(op)
+    return None
+
+
+def _infer_operation(change: ProposedFileChange) -> str:
+    if change.proposed_diff:
+        patch_operation = _patch_operation_for_path(change.proposed_diff, change.display_path)
+        if patch_operation:
+            return patch_operation
+    if not change.existed_before and change.after_content is not None:
+        return "add"
+    if change.existed_before and change.after_content == "":
+        return "delete"
+    return "edit"
+
+
+def _build_file_metadata(
+    change: ProposedFileChange, *, operation: str, after_content: str | None
+) -> dict[str, Any]:
+    if operation == "delete":
+        exists_after: bool | None = False
+    elif operation == "add":
+        exists_after = True
+    elif after_content is None and change.proposed_diff is not None:
+        exists_after = None
     else:
-        action = "modify"
-    return f"{action} (+{lines_added}/-{lines_removed})"
+        exists_after = True
+
+    before_bytes = len(change.before_content.encode("utf-8"))
+    after_bytes = len(after_content.encode("utf-8")) if after_content is not None else None
+    return {
+        "path": change.display_path,
+        "operation": operation,
+        "existed_before": change.existed_before,
+        "exists_after": exists_after,
+        "before_lines": len(change.before_content.splitlines()),
+        "after_lines": len(after_content.splitlines()) if after_content is not None else None,
+        "before_bytes": before_bytes,
+        "after_bytes": after_bytes,
+    }
+
+
+def _truncate_diff(
+    unified_diff: str,
+    *,
+    max_lines: int = DEFAULT_MAX_DIFF_LINES,
+    max_chars: int = DEFAULT_MAX_DIFF_CHARS,
+) -> tuple[str, bool, int]:
+    lines = unified_diff.splitlines()
+    total_lines = len(lines)
+    truncated = False
+    shown_lines = lines
+
+    if max_lines > 0 and len(shown_lines) > max_lines:
+        shown_lines = shown_lines[:max_lines]
+        truncated = True
+
+    rendered = "\n".join(shown_lines)
+    if max_chars > 0 and len(rendered) > max_chars:
+        clipped = rendered[:max_chars]
+        if "\n" in clipped:
+            clipped = clipped.rsplit("\n", 1)[0]
+        rendered = clipped
+        shown_lines = rendered.splitlines()
+        truncated = True
+
+    shown_count = len(shown_lines)
+    if truncated:
+        notice = f"... [diff truncated: {shown_count}/{total_lines} lines shown]"
+        rendered = f"{rendered}\n{notice}" if rendered else notice
+
+    return rendered, truncated, total_lines
 
 
 def _infer_after_content(
@@ -438,28 +519,53 @@ def extract_proposed_changes(
     return list(deduped.values())
 
 
-def build_preview(change: ProposedFileChange) -> ChangePreview:
+def build_preview(
+    change: ProposedFileChange,
+    *,
+    max_diff_lines: int = DEFAULT_MAX_DIFF_LINES,
+    max_diff_chars: int = DEFAULT_MAX_DIFF_CHARS,
+) -> ChangePreview:
     """Build a diff preview for a proposed change."""
+    operation = _infer_operation(change)
+
     if change.proposed_diff is not None:
-        unified_diff = change.proposed_diff
-        lines_added, lines_removed = _count_diff_lines(unified_diff)
+        unified_diff_raw = change.proposed_diff
+        lines_added, lines_removed = _count_diff_lines(unified_diff_raw)
+        after_for_metadata = change.after_content
+        if after_for_metadata is None and operation == "delete":
+            after_for_metadata = ""
     else:
         after = change.after_content if change.after_content is not None else change.before_content
-        unified_diff = _build_unified_diff(change.display_path, change.before_content, after)
-        lines_added, lines_removed = _count_diff_lines(unified_diff)
+        unified_diff_raw = _build_unified_diff(change.display_path, change.before_content, after)
+        lines_added, lines_removed = _count_diff_lines(unified_diff_raw)
+        after_for_metadata = after
+
+    unified_diff, diff_truncated, diff_lines_total = _truncate_diff(
+        unified_diff_raw,
+        max_lines=max_diff_lines,
+        max_chars=max_diff_chars,
+    )
     summary = _build_summary(
-        existed_before=change.existed_before,
-        after_content=change.after_content,
+        operation=operation,
         lines_added=lines_added,
         lines_removed=lines_removed,
+    )
+    metadata = _build_file_metadata(
+        change,
+        operation=operation,
+        after_content=after_for_metadata,
     )
     risk_flags = _assess_risk(change.display_path, lines_removed)
     return ChangePreview(
         file_path=change.display_path,
+        operation=operation,
+        metadata=metadata,
         summary=summary,
         unified_diff=unified_diff,
         lines_added=lines_added,
         lines_removed=lines_removed,
+        diff_truncated=diff_truncated,
+        diff_lines_total=diff_lines_total,
         risk_flags=risk_flags,
     )
 
@@ -556,13 +662,26 @@ class ApprovalWorkflow:
         return text
 
     def _render_preview(self, preview: ChangePreview, stats: ChangeStatistics) -> None:
+        metadata = preview.metadata
         header = Text()
         header.append(f"File: {preview.file_path}\n", style="bold")
+        header.append(f"Operation: {preview.operation}\n")
+        header.append(
+            "Metadata: "
+            f"lines={metadata.get('before_lines', '?')}→{metadata.get('after_lines', '?')} "
+            f"bytes={metadata.get('before_bytes', '?')}→{metadata.get('after_bytes', '?')}\n",
+            style="dim",
+        )
         header.append(f"Summary: {preview.summary}\n")
         header.append(
             f"Stats: files={stats.files_changed} +{stats.lines_added} -{stats.lines_removed}\n",
             style="dim",
         )
+        if preview.diff_truncated:
+            header.append(
+                f"Preview: truncated ({preview.diff_lines_total} total diff lines)\n",
+                style="yellow",
+            )
         if preview.risk_flags:
             header.append(f"Risk: {', '.join(preview.risk_flags)}\n", style="yellow")
         else:
@@ -582,7 +701,10 @@ class ApprovalWorkflow:
             f"Approve change for {preview.file_path}? "
             "[y]es/[n]o/[e]dit/[a]pprove-all/[r]eject-all: "
         )
-        answer = self._input(prompt).strip().lower()
+        try:
+            answer = self._input(prompt).strip().lower()
+        except EOFError:
+            return ApprovalAction.REJECT
         if answer in {"a", "all", "approve-all"}:
             self.state.approve_all = True
             return ApprovalAction.APPROVE
@@ -675,8 +797,7 @@ class ApprovalWorkflow:
 
         reviewed: list[ReviewedChange] = []
         for proposal, preview in zip(proposals, previews, strict=False):
-            if self.mode != ApprovalMode.AUTO_APPROVE:
-                self._render_preview(preview, stats)
+            self._render_preview(preview, stats)
             action = self._decide_action(preview)
             dry_run = self.mode == ApprovalMode.DRY_RUN
             apply_change = action in {ApprovalAction.APPROVE, ApprovalAction.EDIT} and not dry_run

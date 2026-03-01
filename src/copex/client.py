@@ -902,6 +902,90 @@ class Copex:
         loop = asyncio.get_running_loop()
         state.last_activity = loop.time()
         state.streaming_metrics._start_time = time.monotonic()
+        approval_workflow = None
+        pending_approvals: dict[str, list[Any]] = {}
+        pending_counter = 0
+        if bool(self.config.audit) or self.config.approval_mode != "auto-approve":
+            from copex.approval import ApprovalWorkflow
+
+            approval_workflow = ApprovalWorkflow(
+                mode=self.config.approval_mode,
+                model=self._current_model or self.config.model.value,
+                audit_enabled=bool(self.config.audit),
+            )
+        approval_cwd = Path(self.config.working_directory or Path.cwd())
+
+        def _approval_key(tool_id: str | None, tool_name: str) -> str:
+            nonlocal pending_counter
+            if tool_id:
+                return tool_id
+            pending_counter += 1
+            return f"{tool_name}:{pending_counter}"
+
+        def _pop_pending_approval(tool_id: str | None, tool_name: str) -> list[Any] | None:
+            if tool_id:
+                key = str(tool_id)
+                if key in pending_approvals:
+                    return pending_approvals.pop(key)
+
+            fallback_prefix = f"{tool_name}:"
+            for key in list(pending_approvals.keys()):
+                if key.startswith(fallback_prefix):
+                    return pending_approvals.pop(key)
+            return None
+
+        def _handle_tool_call_with_approval(
+            event: Any,
+            st: _SendState,
+            oc: Callable[[StreamChunk], None] | None,
+        ) -> None:
+            self._handle_tool_call(event, st, oc)
+            if approval_workflow is None:
+                return
+
+            data = event.data
+            tool_name = getattr(data, "name", None) or getattr(data, "tool", None) or "unknown"
+            tool_args = getattr(data, "arguments", None) or getattr(data, "args", {})
+            tool_id = self._extract_tool_id(data)
+
+            if isinstance(tool_args, str):
+                import json
+
+                try:
+                    tool_args = json.loads(tool_args)
+                except (json.JSONDecodeError, ValueError):
+                    tool_args = {"raw": tool_args}
+
+            if not isinstance(tool_args, dict):
+                return
+
+            reviewed = approval_workflow.review_tool_call(
+                str(tool_name),
+                tool_args,
+                cwd=approval_cwd,
+            )
+            if reviewed:
+                pending_approvals[_approval_key(str(tool_id) if tool_id else None, str(tool_name))] = (
+                    reviewed
+                )
+
+        def _handle_tool_execution_complete_with_approval(
+            event: Any,
+            st: _SendState,
+            oc: Callable[[StreamChunk], None] | None,
+        ) -> None:
+            self._handle_tool_execution_complete(event, st, oc)
+            if approval_workflow is None:
+                return
+
+            tool_name = getattr(event.data, "tool_name", None) or getattr(event.data, "name", None)
+            tool_id = self._extract_tool_id(event.data)
+            reviewed = _pop_pending_approval(
+                str(tool_id) if tool_id else None,
+                str(tool_name) if tool_name else "unknown",
+            )
+            if reviewed:
+                approval_workflow.apply_post_tool_decisions(reviewed)
 
         def _handle_usage(event: Any, st: _SendState, _oc: Any) -> None:
             data = event.data
@@ -944,10 +1028,10 @@ class Copex:
             _ET_REASON: self._handle_reasoning,
             _ET_TOOL_START: self._handle_tool_execution_start,
             _ET_TOOL_PARTIAL: self._handle_tool_execution_partial_result,
-            _ET_TOOL_COMPLETE: self._handle_tool_execution_complete,
+            _ET_TOOL_COMPLETE: _handle_tool_execution_complete_with_approval,
             _ET_ERROR: _handle_error,
             _ET_SESSION_ERROR: _handle_error,
-            _ET_TOOL_CALL: self._handle_tool_call,
+            _ET_TOOL_CALL: _handle_tool_call_with_approval,
             _ET_USAGE: _handle_usage,
             _ET_TURN_END: _handle_turn_end,
             _ET_SESSION_IDLE: _handle_idle,
