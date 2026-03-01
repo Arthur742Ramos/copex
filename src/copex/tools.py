@@ -40,6 +40,139 @@ class ParallelToolConfig:
     approval_workflow: Any | None = None  # Optional ApprovalWorkflow for write operations
 
 
+_PATH_KEYS = (
+    "path",
+    "file_path",
+    "file",
+    "filepath",
+    "target_file",
+    "target",
+    "filename",
+    "relative_path",
+    "absolute_path",
+)
+
+
+def _extract_candidate_path(payload: dict[str, Any]) -> str | None:
+    for key in _PATH_KEYS:
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value
+    return None
+
+
+def _normalize_path(raw_path: str, cwd: Path) -> str:
+    value = raw_path.strip()
+    if not value:
+        return ""
+    candidate = Path(value)
+    if candidate.is_absolute():
+        resolved = candidate.resolve(strict=False)
+        cwd_resolved = cwd.resolve(strict=False)
+        try:
+            return resolved.relative_to(cwd_resolved).as_posix()
+        except ValueError:
+            return resolved.as_posix()
+    return candidate.as_posix()
+
+
+def _review_path(review: Any) -> str | None:
+    proposal = getattr(review, "proposal", None)
+    display_path = getattr(proposal, "display_path", None)
+    if isinstance(display_path, str) and display_path.strip():
+        return display_path.replace("\\", "/")
+    preview = getattr(review, "preview", None)
+    file_path = getattr(preview, "file_path", None)
+    if isinstance(file_path, str) and file_path.strip():
+        return file_path.replace("\\", "/")
+    return None
+
+
+def _review_target(review: Any) -> str:
+    return _review_path(review) or "change"
+
+
+def _prepare_approved_execution(
+    *,
+    params: dict[str, Any],
+    reviews: list[Any],
+    cwd: Path,
+) -> tuple[dict[str, Any], list[Any], list[Any], bool]:
+    if not reviews:
+        return params, [], [], False
+
+    approved_reviews = [review for review in reviews if bool(getattr(review, "apply_change", True))]
+    blocked_reviews = [review for review in reviews if not bool(getattr(review, "apply_change", True))]
+
+    if not approved_reviews:
+        return params, [], blocked_reviews, True
+    if not blocked_reviews:
+        return params, approved_reviews, [], False
+
+    # Structured patch strings are hard to partially filter safely. Block the call
+    # when any reviewed file was rejected/deferred.
+    if any(key in params for key in ("patch", "diff")):
+        return params, [], reviews, True
+
+    approved_paths = {
+        path for review in approved_reviews if (path := _review_path(review)) is not None and path != ""
+    }
+    if not approved_paths:
+        return params, [], reviews, True
+
+    execution_params = dict(params)
+    kept_paths: set[str] = set()
+    had_structured_list = False
+
+    for key in ("changes", "files"):
+        value = params.get(key)
+        if not isinstance(value, list):
+            continue
+        had_structured_list = True
+        kept_items: list[Any] = []
+        for item in value:
+            if not isinstance(item, dict):
+                continue
+            raw_path = _extract_candidate_path(item)
+            if raw_path is None:
+                continue
+            normalized = _normalize_path(raw_path, cwd)
+            if normalized in approved_paths:
+                kept_items.append(item)
+                kept_paths.add(normalized)
+        execution_params[key] = kept_items
+
+    top_level_path = _extract_candidate_path(params)
+    if top_level_path is not None:
+        normalized_top_path = _normalize_path(top_level_path, cwd)
+        if normalized_top_path not in approved_paths:
+            return params, [], reviews, True
+        kept_paths.add(normalized_top_path)
+    elif not had_structured_list:
+        # We have mixed decisions, but no way to safely isolate the approved subset.
+        return params, [], reviews, True
+
+    if had_structured_list and not any(execution_params.get(key) for key in ("changes", "files")):
+        return execution_params, [], reviews, True
+
+    executable_reviews: list[Any] = []
+    skipped_reviews: list[Any] = []
+    for review in reviews:
+        review_path = _review_path(review)
+        if bool(getattr(review, "apply_change", True)):
+            if review_path is None or review_path in kept_paths or not had_structured_list:
+                executable_reviews.append(review)
+            else:
+                skipped_reviews.append(review)
+        else:
+            skipped_reviews.append(review)
+
+    if not executable_reviews:
+        return execution_params, [], reviews, True
+
+    return execution_params, executable_reviews, skipped_reviews, False
+
+
 class ToolRegistry:
     """
     Registry for tools that can be executed in parallel.
