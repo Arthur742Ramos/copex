@@ -210,7 +210,10 @@ class TestAdaptiveRetry:
     @pytest.mark.asyncio
     async def test_success_no_retry(self) -> None:
         retry = AdaptiveRetry()
-        result = await retry.execute(lambda: asyncio.coroutine(lambda: "ok")())
+        async def _ok() -> str:
+            return "ok"
+
+        result = await retry.execute(_ok)
         assert result == "ok"
 
     @pytest.mark.asyncio
