@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import asyncio
 import json
-from typing import Any
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,14 +15,14 @@ import pytest
 from copex.config import CopexConfig
 from copex.fleet import Fleet, FleetConfig, FleetResult
 from copex.squad import (
+    _ROLE_EMOJIS,
+    _ROLE_PROMPTS,
     SquadAgent,
     SquadAgentResult,
     SquadCoordinator,
     SquadResult,
     SquadRole,
     SquadTeam,
-    _ROLE_EMOJIS,
-    _ROLE_PROMPTS,
 )
 from copex.streaming import Response
 
@@ -431,7 +430,7 @@ class TestSquadCoordinatorAddTasks:
         from copex.fleet import Fleet
 
         config = CopexConfig()
-        coord = SquadCoordinator(config)
+        coord = SquadCoordinator(config, team=SquadTeam.default())
         fleet = Fleet(config)
         task_ids = coord._add_tasks(fleet, "Build an API")
 
@@ -445,7 +444,7 @@ class TestSquadCoordinatorAddTasks:
         from copex.fleet import Fleet
 
         config = CopexConfig()
-        coord = SquadCoordinator(config)
+        coord = SquadCoordinator(config, team=SquadTeam.default())
         fleet = Fleet(config)
         task_ids = coord._add_tasks(fleet, "Build an API")
 
@@ -455,7 +454,7 @@ class TestSquadCoordinatorAddTasks:
 
         assert lead_task.depends_on == []
         assert dev_task.depends_on == [task_ids[SquadRole.LEAD]]
-        assert tester_task.depends_on == [task_ids[SquadRole.LEAD]]
+        assert tester_task.depends_on == [task_ids[SquadRole.DEVELOPER]]
 
     def test_add_tasks_prompts_include_role(self):
         from copex.fleet import Fleet
@@ -812,27 +811,270 @@ class TestSquadCoordinatorRun:
 class TestSquadCLIIntegration:
 
     def test_squad_command_exists(self):
-        from copex.cli import app
         from typer.testing import CliRunner
+
+        from copex.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["squad", "--help"])
         assert result.exit_code == 0, f"squad --help failed: {result.output}"
 
     def test_squad_help_shows_options(self):
-        from copex.cli import app
+        import re
+
         from typer.testing import CliRunner
+
+        from copex.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["squad", "--help"])
-        assert "--json" in result.output
-        assert "--model" in result.output
-        assert "--reasoning" in result.output
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "--json" in plain
+        assert "--model" in plain
+        assert "--reasoning" in plain
 
     def test_squad_no_prompt_exits_nonzero(self):
-        from copex.cli import app
         from typer.testing import CliRunner
+
+        from copex.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["squad"], input="")
         assert result.exit_code != 0
+
+
+# ===========================================================================
+# 19. SquadTeam.from_repo — dynamic team creation
+# ===========================================================================
+
+
+class TestFromRepoPythonProject:
+
+    def test_from_repo_python_project(self, tmp_path):
+        """Repo with src/, tests/, docs/ → Lead + Developer + Tester + Docs."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("x = 1")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "docs").mkdir()
+
+        team = SquadTeam.from_repo(tmp_path)
+        roles = team.roles
+        assert SquadRole.LEAD in roles
+        assert SquadRole.DEVELOPER in roles
+        assert SquadRole.TESTER in roles
+        assert SquadRole.DOCS in roles
+        assert SquadRole.DEVOPS not in roles
+        assert SquadRole.FRONTEND not in roles
+        assert SquadRole.BACKEND not in roles
+
+
+class TestFromRepoMinimal:
+
+    def test_from_repo_minimal(self, tmp_path):
+        """Just source files → Lead + Developer."""
+        (tmp_path / "app.js").write_text("console.log('hi')")
+
+        team = SquadTeam.from_repo(tmp_path)
+        roles = team.roles
+        assert roles == [SquadRole.LEAD, SquadRole.DEVELOPER]
+
+
+class TestFromRepoWithDocker:
+
+    def test_from_repo_with_docker(self, tmp_path):
+        """Dockerfile present → includes DevOps."""
+        (tmp_path / "main.go").write_text("package main")
+        (tmp_path / "Dockerfile").write_text("FROM alpine")
+
+        team = SquadTeam.from_repo(tmp_path)
+        roles = team.roles
+        assert SquadRole.DEVOPS in roles
+        assert SquadRole.LEAD in roles
+        assert SquadRole.DEVELOPER in roles
+
+    def test_from_repo_with_docker_compose(self, tmp_path):
+        (tmp_path / "main.py").write_text("pass")
+        (tmp_path / "docker-compose.yml").write_text("version: '3'")
+
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.DEVOPS in team.roles
+
+    def test_from_repo_with_github_workflows(self, tmp_path):
+        (tmp_path / "main.py").write_text("pass")
+        (tmp_path / ".github" / "workflows").mkdir(parents=True)
+
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.DEVOPS in team.roles
+
+    def test_from_repo_with_makefile(self, tmp_path):
+        (tmp_path / "main.py").write_text("pass")
+        (tmp_path / "Makefile").write_text("all:")
+
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.DEVOPS in team.roles
+
+
+class TestFromRepoFrontendBackend:
+
+    def test_from_repo_frontend_backend(self, tmp_path):
+        """Has components/ + api/ + src/ → includes Frontend + Backend."""
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "app.ts").write_text("export default {}")
+        (tmp_path / "components").mkdir()
+        (tmp_path / "api").mkdir()
+
+        team = SquadTeam.from_repo(tmp_path)
+        roles = team.roles
+        assert SquadRole.FRONTEND in roles
+        assert SquadRole.BACKEND in roles
+
+    def test_from_repo_frontend_only(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "index.js").write_text("")
+        (tmp_path / "pages").mkdir()
+
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.FRONTEND in team.roles
+        assert SquadRole.BACKEND not in team.roles
+
+    def test_from_repo_backend_only(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "server.py").write_text("")
+        (tmp_path / "services").mkdir()
+
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.BACKEND in team.roles
+        assert SquadRole.FRONTEND not in team.roles
+
+    def test_from_repo_no_src_dir_no_frontend_backend(self, tmp_path):
+        """Frontend/backend detection requires src/ dir."""
+        (tmp_path / "app.py").write_text("")
+        (tmp_path / "components").mkdir()
+        (tmp_path / "api").mkdir()
+
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.FRONTEND not in team.roles
+        assert SquadRole.BACKEND not in team.roles
+
+
+class TestFromRepoEmptyDir:
+
+    def test_from_repo_empty_dir(self, tmp_path):
+        """Nothing → Lead + Developer minimum."""
+        team = SquadTeam.from_repo(tmp_path)
+        roles = team.roles
+        assert SquadRole.LEAD in roles
+        assert SquadRole.DEVELOPER in roles
+        assert len(roles) == 2
+
+
+class TestFromRepoCustomPath:
+
+    def test_from_repo_custom_path(self, tmp_path):
+        project = tmp_path / "myproject"
+        project.mkdir()
+        (project / "lib.rs").write_text("fn main() {}")
+        (project / "tests").mkdir()
+
+        team = SquadTeam.from_repo(project)
+        assert SquadRole.DEVELOPER in team.roles
+        assert SquadRole.TESTER in team.roles
+
+
+class TestDefaultStillWorks:
+
+    def test_default_still_works(self):
+        """Backward compat: default() returns static 4-agent team."""
+        team = SquadTeam.default()
+        assert len(team.agents) == 4
+        assert team.roles == [
+            SquadRole.LEAD, SquadRole.DEVELOPER,
+            SquadRole.TESTER, SquadRole.DOCS,
+        ]
+
+
+class TestNewRoleDependencies:
+
+    def test_devops_depends_on_lead(self):
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role(SquadRole.LEAD),
+            SquadAgent.default_for_role(SquadRole.DEVOPS),
+        ])
+        coord = SquadCoordinator(config, team=team)
+        task_ids = {SquadRole.LEAD: "lead"}
+        deps = coord._get_dependencies(SquadRole.DEVOPS, task_ids)
+        assert deps == ["lead"]
+
+    def test_frontend_depends_on_lead(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        task_ids = {SquadRole.LEAD: "lead"}
+        deps = coord._get_dependencies(SquadRole.FRONTEND, task_ids)
+        assert deps == ["lead"]
+
+    def test_backend_depends_on_lead(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        task_ids = {SquadRole.LEAD: "lead"}
+        deps = coord._get_dependencies(SquadRole.BACKEND, task_ids)
+        assert deps == ["lead"]
+
+    def test_tester_depends_on_implementation_agents(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        task_ids = {
+            SquadRole.LEAD: "lead",
+            SquadRole.DEVELOPER: "developer",
+            SquadRole.FRONTEND: "frontend",
+        }
+        deps = coord._get_dependencies(SquadRole.TESTER, task_ids)
+        assert "developer" in deps
+        assert "frontend" in deps
+        assert "lead" not in deps
+
+    def test_tester_falls_back_to_lead(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        task_ids = {SquadRole.LEAD: "lead"}
+        deps = coord._get_dependencies(SquadRole.TESTER, task_ids)
+        assert deps == ["lead"]
+
+    def test_docs_depends_on_all_non_lead(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        task_ids = {
+            SquadRole.LEAD: "lead",
+            SquadRole.DEVELOPER: "developer",
+            SquadRole.TESTER: "tester",
+            SquadRole.DEVOPS: "devops",
+        }
+        deps = coord._get_dependencies(SquadRole.DOCS, task_ids)
+        assert "developer" in deps
+        assert "tester" in deps
+        assert "devops" in deps
+        assert "lead" not in deps
+
+
+class TestFromRepoTestPatterns:
+
+    def test_test_prefix_pattern(self, tmp_path):
+        (tmp_path / "test_main.py").write_text("pass")
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.TESTER in team.roles
+
+    def test_test_suffix_pattern(self, tmp_path):
+        (tmp_path / "main_test.go").write_text("package main")
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.TESTER in team.roles
+
+    def test_spec_pattern(self, tmp_path):
+        (tmp_path / "main.spec.ts").write_text("")
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.TESTER in team.roles
+
+    def test_multiple_md_docs_signal(self, tmp_path):
+        (tmp_path / "README.md").write_text("# Readme")
+        (tmp_path / "CONTRIBUTING.md").write_text("# Contributing")
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.DOCS in team.roles

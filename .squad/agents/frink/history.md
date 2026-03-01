@@ -36,3 +36,13 @@
 - **Default team:** Now 4 agents: Lead → Developer + Tester (parallel) → Docs (runs last, depends on both dev + tester)
 - **Graceful fallback:** Empty string returned if no README/pyproject found
 - **Tests:** 8 new tests (58 total), all passing
+
+### Dynamic Squad Teams (2026-03-01)
+- **Feature:** `SquadTeam.from_repo(path)` scans repo structure to build role-appropriate teams
+- **New roles:** DEVOPS (⚙️), FRONTEND (⚛️), BACKEND (🔧) with prompts and emojis
+- **Detection:** Source files → Developer, tests/ or test patterns → Tester, docs/ or multiple .md → Docs, Dockerfile/Makefile/CI → DevOps, src/ + frontend dirs → Frontend, src/ + backend dirs → Backend
+- **Minimum team:** Always Lead + Developer (fallback if no signals found)
+- **Default change:** `SquadCoordinator.__init__` now uses `from_repo()` instead of `default()` when no team specified
+- **Backward compat:** `SquadTeam.default()` unchanged — still returns static 4-agent team
+- **Dependency updates:** Tester depends on implementation agents (Developer/Frontend/Backend), falls back to Lead. Docs depends on all non-lead roles. New roles depend on Lead.
+- **Tests:** 23 new tests (90 total), all passing

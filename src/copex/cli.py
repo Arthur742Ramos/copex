@@ -3818,6 +3818,10 @@ def squad_command(
         bool,
         typer.Option("--use-cli", help="Use CLI subprocess instead of SDK"),
     ] = False,
+    no_ai: Annotated[
+        bool,
+        typer.Option("--no-ai", help="Skip AI repo analysis, use pattern matching"),
+    ] = False,
     config_file: Annotated[
         Path | None, typer.Option("--config", "-c", help="Config file path")
     ] = None,
@@ -3886,7 +3890,7 @@ def squad_command(
         console.print("[red]No prompt provided[/red]")
         raise typer.Exit(1) from None
 
-    asyncio.run(_run_squad(config, prompt, json_output=json_output))
+    asyncio.run(_run_squad(config, prompt, json_output=json_output, no_ai=no_ai))
 
 
 async def _run_squad(
@@ -3894,9 +3898,10 @@ async def _run_squad(
     prompt: str,
     *,
     json_output: bool = False,
+    no_ai: bool = False,
 ) -> None:
     """Run the squad coordinator."""
-    from copex.squad import SquadCoordinator
+    from copex.squad import SquadCoordinator, SquadTeam
 
     def on_status(task_id: str, status: str) -> None:
         if not json_output:
@@ -3923,7 +3928,17 @@ async def _run_squad(
                 )
             )
 
-        coordinator = SquadCoordinator(config)
+        # Create team based on --no-ai flag
+        team = None
+        if no_ai:
+            # Use pattern matching
+            team = SquadTeam.from_repo()
+        else:
+            # Show analysis status (AI will run lazily in coordinator.run())
+            if not json_output:
+                console.print("🔍 Analyzing repository...")
+
+        coordinator = SquadCoordinator(config, team=team)
         async with coordinator:
             result = await coordinator.run(prompt, on_status=on_status)
 

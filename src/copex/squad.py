@@ -18,6 +18,7 @@ Usage::
 from __future__ import annotations
 
 import json
+import logging
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -26,6 +27,8 @@ from typing import Any
 
 from copex.config import CopexConfig
 from copex.fleet import Fleet, FleetConfig, FleetResult
+
+logger = logging.getLogger(__name__)
 
 
 class SquadRole(str, Enum):
@@ -167,6 +170,81 @@ def _has_backend(root: Path) -> bool:
     return any((root / d).is_dir() for d in _BACKEND_DIRS)
 
 
+def _gather_repo_context(path: Path | None = None) -> dict[str, Any]:
+    """Gather repository context for AI analysis.
+
+    Reads pyproject.toml, README.md, directory structure, and source file
+    extensions. Returns a dictionary with all available context.
+    """
+    root = path or Path.cwd()
+    context: dict[str, Any] = {}
+
+    # Read pyproject.toml
+    pyproject_path = root / "pyproject.toml"
+    if pyproject_path.is_file():
+        try:
+            try:
+                import tomllib  # Python 3.11+
+            except ImportError:
+                import tomli as tomllib  # type: ignore
+
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+            project = data.get("project", {})
+            context["project_name"] = project.get("name", "")
+            context["description"] = project.get("description", "")
+            deps = project.get("dependencies", [])
+            if deps:
+                context["dependencies"] = deps[:10]  # First 10 deps
+        except Exception:
+            pass
+
+    # Read README.md
+    readme_path = root / "README.md"
+    if readme_path.is_file():
+        try:
+            text = readme_path.read_text(encoding="utf-8")[:2000]
+            context["readme_excerpt"] = text
+        except Exception:
+            pass
+
+    # Directory structure (2 levels deep for AI)
+    try:
+        structure: list[str] = []
+        for entry in sorted(root.iterdir()):
+            if entry.name.startswith("."):
+                continue
+            if entry.is_dir():
+                structure.append(entry.name + "/")
+                # One level deeper for directories
+                try:
+                    for subentry in sorted(entry.iterdir()):
+                        if not subentry.name.startswith("."):
+                            suffix = "/" if subentry.is_dir() else ""
+                            structure.append(f"  {subentry.name}{suffix}")
+                except (OSError, PermissionError):
+                    pass
+            else:
+                structure.append(entry.name)
+        if structure:
+            context["directory_structure"] = structure[:50]  # Limit to 50 items
+    except Exception:
+        pass
+
+    # Source file extensions found
+    extensions: set[str] = set()
+    for ext in _SOURCE_EXTENSIONS:
+        try:
+            if next(root.rglob(f"*{ext}"), None) is not None:
+                extensions.add(ext)
+        except OSError:
+            pass
+    if extensions:
+        context["source_extensions"] = sorted(extensions)
+
+    return context
+
+
 @dataclass
 class SquadAgent:
     """An agent in the squad team."""
@@ -242,6 +320,128 @@ class SquadTeam:
             roles.append(SquadRole.DEVELOPER)
 
         return cls(agents=[SquadAgent.default_for_role(r) for r in roles])
+
+    @classmethod
+    async def from_repo_ai(
+        cls,
+        config: CopexConfig | None = None,
+        path: Path | None = None,
+    ) -> SquadTeam:
+        """Create a team by using AI to analyze the repository.
+
+        Uses CopilotCLI with claude-opus-4.6-fast to intelligently analyze
+        the repo structure, README, and config files. Falls back to from_repo()
+        (pattern matching) on any failure.
+
+        Args:
+            config: Optional CopexConfig (creates lightweight config if None).
+            path: Optional path to repository (defaults to cwd).
+
+        Returns:
+            SquadTeam with AI-determined roles, or fallback to from_repo().
+        """
+        try:
+            # Lazy import to avoid circular dependency
+            from copex.cli_client import CopilotCLI
+            from copex.models import Model, ReasoningEffort
+
+            # Gather repo context
+            context = _gather_repo_context(path)
+            if not context:
+                logger.warning("No repo context found, falling back to pattern matching")
+                return cls.from_repo(path)
+
+            # Build prompt for AI
+            prompt_parts = [
+                "Analyze this repository and determine what development team roles are needed.",
+                "",
+                "# Repository Context",
+            ]
+
+            if context.get("project_name"):
+                prompt_parts.append(f"Project: {context['project_name']}")
+            if context.get("description"):
+                prompt_parts.append(f"Description: {context['description']}")
+            if context.get("source_extensions"):
+                prompt_parts.append(f"Languages: {', '.join(context['source_extensions'])}")
+            if context.get("dependencies"):
+                deps = context["dependencies"]
+                prompt_parts.append(f"Dependencies: {', '.join(deps[:5])}")
+            if context.get("directory_structure"):
+                struct = "\n".join(context["directory_structure"][:30])
+                prompt_parts.append(f"\nDirectory structure:\n{struct}")
+            if context.get("readme_excerpt"):
+                excerpt = context["readme_excerpt"][:1000]
+                prompt_parts.append(f"\nREADME excerpt:\n{excerpt}")
+
+            prompt_parts.extend([
+                "",
+                "# Instructions",
+                "",
+                "Respond ONLY with a JSON array of role strings. Valid roles:",
+                "- lead (always required)",
+                "- developer (always required)",
+                "- tester (if has tests or should have tests)",
+                "- docs (if has documentation to maintain)",
+                "- devops (if has CI/CD, Docker, or infrastructure)",
+                "- frontend (if has UI components)",
+                "- backend (if has API/server components)",
+                "",
+                "Rules:",
+                "- Always include 'lead' and 'developer'",
+                "- Only include roles that are clearly needed",
+                "- Keep the team small (3-5 roles typical)",
+                "",
+                'Example response: ["lead", "developer", "tester", "docs"]',
+            ])
+
+            prompt = "\n".join(prompt_parts)
+
+            # Create lightweight config for AI analysis
+            ai_config = config or CopexConfig()
+            ai_config.model = Model.CLAUDE_OPUS_4_6_FAST
+            ai_config.reasoning_effort = ReasoningEffort.LOW
+            ai_config.streaming = False
+            ai_config.use_cli = True
+
+            # Call AI with timeout
+            async with CopilotCLI(ai_config) as cli:
+                response = await cli.send(prompt)
+                content = response.content.strip()
+
+                # Parse JSON (handle markdown code fences)
+                if "```json" in content:
+                    content = content.split("```json")[1].split("```")[0].strip()
+                elif "```" in content:
+                    content = content.split("```")[1].split("```")[0].strip()
+
+                # Extract JSON array
+                roles_list = json.loads(content)
+                if not isinstance(roles_list, list):
+                    raise ValueError("AI response is not a list")
+
+                # Validate and convert to SquadRole
+                roles: list[SquadRole] = []
+                for role_str in roles_list:
+                    try:
+                        role = SquadRole(role_str.lower())
+                        if role not in roles:
+                            roles.append(role)
+                    except ValueError:
+                        logger.warning(f"Unknown role from AI: {role_str}")
+
+                # Ensure minimum viable team
+                if SquadRole.LEAD not in roles:
+                    roles.insert(0, SquadRole.LEAD)
+                if SquadRole.DEVELOPER not in roles:
+                    roles.append(SquadRole.DEVELOPER)
+
+                logger.info(f"AI analysis completed: {[r.value for r in roles]}")
+                return cls(agents=[SquadAgent.default_for_role(r) for r in roles])
+
+        except Exception as e:
+            logger.warning(f"AI repo analysis failed ({e}), falling back to pattern matching")
+            return cls.from_repo(path)
 
     def get_agent(self, role: SquadRole) -> SquadAgent | None:
         """Get agent by role."""
@@ -342,7 +542,7 @@ class SquadCoordinator:
         fleet_config: FleetConfig | None = None,
     ) -> None:
         self._config = config
-        self._team = team or SquadTeam.from_repo()
+        self._team = team  # Can be None for lazy init
         self._fleet_config = fleet_config or FleetConfig(
             max_concurrent=3,
             timeout=600.0,
@@ -352,6 +552,9 @@ class SquadCoordinator:
     @property
     def team(self) -> SquadTeam:
         """The squad team."""
+        if self._team is None:
+            # Sync fallback if team requested before async init
+            self._team = SquadTeam.from_repo()
         return self._team
 
     async def __aenter__(self) -> SquadCoordinator:
@@ -377,6 +580,10 @@ class SquadCoordinator:
         """
         start_time = time.monotonic()
 
+        # Lazy init: analyze repo with AI if team not provided
+        if self._team is None:
+            self._team = await SquadTeam.from_repo_ai(self._config)
+
         if self._project_context is None:
             self._project_context = self._discover_project_context()
 
@@ -393,7 +600,7 @@ class SquadCoordinator:
         """Add fleet tasks for each agent."""
         task_ids: dict[SquadRole, str] = {}
 
-        for agent in self._team.agents:
+        for agent in self.team.agents:  # Use property for lazy init
             deps = self._get_dependencies(agent.role, task_ids)
             agent_prompt = self._build_agent_prompt(agent, prompt, task_ids)
 
@@ -401,6 +608,7 @@ class SquadCoordinator:
                 agent_prompt,
                 task_id=agent.role.value,
                 depends_on=deps,
+                model=self._config.model,
             )
             task_ids[agent.role] = tid
 
@@ -470,50 +678,23 @@ class SquadCoordinator:
         Reads README.md (first 2000 chars), pyproject.toml name/description,
         and top-level directory listing. Returns empty string if nothing found.
         """
-        cwd = Path.cwd()
+        context = _gather_repo_context()
+        if not context:
+            return ""
+
         sections: list[str] = []
 
-        # Read pyproject.toml project name and description
-        pyproject_path = cwd / "pyproject.toml"
-        if pyproject_path.is_file():
-            try:
-                try:
-                    import tomllib  # Python 3.11+
-                except ImportError:
-                    import tomli as tomllib  # type: ignore
-
-                with open(pyproject_path, "rb") as f:
-                    data = tomllib.load(f)
-                project = data.get("project", {})
-                name = project.get("name", "")
-                desc = project.get("description", "")
-                if name:
-                    sections.append(f"Project: {name}")
-                if desc:
-                    sections.append(f"Description: {desc}")
-            except Exception:
-                pass
-
-        # Read README.md (first 2000 chars)
-        readme_path = cwd / "README.md"
-        if readme_path.is_file():
-            try:
-                text = readme_path.read_text(encoding="utf-8")[:2000]
-                sections.append(f"README (excerpt):\n{text}")
-            except Exception:
-                pass
-
-        # List top-level directory structure
-        try:
-            entries = sorted(
-                e.name + ("/" if e.is_dir() else "")
-                for e in cwd.iterdir()
-                if not e.name.startswith(".")
-            )
-            if entries:
-                sections.append(f"Structure: {', '.join(entries)}")
-        except Exception:
-            pass
+        if context.get("project_name"):
+            sections.append(f"Project: {context['project_name']}")
+        if context.get("description"):
+            sections.append(f"Description: {context['description']}")
+        if context.get("readme_excerpt"):
+            sections.append(f"README (excerpt):\n{context['readme_excerpt']}")
+        if context.get("directory_structure"):
+            # Use simpler structure for project context (just top-level)
+            top_level = [s for s in context["directory_structure"] if not s.startswith("  ")]
+            if top_level:
+                sections.append(f"Structure: {', '.join(top_level[:20])}")
 
         if not sections:
             return ""
@@ -535,7 +716,7 @@ class SquadCoordinator:
             role = id_to_role.get(fr.task_id)
             if role is None:
                 continue
-            agent = self._team.get_agent(role)
+            agent = self.team.get_agent(role)  # Use property for lazy init
             if agent is None:
                 continue
 

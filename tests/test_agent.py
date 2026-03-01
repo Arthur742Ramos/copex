@@ -11,12 +11,9 @@ import json
 from typing import Any
 from unittest.mock import AsyncMock
 
-import pytest
-
-from copex.agent import AgentResult, AgentSession, AgentTurn, DEFAULT_MAX_TURNS
+from copex.agent import DEFAULT_MAX_TURNS, AgentResult, AgentSession, AgentTurn
 from copex.config import CopexConfig
 from copex.streaming import Response, StreamChunk
-
 
 # ---------------------------------------------------------------------------
 # Helpers — mock client that simulates multi-turn agent interactions
@@ -518,12 +515,16 @@ class TestModelParameter:
         assert session.model is None
 
     def test_agent_cli_model_option(self):
-        from copex.cli import app
+        import re
+
         from typer.testing import CliRunner
+
+        from copex.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["agent", "--help"])
-        assert "--model" in result.output
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "--model" in plain
 
 
 # ===========================================================================
@@ -613,26 +614,32 @@ class TestEdgeCases:
 class TestCLIIntegration:
 
     def test_agent_command_exists(self):
-        from copex.cli import app
         from typer.testing import CliRunner
+
+        from copex.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["agent", "--help"])
         assert result.exit_code == 0, f"agent --help failed: {result.output}"
 
     def test_agent_help_shows_options(self):
-        from copex.cli import app
+        import re
+
         from typer.testing import CliRunner
+
+        from copex.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["agent", "--help"])
-        assert "--json" in result.output
-        assert "--max-turns" in result.output
-        assert "--model" in result.output
+        plain = re.sub(r"\x1b\[[0-9;]*m", "", result.output)
+        assert "--json" in plain
+        assert "--max-turns" in plain
+        assert "--model" in plain
 
     def test_agent_no_prompt_exits_nonzero(self):
-        from copex.cli import app
         from typer.testing import CliRunner
+
+        from copex.cli import app
 
         runner = CliRunner()
         result = runner.invoke(app, ["agent"])
