@@ -11,6 +11,13 @@
 
 📌 Team update (2026-03-01T01:15:00Z): Comprehensive agent test suite (57 tests, 11 classes) complete and all passing. Tests validate AgentSession, dataclasses, CLI integration, tool calling, error handling, streaming. — Hibbert
 
+### Squad Test Suite (2026-03-01T01:43:30Z)
+- **50 new tests** across 12 test classes in `tests/test_squad.py`
+- **Coverage:** SquadRole, agent/team/result dataclasses, orchestration, parallel execution, error handling, duration tracking, CLI integration, end-to-end workflows
+- **Test classes:** TestSquadRole, TestSquadAgentDataclass, TestSquadTeamDataclass, TestSquadAgentResult, TestSquadResult, TestSquadCoordinator, TestSquadOrchestration, TestParallelExecution, TestErrorHandling, TestDurationTracking, TestCLIIntegration, TestEndToEnd
+- **All 524 tests pass** (50 new squad tests + 474 existing)
+- **Status:** Comprehensive coverage, production-ready
+
 - **Agent module API (src/copex/agent.py):** `AgentSession(client, *, max_turns, model, continue_prompt)` — prompt is passed to `run(prompt)` / `run_streaming(prompt)`, not the constructor. Tool calls are plain dicts (not a `ToolCall` class). Intermediate turns with tool calls get `stop_reason=None`; final turns get `end_turn`, `max_turns`, or `error`.
 - **Test pattern for agent:** FakeClient delivers tool calls via `on_chunk` callbacks using `StreamChunk` objects (type="tool_call" and type="tool_result") — this mirrors how the real SDK flows tool information. The agent's `_execute_turn` captures these via the on_chunk callback.
 - **CLI agent command:** Registered as `@app.command("agent")` in cli.py. Accepts `--json` for JSON Lines output, `--max-turns`, `--model`, `--use-cli`, `--stdin`. Without prompt, exits nonzero.

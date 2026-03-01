@@ -20,3 +20,10 @@
 - **Key files:** `src/copex/agent.py`, CLI command in `cli.py` (search for `agent_command`), exports in `__init__.py`.
 
 📌 Team update (2026-03-01T01:15:00Z): Agent module fully implemented with AgentSession, AgentTurn, AgentResult, and CLI integration. All 57 tests passing. Production-ready. — Frink
+
+### Squad Module (2026-03-01T01:43:30Z)
+- **New module:** `src/copex/squad.py` — `SquadCoordinator`, `SquadTeam`, `SquadAgent`, `SquadResult`, `SquadAgentResult`, `SquadRole`
+- **Orchestration:** Uses Fleet executor for parallel Dev + Tester execution after Lead completes
+- **CLI command:** `copex squad` accepts squad config JSON, outputs SquadResult JSON with outcomes and durations
+- **Public API exports:** Added to __init__.py (SquadCoordinator, SquadTeam, SquadAgent, SquadResult, SquadAgentResult, SquadRole)
+- **Status:** Fully implemented, 50 tests passing, production-ready
