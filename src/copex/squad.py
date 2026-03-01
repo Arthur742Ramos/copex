@@ -1082,8 +1082,9 @@ class SquadCoordinator:
     def team(self) -> SquadTeam:
         """The squad team."""
         if self._team is None:
-            # Sync fallback if team requested before async init
-            self._team = SquadTeam.load_squad_file() or SquadTeam.from_repo()
+            # Deterministic sync fallback for direct usage and tests.
+            # run() performs .squad/AI discovery when execution begins.
+            self._team = SquadTeam.default()
         return self._team
 
     async def __aenter__(self) -> SquadCoordinator:
