@@ -17,8 +17,10 @@ Usage::
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
+import re
 import time
 from dataclasses import dataclass, field
 from enum import Enum
@@ -26,8 +28,8 @@ from pathlib import Path
 from typing import Any
 
 from copex.config import CopexConfig
-from copex.json_utils import extract_json_array
 from copex.fleet import Fleet, FleetConfig, FleetResult
+from copex.json_utils import extract_json_array
 
 logger = logging.getLogger(__name__)
 
@@ -105,6 +107,20 @@ _FRONTEND_DIRS = frozenset({
 _BACKEND_DIRS = frozenset({
     "api", "server", "backend", "services",
 })
+
+_TASK_OUTPUT_REF_RE = re.compile(
+    r"\{\{\s*task:(?P<task_id>[a-zA-Z0-9_.-]+)\.(?P<field>"
+    r"content|reasoning|success|error|duration_ms|prompt_tokens|completion_tokens"
+    r")\s*\}\}"
+)
+
+_REASONING_TIMEOUTS: dict[str, float] = {
+    "xhigh": 1800.0,
+    "high": 900.0,
+    "medium": 600.0,
+    "low": 300.0,
+    "none": 300.0,
+}
 
 
 def _has_source_files(root: Path) -> bool:
@@ -721,7 +737,7 @@ class SquadCoordinator:
         self._team = team  # Can be None for lazy init
         self._fleet_config = fleet_config or FleetConfig(
             max_concurrent=3,
-            timeout=600.0,
+            timeout=self._default_timeout_from_reasoning(config.reasoning_effort),
         )
         self._project_context: str | None = None
 
@@ -763,16 +779,62 @@ class SquadCoordinator:
         if self._project_context is None:
             self._project_context = self._discover_project_context()
 
-        fleet = Fleet(self._config, fleet_config=self._fleet_config)
-        task_ids = self._add_tasks(fleet, prompt)
+        max_feedback_iterations = 3
+        feedback_iteration = 0
+        current_prompt = prompt
 
-        fleet_results = await fleet.run(on_status=on_status)
+        final_result: SquadResult | None = None
+        while True:
+            fleet = Fleet(self._config, fleet_config=self._fleet_config)
+            task_prompts: dict[str, str] = {}
+            task_ids = self._add_tasks(fleet, current_prompt, task_prompts=task_prompts)
+            fleet_results = await fleet.run(on_status=on_status)
+            fleet_results = await self._retry_failed_agents(
+                fleet_results,
+                task_prompts,
+                on_status=on_status,
+            )
 
-        result = self._build_result(fleet_results, task_ids)
-        result.total_duration_ms = (time.monotonic() - start_time) * 1000
-        return result
+            iteration_result = self._build_result(fleet_results, task_ids)
+            tester_results = [
+                ar
+                for ar in iteration_result.agent_results
+                if ar.agent.role == SquadRole.TESTER.value
+            ]
+            tester_needs_feedback = any(
+                (
+                    (not ar.success and not self._is_timeout_error(ar.error))
+                    or self._tester_reported_issues(ar.content)
+                )
+                for ar in tester_results
+            )
 
-    def _add_tasks(self, fleet: Fleet, prompt: str) -> dict[str, str]:
+            if (
+                not tester_results
+                or not tester_needs_feedback
+                or feedback_iteration >= max_feedback_iterations
+            ):
+                final_result = iteration_result
+                break
+
+            feedback_iteration += 1
+            current_prompt = self._build_feedback_iteration_prompt(
+                prompt,
+                tester_results,
+                feedback_iteration,
+            )
+
+        assert final_result is not None  # noqa: S101
+        final_result.total_duration_ms = (time.monotonic() - start_time) * 1000
+        return final_result
+
+    def _add_tasks(
+        self,
+        fleet: Fleet,
+        prompt: str,
+        *,
+        task_prompts: dict[str, str] | None = None,
+    ) -> dict[str, str]:
         """Add fleet tasks for each agent.
 
         When an agent has subtasks, each subtask becomes a separate Fleet task
@@ -800,7 +862,10 @@ class SquadCoordinator:
                         task_id=sub_id,
                         depends_on=deps,
                         model=self._config.model,
+                        retries=0,
                     )
+                    if task_prompts is not None:
+                        task_prompts[tid] = sub_prompt
                     sub_ids.append(tid)
                 # Store pipe-joined subtask IDs so deps and result mapping work
                 task_ids[agent.role] = "|".join(sub_ids)
@@ -811,7 +876,10 @@ class SquadCoordinator:
                     task_id=agent.role,
                     depends_on=deps,
                     model=self._config.model,
+                    retries=0,
                 )
+                if task_prompts is not None:
+                    task_prompts[tid] = agent_prompt
                 task_ids[agent.role] = tid
 
         return task_ids
@@ -858,15 +926,214 @@ class SquadCoordinator:
         parts.append("")
         parts.append(f"## Task\n\n{user_prompt}")
 
-        # Add reference to Lead's output for dependent agents
-        lead_id = task_ids.get("lead")
-        if lead_id and agent.role != "lead":
-            parts.append(
-                f"\n## Lead's Analysis\n\n"
-                f"{{{{task:{lead_id}.content}}}}"
-            )
+        # Add references to all completed prior-phase outputs
+        prior_phase_refs: list[tuple[SquadAgent, list[str]]] = []
+        for other in self.team.agents:
+            if other.role == agent.role or other.phase >= agent.phase:
+                continue
+            other_task_ids = task_ids.get(other.role)
+            if not other_task_ids:
+                continue
+            prior_phase_refs.append((other, other_task_ids.split("|")))
+
+        if prior_phase_refs:
+            parts.append("")
+            parts.append("## Prior Phase Outputs")
+            for other, ref_ids in prior_phase_refs:
+                parts.append("")
+                parts.append(f"### {other.name}")
+                if len(ref_ids) == 1:
+                    parts.append(f"{{{{task:{ref_ids[0]}.content}}}}")
+                    continue
+                for i, ref_id in enumerate(ref_ids):
+                    label = (
+                        other.subtasks[i]
+                        if i < len(other.subtasks)
+                        else f"Subtask {i + 1}"
+                    )
+                    parts.append(f"#### {label}")
+                    parts.append(f"{{{{task:{ref_id}.content}}}}")
 
         return "\n".join(parts)
+
+    async def _retry_failed_agents(
+        self,
+        fleet_results: list[FleetResult],
+        task_prompts: dict[str, str],
+        *,
+        on_status: Any | None = None,
+    ) -> list[FleetResult]:
+        """Retry each failed non-timeout agent task once."""
+        if not fleet_results:
+            return fleet_results
+
+        results_by_id = {fr.task_id: fr for fr in fleet_results}
+        ordered_ids = [fr.task_id for fr in fleet_results]
+
+        for task_id in ordered_ids:
+            current = results_by_id.get(task_id)
+            if current is None or current.success or current.error is None:
+                continue
+            if self._is_timeout_error(current.error):
+                continue
+            prompt_template = task_prompts.get(task_id)
+            if not prompt_template:
+                continue
+
+            retry_prompt = self._materialize_prompt(prompt_template, results_by_id)
+            retry_task_id = f"{task_id}__retry"
+            retry_fleet = Fleet(self._config, fleet_config=self._fleet_config)
+            retry_fleet.add(
+                retry_prompt,
+                task_id=retry_task_id,
+                model=self._config.model,
+                retries=0,
+            )
+            retry_results = await retry_fleet.run(on_status=on_status)
+            retry_result = next(
+                (result for result in retry_results if result.task_id == retry_task_id),
+                None,
+            )
+            if retry_result is None:
+                continue
+
+            results_by_id[task_id] = FleetResult(
+                task_id=task_id,
+                success=retry_result.success,
+                response=retry_result.response,
+                error=retry_result.error,
+                duration_ms=current.duration_ms + retry_result.duration_ms,
+                prompt_tokens=current.prompt_tokens + retry_result.prompt_tokens,
+                completion_tokens=(
+                    current.completion_tokens + retry_result.completion_tokens
+                ),
+                total_cost=current.total_cost + retry_result.total_cost,
+                retries_used=current.retries_used + 1,
+            )
+
+        return [results_by_id[task_id] for task_id in ordered_ids]
+
+    def _build_feedback_iteration_prompt(
+        self,
+        base_prompt: str,
+        tester_results: list[SquadAgentResult],
+        iteration: int,
+    ) -> str:
+        """Append tester findings so Developer can fix and Tester can re-verify."""
+        feedback_parts: list[str] = []
+        for tester_result in tester_results:
+            if tester_result.content.strip():
+                feedback_parts.append(
+                    f"### {tester_result.agent.name} Findings\n\n"
+                    f"{tester_result.content.strip()}"
+                )
+            if tester_result.error:
+                feedback_parts.append(
+                    f"### {tester_result.agent.name} Error\n\n"
+                    f"{tester_result.error}"
+                )
+
+        feedback_body = (
+            "\n\n".join(feedback_parts)
+            if feedback_parts
+            else "Tester reported failures or issues that must be fixed."
+        )
+        return (
+            f"{base_prompt}\n\n"
+            f"## Tester Feedback Loop (Iteration {iteration})\n\n"
+            "Developer: fix every failing test and issue reported below.\n"
+            "Tester: re-run tests against the updated implementation and "
+            "explicitly state whether all tests pass.\n\n"
+            f"{feedback_body}"
+        )
+
+    @staticmethod
+    def _tester_reported_issues(content: str) -> bool:
+        """Best-effort signal for tester-reported issues in successful output."""
+        if not content:
+            return False
+        text = content.lower()
+        pass_markers = (
+            "all tests passed",
+            "tests passed",
+            "all checks passed",
+            "no issues found",
+            "no issues detected",
+            "no failing tests",
+            "no failed tests",
+            "no errors found",
+        )
+        if any(marker in text for marker in pass_markers):
+            return False
+        issue_markers = (
+            "test failed",
+            "tests failed",
+            "failing test",
+            "failing tests",
+            "failure",
+            "errors found",
+            "issue found",
+            "issues found",
+            "bug found",
+            "regression",
+            "does not pass",
+            "did not pass",
+        )
+        return any(marker in text for marker in issue_markers)
+
+    @staticmethod
+    def _default_timeout_from_reasoning(reasoning_effort: Any) -> float:
+        value = (
+            reasoning_effort.value
+            if hasattr(reasoning_effort, "value")
+            else str(reasoning_effort)
+        )
+        return _REASONING_TIMEOUTS.get(str(value).lower(), 600.0)
+
+    @staticmethod
+    def _is_timeout_error(error: Any) -> bool:
+        if error is None:
+            return False
+        if isinstance(error, (asyncio.TimeoutError, TimeoutError)):
+            return True
+        text = str(error).lower()
+        return "timed out" in text or "timeout" in text
+
+    @staticmethod
+    def _materialize_prompt(
+        prompt: str,
+        results: dict[str, FleetResult],
+    ) -> str:
+        """Resolve {{task:...}} templates using known results."""
+        if "{{task:" not in prompt:
+            return prompt
+
+        def _replace(match: re.Match[str]) -> str:
+            task_id = match.group("task_id")
+            field = match.group("field")
+            result = results.get(task_id)
+            if result is None:
+                return ""
+            if field == "success":
+                return "true" if result.success else "false"
+            if field == "error":
+                return str(result.error) if result.error else ""
+            if field == "duration_ms":
+                return str(round(result.duration_ms, 3))
+            if field == "prompt_tokens":
+                return str(result.prompt_tokens)
+            if field == "completion_tokens":
+                return str(result.completion_tokens)
+            response = result.response
+            if response is None:
+                return ""
+            if field == "content":
+                return response.content
+            if field == "reasoning":
+                return response.reasoning or ""
+            return ""
+
+        return _TASK_OUTPUT_REF_RE.sub(_replace, prompt)
 
     def _discover_project_context(self) -> str:
         """Auto-discover project context from the current working directory.

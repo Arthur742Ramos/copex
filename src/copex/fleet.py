@@ -1018,7 +1018,7 @@ class FleetCoordinator:
                     ]
                     dep_results = await asyncio.gather(*dep_waiters, return_exceptions=True)
                     timed_out = [
-                        dep for dep, res in zip(task.depends_on, dep_results)
+                        dep for dep, res in zip(task.depends_on, dep_results, strict=False)
                         if isinstance(res, asyncio.TimeoutError)
                     ]
                     if timed_out:
@@ -1894,7 +1894,7 @@ class Fleet:
                 ]
                 dep_results = await asyncio.gather(*dep_waiters, return_exceptions=True)
                 timed_out = [
-                    dep for dep, res in zip(task.depends_on, dep_results)
+                    dep for dep, res in zip(task.depends_on, dep_results, strict=False)
                     if isinstance(res, asyncio.TimeoutError)
                 ]
                 if timed_out:

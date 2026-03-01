@@ -14,6 +14,7 @@ import pytest
 
 from copex.config import CopexConfig
 from copex.fleet import Fleet, FleetConfig, FleetResult
+from copex.models import Model, ReasoningEffort
 from copex.squad import (
     _KNOWN_ROLE_PHASES,
     _ROLE_EMOJIS,
@@ -279,6 +280,28 @@ class TestSquadCoordinatorTaskBuilding:
         assert "Tester" in prompt
         assert "{{task:lead.content}}" in prompt
 
+    def test_build_agent_prompt_tester_sees_developer(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config)
+        agent = coord.team.get_agent(SquadRole.TESTER)
+        task_ids = {"lead": "lead", "developer": "developer"}
+        prompt = coord._build_agent_prompt(agent, "Build X", task_ids)
+        assert "{{task:lead.content}}" in prompt
+        assert "{{task:developer.content}}" in prompt
+
+    def test_build_agent_prompt_docs_sees_developer_and_tester(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config)
+        agent = coord.team.get_agent(SquadRole.DOCS)
+        task_ids = {
+            "lead": "lead",
+            "developer": "developer",
+            "tester": "tester",
+        }
+        prompt = coord._build_agent_prompt(agent, "Build X", task_ids)
+        assert "{{task:developer.content}}" in prompt
+        assert "{{task:tester.content}}" in prompt
+
     def test_get_dependencies_lead(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
@@ -403,7 +426,26 @@ class TestSquadCoordinatorCustomTeam:
         config = CopexConfig()
         coord = SquadCoordinator(config)
         assert coord._fleet_config.max_concurrent == 3
-        assert coord._fleet_config.timeout == 600.0
+        assert coord._fleet_config.timeout == 900.0
+
+    @pytest.mark.parametrize(
+        ("model", "reasoning", "expected_timeout"),
+        [
+            (Model.GPT_5_2, ReasoningEffort.XHIGH, 1800.0),
+            (Model.CLAUDE_OPUS_4_6, ReasoningEffort.HIGH, 900.0),
+            (Model.CLAUDE_OPUS_4_6, ReasoningEffort.MEDIUM, 600.0),
+            (Model.CLAUDE_OPUS_4_6, ReasoningEffort.LOW, 300.0),
+        ],
+    )
+    def test_dynamic_fleet_timeout_by_reasoning(
+        self,
+        model: Model,
+        reasoning: ReasoningEffort,
+        expected_timeout: float,
+    ):
+        config = CopexConfig(model=model, reasoning_effort=reasoning)
+        coord = SquadCoordinator(config)
+        assert coord._fleet_config.timeout == expected_timeout
 
 
 # ===========================================================================
@@ -809,6 +851,161 @@ class TestSquadCoordinatorRun:
         result = run(_test())
         assert result.success is False
         assert result.agent_results[1].error == "compile error"
+
+    def test_run_feedback_loop_retries_until_tester_passes(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        prompts_per_run: list[dict[str, str]] = []
+
+        async def fake_run(self, on_status=None):
+            prompts_per_run.append({task.id: task.prompt for task in self._tasks})
+            if len(prompts_per_run) == 1:
+                return [
+                    FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                    FleetResult(task_id="developer", success=True, response=Response(content="Code"), duration_ms=200),
+                    FleetResult(
+                        task_id="tester",
+                        success=True,
+                        response=Response(content="Issues found: failing tests in auth"),
+                        duration_ms=150,
+                    ),
+                    FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+                ]
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan 2"), duration_ms=100),
+                FleetResult(
+                    task_id="developer",
+                    success=True,
+                    response=Response(content="Code fixed"),
+                    duration_ms=200,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed. No issues found."),
+                    duration_ms=150,
+                ),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs 2"), duration_ms=80),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Build something")
+
+        result = run(_test())
+        assert len(prompts_per_run) == 2
+        assert "Tester Feedback Loop (Iteration 1)" in prompts_per_run[1]["developer"]
+        assert "Issues found: failing tests in auth" in prompts_per_run[1]["developer"]
+        tester_result = next(ar for ar in result.agent_results if ar.agent.role == "tester")
+        assert "All tests passed" in tester_result.content
+
+    def test_run_feedback_loop_stops_after_max_iterations(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        prompts_per_run: list[dict[str, str]] = []
+
+        async def fake_run(self, on_status=None):
+            prompts_per_run.append({task.id: task.prompt for task in self._tasks})
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                FleetResult(task_id="developer", success=True, response=Response(content="Code"), duration_ms=200),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="Issues found: tests still failing"),
+                    duration_ms=150,
+                ),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Build something")
+
+        run(_test())
+        assert len(prompts_per_run) == 4  # initial + 3 feedback iterations
+        assert "Tester Feedback Loop (Iteration 3)" in prompts_per_run[3]["developer"]
+
+    def test_run_retries_failed_agent_once(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        run_task_ids: list[list[str]] = []
+
+        async def fake_run(self, on_status=None):
+            task_ids = [task.id for task in self._tasks]
+            run_task_ids.append(task_ids)
+            if task_ids == ["developer__retry"]:
+                return [
+                    FleetResult(
+                        task_id="developer__retry",
+                        success=True,
+                        response=Response(content="Code fixed on retry"),
+                        duration_ms=40,
+                    )
+                ]
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                FleetResult(
+                    task_id="developer",
+                    success=False,
+                    error=RuntimeError("compile error"),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed"),
+                    duration_ms=150,
+                ),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Build something")
+
+        result = run(_test())
+        developer_result = next(ar for ar in result.agent_results if ar.agent.role == "developer")
+        assert len(run_task_ids) == 2
+        assert run_task_ids[1] == ["developer__retry"]
+        assert developer_result.success is True
+        assert "Code fixed on retry" in developer_result.content
+
+    def test_run_does_not_retry_timeout_failures(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        run_task_ids: list[list[str]] = []
+
+        async def fake_run(self, on_status=None):
+            task_ids = [task.id for task in self._tasks]
+            run_task_ids.append(task_ids)
+            if len(task_ids) == 1 and task_ids[0].endswith("__retry"):
+                pytest.fail("Timeout failures should not be retried")
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                FleetResult(
+                    task_id="developer",
+                    success=False,
+                    error=asyncio.TimeoutError("timed out"),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed"),
+                    duration_ms=150,
+                ),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Build something")
+
+        result = run(_test())
+        developer_result = next(ar for ar in result.agent_results if ar.agent.role == "developer")
+        assert len(run_task_ids) == 1
+        assert developer_result.success is False
 
 
 # ===========================================================================
