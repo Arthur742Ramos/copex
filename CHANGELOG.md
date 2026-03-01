@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.16.0] - 2026-03-01
+
+### Features
+- Repo Map / Code Index — automatic codebase symbol indexing with relevance ranking
+- Persistent Project Memory — learns preferences and patterns across sessions
+- Smart Context Window Management — automatic token budgeting and turn summarization
+- Structured Diff Edits — search/replace and unified diff parsing with undo support
+- Approval Workflow & Change Preview — review/auto-approve/dry-run modes with risk assessment
+
+### Bug Fixes
+- Fixed unused typing.Any import in memory.py
+- Fixed squad team fallback determinism
+
 ## [2.14.0] - 2026-03-01
 
 ## [2.15.0] - 2026-03-01
