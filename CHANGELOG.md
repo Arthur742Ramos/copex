@@ -1,5 +1,12 @@
 # Changelog
 
+## v2.10.1 (2026-03-01)
+
+### Bug Fixes
+- Fixed Fleet/Squad not respecting `--use-cli` flag — agents were always using the SDK client instead of CopilotCLI subprocess, causing permission handler errors
+- `FleetCoordinator._task_config()` now propagates `use_cli` to per-task configs
+- Skip SDK session pool creation when `use_cli` is enabled
+
 ## v2.10.0 (2026-03-01)
 
 ### Features

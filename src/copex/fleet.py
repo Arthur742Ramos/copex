@@ -35,7 +35,7 @@ from pathlib import Path
 from typing import Any
 
 from copex.client import Copex, Response, SessionPool
-from copex.config import CopexConfig
+from copex.config import CopexConfig, make_client
 from copex.models import Model, ReasoningEffort
 
 logger = logging.getLogger(__name__)
@@ -992,9 +992,10 @@ class FleetCoordinator:
         work_available.set()  # Initial work available
 
         # Create shared client and session pool for efficiency (v1.9.0)
+        # Skip SDK client when use_cli is set — tasks use CopilotCLI instead
         client = None
         pool = None
-        if CopilotClient is not None:
+        if CopilotClient is not None and not self._base_config.use_cli:
             client = CopilotClient(self._base_config.to_client_options())
             await client.start()
             pool = SessionPool(
@@ -1083,8 +1084,15 @@ class FleetCoordinator:
                         if cancel_event.is_set():
                             raise asyncio.CancelledError("Fleet cancelled")
 
+                        # Use CLI client when use_cli is set
+                        if task_config.use_cli:
+                            async with make_client(task_config) as cli:
+                                response = await asyncio.wait_for(
+                                    cli.send(rendered_prompt),
+                                    timeout=task_timeout,
+                                )
                         # Use session pool if available (v1.9.0)
-                        if pool is not None and client is not None:
+                        elif pool is not None and client is not None:
                             async with pool.acquire(client, task_config) as session:
                                 copex = Copex(task_config)
                                 copex._started = True
@@ -1096,11 +1104,9 @@ class FleetCoordinator:
                                         timeout=task_timeout,
                                     )
                                 finally:
-                                    # Don't let Copex destroy the pooled session
                                     copex._session = None
                                     copex._client = None
                         else:
-                            # Fallback to creating new Copex per task
                             async with Copex(task_config) as copex:
                                 response = await asyncio.wait_for(
                                     copex.send(rendered_prompt),
@@ -1235,6 +1241,7 @@ class FleetCoordinator:
             mcp_config_file=task_mcp_config_file,
             working_directory=task_working_dir,
             retry=self._base_config.retry,
+            use_cli=self._base_config.use_cli,
         )
         return cfg
 
@@ -1785,10 +1792,12 @@ class Fleet:
                     if cancel_event.is_set():
                         raise asyncio.CancelledError("Fleet cancelled")
 
-                    async with Copex(task_config) as copex:
+                    # Use CLI client when use_cli is set
+                    client_factory = make_client if task_config.use_cli else Copex
+                    async with client_factory(task_config) as copex:
                         # Build streaming callback if needed
                         on_chunk = None
-                        if include_deltas:
+                        if include_deltas and not task_config.use_cli:
                             # Sync wrapper for the streaming callback
                             def on_chunk(chunk: Any) -> None:
                                 if hasattr(chunk, "delta") and chunk.delta:

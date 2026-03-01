@@ -1,6 +1,6 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
-__version__ = "2.10.0"
+__version__ = "2.10.1"
 
 # Re-export core components for convenience
 from .agent import AgentResult, AgentSession, AgentTurn
