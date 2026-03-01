@@ -255,6 +255,8 @@ class UIState:
     # Token usage tracking
     input_tokens: int | None = None
     output_tokens: int | None = None
+    context_used_tokens: int | None = None
+    context_budget_tokens: int | None = None
 
     @property
     def elapsed(self) -> float:
@@ -847,6 +849,12 @@ class CopexUI:
         self.state.output_tokens = output_tokens
         self._touch()
 
+    def set_context_usage(self, used_tokens: int | None, budget_tokens: int | None) -> None:
+        """Set smart-context usage counts."""
+        self.state.context_used_tokens = used_tokens
+        self.state.context_budget_tokens = budget_tokens
+        self._touch()
+
     def _touch(self) -> None:
         """Update last activity timestamp."""
         self.state.last_update = time.time()
@@ -885,6 +893,21 @@ class CopexUI:
             total_text = Text()
             total_text.append(f"Total: {inp + out:,}", style=Theme.MUTED)
             summary.add_row(token_left, total_text)
+
+        if (
+            self.state.context_used_tokens is not None
+            and self.state.context_budget_tokens is not None
+        ):
+            context_left = Text()
+            context_left.append("🧠 ", style=Theme.INFO)
+            context_left.append("Context: ", style=Theme.MUTED)
+            context_left.append(f"{self.state.context_used_tokens:,}", style=Theme.INFO)
+            context_left.append(" / ", style=Theme.MUTED)
+            context_left.append(f"{self.state.context_budget_tokens:,}", style=Theme.INFO)
+
+            context_right = Text()
+            context_right.append("used / budget", style=Theme.MUTED)
+            summary.add_row(context_left, context_right)
 
         # Third row: tool calls (if any)
         if self.state.tool_calls:

@@ -1238,6 +1238,8 @@ class FleetCoordinator:
             instructions_file=instructions_file,
             available_tools=self._base_config.available_tools,
             excluded_tools=task_excluded,
+            approval_mode=self._base_config.approval_mode,
+            audit=self._base_config.audit,
             mcp_servers=task_mcp_servers,
             mcp_config_file=task_mcp_config_file,
             working_directory=task_working_dir,

@@ -21,6 +21,28 @@ _REPO_MAP_RESERVED_TOKENS = 10_000
 _MEMORY_RESERVED_TOKENS = 5_000
 _TOOLS_RESERVED_TOKENS = 5_000
 
+DEFAULT_CONTEXT_BUDGET_TOKENS = 128_000
+
+
+@dataclass(frozen=True)
+class ModelContextBudget:
+    """Context window budget definition for a model family."""
+
+    model_family: str
+    total_tokens: int
+
+
+SPECIAL_MODEL_CONTEXT_BUDGETS: tuple[ModelContextBudget, ...] = (
+    ModelContextBudget(model_family="claude-opus-4.6-1m", total_tokens=1_000_000),
+)
+MODEL_CONTEXT_BUDGETS: tuple[ModelContextBudget, ...] = (
+    ModelContextBudget(model_family="claude", total_tokens=200_000),
+    ModelContextBudget(model_family="gpt-5", total_tokens=200_000),
+    ModelContextBudget(model_family="gpt-4", total_tokens=128_000),
+    ModelContextBudget(model_family="gpt", total_tokens=128_000),
+    ModelContextBudget(model_family="gemini", total_tokens=1_000_000),
+)
+
 
 def resolve_model_context_budget(model: str, override: int | None = None) -> int:
     """Resolve total context budget for a model family."""
@@ -28,19 +50,18 @@ def resolve_model_context_budget(model: str, override: int | None = None) -> int
         return max(1, int(override))
 
     model_id = model.lower()
-    if "claude-opus-4.6-1m" in model_id:
-        return 1_000_000
-    if model_id.startswith("claude"):
-        return 200_000
-    if model_id.startswith("gpt-4"):
-        return 128_000
-    if model_id.startswith("gpt-5"):
-        return 200_000
-    if model_id.startswith("gpt"):
-        return 128_000
-    if model_id.startswith("gemini"):
-        return 1_000_000
-    return 128_000
+    normalized_model_id = model_id.rsplit("/", maxsplit=1)[-1]
+
+    for budget in SPECIAL_MODEL_CONTEXT_BUDGETS:
+        if budget.model_family in model_id:
+            return budget.total_tokens
+
+    for budget in MODEL_CONTEXT_BUDGETS:
+        if model_id.startswith(budget.model_family) or normalized_model_id.startswith(
+            budget.model_family
+        ):
+            return budget.total_tokens
+    return DEFAULT_CONTEXT_BUDGET_TOKENS
 
 
 class TokenCounter:
@@ -73,6 +94,18 @@ class TokenCounter:
 
 
 @dataclass
+class TurnTokenUsage:
+    """Token usage for a single conversation turn."""
+
+    user_tokens: int
+    assistant_tokens: int
+
+    @property
+    def total_tokens(self) -> int:
+        return self.user_tokens + self.assistant_tokens
+
+
+@dataclass
 class ConversationTurn:
     """A user+assistant exchange tracked by the context manager."""
 
@@ -83,8 +116,15 @@ class ConversationTurn:
     assistant_tokens: int
 
     @property
+    def token_usage(self) -> TurnTokenUsage:
+        return TurnTokenUsage(
+            user_tokens=self.user_tokens,
+            assistant_tokens=self.assistant_tokens,
+        )
+
+    @property
     def total_tokens(self) -> int:
-        return self.user_tokens + self.assistant_tokens
+        return self.token_usage.total_tokens
 
     @property
     def text(self) -> str:

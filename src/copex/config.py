@@ -99,6 +99,7 @@ def find_copilot_cli() -> str | None:
 
 UI_THEMES = {"default", "midnight", "mono", "sunset"}
 UI_DENSITIES = {"compact", "extended"}
+APPROVAL_MODES = {"auto-approve", "approve", "manual", "deny-all", "policy-based", "dry-run"}
 
 
 class RetryConfig(BaseModel):
@@ -243,6 +244,17 @@ class CopexConfig(BaseModel):
     excluded_tools: list[str] = Field(
         default_factory=list, description="Blacklist of tools to disable"
     )
+    approval_mode: str = Field(
+        default="auto-approve",
+        description=(
+            "File change approval mode "
+            "(auto-approve, approve/manual, deny-all, policy-based, dry-run)"
+        ),
+    )
+    audit: bool = Field(
+        default=False,
+        description="Log file change decisions to .copex/audit.log",
+    )
 
     # UI options
     ui_theme: str = Field(
@@ -329,6 +341,15 @@ class CopexConfig(BaseModel):
             valid = ", ".join(sorted(UI_DENSITIES))
             raise ValueError(f"Invalid ui_density. Valid: {valid}")
         return value
+
+    @field_validator("approval_mode")
+    @classmethod
+    def _validate_approval_mode(cls, value: str) -> str:
+        normalized = value.strip().lower()
+        if normalized not in APPROVAL_MODES:
+            valid = ", ".join(sorted(APPROVAL_MODES))
+            raise ValueError(f"Invalid approval_mode. Valid: {valid}")
+        return normalized
 
     @classmethod
     def from_file(cls, path: str | Path) -> "CopexConfig":

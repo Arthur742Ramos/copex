@@ -37,6 +37,7 @@ class ParallelToolConfig:
     fail_fast: bool = False  # Stop on first error
     retry_on_error: bool = True  # Retry failed tools
     max_retries: int = 2  # Max retries per tool
+    approval_workflow: Any | None = None  # Optional ApprovalWorkflow for write operations
 
 
 class ToolRegistry:
@@ -140,12 +141,40 @@ class ToolRegistry:
 
         start = time.time()
         timeout = timeout or self.config.timeout
+        approval_reviews: list[Any] = []
+
+        review_tool_call = getattr(self.config.approval_workflow, "review_tool_call", None)
+        if callable(review_tool_call):
+            approval_reviews = list(review_tool_call(name, params))
+            if approval_reviews and all(
+                not bool(getattr(review, "apply_change", True)) for review in approval_reviews
+            ):
+                skipped = [
+                    str(getattr(review.preview, "file_path", "change"))
+                    for review in approval_reviews
+                    if getattr(review, "preview", None) is not None
+                ]
+                target = ", ".join(skipped) if skipped else "tool call"
+                return ToolResult(
+                    name=name,
+                    success=True,
+                    result=f"Skipped by approval workflow: {target}",
+                )
 
         try:
             result = await asyncio.wait_for(
                 tool(**params),
                 timeout=timeout,
             )
+            apply_post = getattr(self.config.approval_workflow, "apply_post_tool_decisions", None)
+            if callable(apply_post) and approval_reviews:
+                post_messages = list(apply_post(approval_reviews))
+                if post_messages:
+                    suffix = "; ".join(post_messages)
+                    if isinstance(result, str):
+                        result = f"{result}\n{suffix}"
+                    else:
+                        result = {"result": result, "approval": post_messages}
             duration = (time.time() - start) * 1000
 
             return ToolResult(

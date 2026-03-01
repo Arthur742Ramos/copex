@@ -4,11 +4,12 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
-from typing import Any, Callable, Iterable, Sequence
+from typing import Any
 
 from rich.console import Console, Group
 from rich.panel import Panel
@@ -19,7 +20,9 @@ class ApprovalMode(str, Enum):
     """Modes controlling how file changes are handled."""
 
     AUTO_APPROVE = "auto-approve"
-    APPROVE = "approve"
+    MANUAL = "manual"
+    DENY_ALL = "deny-all"
+    POLICY_BASED = "policy-based"
     DRY_RUN = "dry-run"
 
 
@@ -29,6 +32,23 @@ class ApprovalAction(str, Enum):
     APPROVE = "approve"
     REJECT = "reject"
     EDIT = "edit"
+
+
+class DecisionOutcome(str, Enum):
+    """Mode-level decision outcome before per-file action."""
+
+    APPROVE = "approve"
+    REJECT = "reject"
+    REQUIRE_INPUT = "require-input"
+
+
+@dataclass
+class ApprovalState:
+    """Mutable approval state for one review session."""
+
+    mode: ApprovalMode
+    approve_all: bool = False
+    reject_all: bool = False
 
 
 @dataclass(frozen=True)
@@ -186,8 +206,15 @@ def normalize_approval_mode(value: ApprovalMode | str | None) -> ApprovalMode:
         "auto": ApprovalMode.AUTO_APPROVE.value,
         "auto-approve": ApprovalMode.AUTO_APPROVE.value,
         "auto_approve": ApprovalMode.AUTO_APPROVE.value,
-        "approve": ApprovalMode.APPROVE.value,
-        "interactive": ApprovalMode.APPROVE.value,
+        "approve": ApprovalMode.MANUAL.value,
+        "interactive": ApprovalMode.MANUAL.value,
+        "manual": ApprovalMode.MANUAL.value,
+        "deny": ApprovalMode.DENY_ALL.value,
+        "deny-all": ApprovalMode.DENY_ALL.value,
+        "deny_all": ApprovalMode.DENY_ALL.value,
+        "policy": ApprovalMode.POLICY_BASED.value,
+        "policy-based": ApprovalMode.POLICY_BASED.value,
+        "policy_based": ApprovalMode.POLICY_BASED.value,
         "dry": ApprovalMode.DRY_RUN.value,
         "dry-run": ApprovalMode.DRY_RUN.value,
         "dry_run": ApprovalMode.DRY_RUN.value,
@@ -494,16 +521,24 @@ class ApprovalWorkflow:
         console: Console | None = None,
         input_func: Callable[[str], str] | None = None,
         edit_func: Callable[[Path, str], str] | None = None,
+        policy_func: Callable[[ChangePreview], DecisionOutcome | ApprovalAction | bool | str]
+        | None = None,
     ):
-        self.mode = normalize_approval_mode(mode)
+        normalized_mode = normalize_approval_mode(mode)
+        if normalized_mode == ApprovalMode.POLICY_BASED and policy_func is None:
+            raise ValueError("policy_func is required when approval mode is policy-based")
+        self.state = ApprovalState(mode=normalized_mode)
         self.model = model
         self.audit_enabled = audit_enabled
         self._audit = audit_logger or AuditLogger()
         self._console = console or Console()
         self._input = input_func or input
         self._edit = edit_func
-        self._approve_all = False
-        self._reject_all = False
+        self._policy = policy_func
+
+    @property
+    def mode(self) -> ApprovalMode:
+        return self.state.mode
 
     def _colorize_diff(self, unified_diff: str) -> Text:
         text = Text()
@@ -542,32 +577,78 @@ class ApprovalWorkflow:
             )
         )
 
-    def _decide_action(self, preview: ChangePreview) -> ApprovalAction:
-        if self.mode == ApprovalMode.AUTO_APPROVE:
-            return ApprovalAction.APPROVE
-        if self.mode == ApprovalMode.DRY_RUN:
-            return ApprovalAction.REJECT
-        if self._approve_all:
-            return ApprovalAction.APPROVE
-        if self._reject_all:
-            return ApprovalAction.REJECT
-
+    def _prompt_action(self, preview: ChangePreview) -> ApprovalAction:
         prompt = (
             f"Approve change for {preview.file_path}? "
             "[y]es/[n]o/[e]dit/[a]pprove-all/[r]eject-all: "
         )
         answer = self._input(prompt).strip().lower()
         if answer in {"a", "all", "approve-all"}:
-            self._approve_all = True
+            self.state.approve_all = True
             return ApprovalAction.APPROVE
-        if answer in {"r", "reject-all"}:
-            self._reject_all = True
+        if answer in {"r", "reject-all", "deny-all"}:
+            self.state.reject_all = True
             return ApprovalAction.REJECT
         if answer in {"e", "edit"}:
             return ApprovalAction.EDIT
         if answer in {"n", "no", "reject"}:
             return ApprovalAction.REJECT
         return ApprovalAction.APPROVE
+
+    def _coerce_policy_outcome(
+        self, value: DecisionOutcome | ApprovalAction | bool | str
+    ) -> DecisionOutcome:
+        if isinstance(value, DecisionOutcome):
+            return value
+        if isinstance(value, ApprovalAction):
+            if value == ApprovalAction.APPROVE:
+                return DecisionOutcome.APPROVE
+            if value == ApprovalAction.REJECT:
+                return DecisionOutcome.REJECT
+            return DecisionOutcome.REQUIRE_INPUT
+        if isinstance(value, bool):
+            return DecisionOutcome.APPROVE if value else DecisionOutcome.REJECT
+
+        normalized = str(value).strip().lower()
+        mapping = {
+            "approve": DecisionOutcome.APPROVE,
+            "allow": DecisionOutcome.APPROVE,
+            "reject": DecisionOutcome.REJECT,
+            "deny": DecisionOutcome.REJECT,
+            "manual": DecisionOutcome.REQUIRE_INPUT,
+            "review": DecisionOutcome.REQUIRE_INPUT,
+            "prompt": DecisionOutcome.REQUIRE_INPUT,
+            "escalate": DecisionOutcome.REQUIRE_INPUT,
+        }
+        mapped = mapping.get(normalized)
+        if mapped is None:
+            raise ValueError(f"Unsupported policy decision: {value}")
+        return mapped
+
+    def _decide_outcome(self, preview: ChangePreview) -> DecisionOutcome:
+        if self.state.approve_all:
+            return DecisionOutcome.APPROVE
+        if self.state.reject_all:
+            return DecisionOutcome.REJECT
+        if self.mode == ApprovalMode.AUTO_APPROVE:
+            return DecisionOutcome.APPROVE
+        if self.mode in {ApprovalMode.DRY_RUN, ApprovalMode.DENY_ALL}:
+            return DecisionOutcome.REJECT
+        if self.mode == ApprovalMode.POLICY_BASED:
+            if self._policy is None:
+                raise ValueError("policy_func is required when approval mode is policy-based")
+            return self._coerce_policy_outcome(self._policy(preview))
+        if self.mode == ApprovalMode.MANUAL:
+            return DecisionOutcome.REQUIRE_INPUT
+        raise ValueError(f"Unsupported approval mode: {self.mode.value}")
+
+    def _decide_action(self, preview: ChangePreview) -> ApprovalAction:
+        outcome = self._decide_outcome(preview)
+        if outcome == DecisionOutcome.APPROVE:
+            return ApprovalAction.APPROVE
+        if outcome == DecisionOutcome.REJECT:
+            return ApprovalAction.REJECT
+        return self._prompt_action(preview)
 
     def _edited_content(self, change: ProposedFileChange, fallback: str) -> str:
         if self._edit is not None:

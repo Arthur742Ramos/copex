@@ -26,6 +26,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from copex import __version__
+from copex.approval import AuditLogger, normalize_approval_mode
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig, load_last_model, make_client, save_last_model
 from copex.edits import apply_edit_text, list_undo_history, undo_last_edit_batch
@@ -107,7 +108,7 @@ _copex_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="chat plan ralph fleet council interactive map render models skills status config init login logout tui completions stats diff squad agent edit undo"
+    opts="chat plan ralph fleet council interactive map render models skills status config init login logout tui completions stats diff squad audit agent edit undo"
 
     case "${prev}" in
         -m|--model)
@@ -160,6 +161,7 @@ _copex() {
         'completions:Generate shell completions'
         'stats:Show run statistics'
         'diff:Show changes since last run'
+        'audit:Show approval audit log'
         'edit:Apply structured edits to files'
         'undo:Undo the latest edit batch'
     )
@@ -205,7 +207,7 @@ _copex "$@"
 FISH_COMPLETION = """
 # copex fish completion
 
-set -l commands chat plan ralph fleet council interactive map render models skills status config init login logout tui completions stats diff squad agent edit undo
+set -l commands chat plan ralph fleet council interactive map render models skills status config init login logout tui completions stats diff squad audit agent edit undo
 set -l models claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini
 set -l reasoning low medium high xhigh
 
@@ -253,6 +255,32 @@ def _parse_exclude_tools(value: str | None) -> list[str]:
     return [item.strip() for item in value.split(",") if item.strip()]
 
 
+def _apply_approval_flags(
+    config: CopexConfig,
+    *,
+    auto_approve: bool = False,
+    approve: bool = False,
+    dry_run: bool = False,
+    audit: bool = False,
+    default_auto: bool = False,
+) -> None:
+    selected = int(auto_approve) + int(approve) + int(dry_run)
+    if selected > 1:
+        raise typer.BadParameter("Use only one of --auto-approve, --approve, or --dry-run")
+
+    if dry_run:
+        config.approval_mode = "dry-run"
+    elif approve:
+        config.approval_mode = "approve"
+    elif auto_approve or default_auto:
+        config.approval_mode = "auto-approve"
+    else:
+        config.approval_mode = normalize_approval_mode(config.approval_mode).value
+
+    if audit:
+        config.audit = True
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -290,6 +318,18 @@ def main(
         bool,
         typer.Option("--no-squad", help="Disable squad mode; use single-agent chat instead"),
     ] = False,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
+    ] = False,
+    approve: Annotated[
+        bool, typer.Option("--approve", help="Prompt before each file change")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show file change diffs without applying them")
+    ] = False,
+    audit: Annotated[
+        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
+    ] = False,
 ) -> None:
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops.
 
@@ -318,6 +358,14 @@ def main(
                 if warning:
                     console.print(f"[yellow]{warning}[/yellow]")
                 config.reasoning_effort = normalized_effort
+                _apply_approval_flags(
+                    config,
+                    auto_approve=auto_approve,
+                    approve=approve,
+                    dry_run=dry_run,
+                    audit=audit,
+                    default_auto=not no_squad,
+                )
 
                 if no_squad:
                     # Single-agent chat mode
@@ -325,6 +373,9 @@ def main(
                 else:
                     # Squad mode (default): Lead → Developer + Tester
                     asyncio.run(_run_squad(config, prompt, json_output=non_interactive))
+            except typer.BadParameter as e:
+                console.print(f"[red]Error: {e}[/red]")
+                raise typer.Exit(1) from None
             except ValueError:
                 console.print(f"[red]Invalid model: {effective_model}[/red]")
                 raise typer.Exit(1) from None
@@ -515,6 +566,10 @@ def chat(
         str | None, typer.Argument(help="Prompt to send (or read from stdin)")
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
+    context_budget: Annotated[
+        int | None,
+        typer.Option("--context-budget", help="Override context window budget in tokens"),
+    ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
@@ -571,6 +626,18 @@ def chat(
         bool,
         typer.Option("--use-cli", help="Use CLI subprocess instead of SDK (supports all models)"),
     ] = False,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
+    ] = False,
+    approve: Annotated[
+        bool, typer.Option("--approve", help="Prompt before each file change")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show file change diffs without applying them")
+    ] = False,
+    audit: Annotated[
+        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
+    ] = False,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors."""
     # Load config: explicit flag wins; otherwise auto-load from ~/.config/copex/config.toml if present
@@ -605,6 +672,8 @@ def chat(
 
     config.retry.max_retries = max_retries
     config.streaming = not no_stream
+    if context_budget is not None:
+        config.context_budget = context_budget
     if use_cli:
         config.use_cli = True
     if ui_theme:
@@ -619,6 +688,17 @@ def chat(
         config.disabled_skills.extend(disable_skill)
     if no_auto_skills:
         config.auto_discover_skills = False
+    try:
+        _apply_approval_flags(
+            config,
+            auto_approve=auto_approve,
+            approve=approve,
+            dry_run=dry_run,
+            audit=audit,
+        )
+    except typer.BadParameter as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
 
     # Handle stdin flag
     if stdin:
@@ -702,6 +782,8 @@ async def _run_chat(
                 result["reasoning"] = response.reasoning
             if response.usage:
                 result["usage"] = response.usage
+            if response.context_usage:
+                result["context_usage"] = response.context_usage
             if response.cost is not None:
                 result["cost"] = response.cost
             output_text = json.dumps(result, indent=2)
@@ -731,6 +813,9 @@ async def _run_chat(
                 "usage": response.usage,
                 "prompt_tokens": response.prompt_tokens,
                 "completion_tokens": response.completion_tokens,
+                "context_usage": response.context_usage,
+                "context_used_tokens": response.context_used_tokens,
+                "context_budget_tokens": response.context_budget_tokens,
             }
 
             try:
@@ -868,6 +953,7 @@ async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> 
             ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
             ui.set_usage(response.prompt_tokens, response.completion_tokens)
+            ui.set_context_usage(response.context_used_tokens, response.context_budget_tokens)
             final_content = final_message
         finally:
             refresh_stop.set()
@@ -1012,6 +1098,18 @@ def tui(
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
+    ] = False,
+    approve: Annotated[
+        bool, typer.Option("--approve", help="Prompt before each file change")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show file change diffs without applying them")
+    ] = False,
+    audit: Annotated[
+        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
+    ] = False,
 ) -> None:
     """Start the Copex TUI."""
     from copex.tui import run_tui
@@ -1025,6 +1123,16 @@ def tui(
             console.print(f"[yellow]{warning}[/yellow]")
 
         config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
+        _apply_approval_flags(
+            config,
+            auto_approve=auto_approve,
+            approve=approve,
+            dry_run=dry_run,
+            audit=audit,
+        )
+    except typer.BadParameter as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
@@ -1059,6 +1167,8 @@ def init(
             "exponential_base": 2.0,
             "retry_on_errors": ["500", "502", "503", "504", "Internal Server Error", "rate limit"],
         },
+        "approval_mode": "auto-approve",
+        "audit": False,
         "ui_theme": "default",
         "ui_density": "extended",
     }
@@ -1094,6 +1204,18 @@ def interactive(
     no_auto_skills: Annotated[
         bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
     ] = False,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
+    ] = False,
+    approve: Annotated[
+        bool, typer.Option("--approve", help="Prompt before each file change")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show file change diffs without applying them")
+    ] = False,
+    audit: Annotated[
+        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
+    ] = False,
 ) -> None:
     """Start an interactive chat session."""
     effective_model = model or _DEFAULT_MODEL.value
@@ -1117,6 +1239,16 @@ def interactive(
             config.disabled_skills.extend(disable_skill)
         if no_auto_skills:
             config.auto_discover_skills = False
+        _apply_approval_flags(
+            config,
+            auto_approve=auto_approve,
+            approve=approve,
+            dry_run=dry_run,
+            audit=audit,
+        )
+    except typer.BadParameter as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
@@ -1397,6 +1529,7 @@ async def _stream_response_interactive(
             ui.set_final_content(final_message, final_reasoning)
             ui.state.retries = response.retries
             ui.set_usage(response.prompt_tokens, response.completion_tokens)
+            ui.set_context_usage(response.context_used_tokens, response.context_budget_tokens)
         finally:
             refresh_stop.set()
             try:
@@ -1759,6 +1892,10 @@ def plan_command(
         typer.Option("--visualize", "-V", help="Show plan visualization (ascii, mermaid, tree)"),
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
+    context_budget: Annotated[
+        int | None,
+        typer.Option("--context-budget", help="Override context window budget in tokens"),
+    ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
@@ -1773,6 +1910,22 @@ def plan_command(
     ] = False,
     dry_run: Annotated[
         bool, typer.Option("--dry-run", help="Generate and display the plan without executing")
+    ] = False,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
+    ] = False,
+    approve: Annotated[
+        bool, typer.Option("--approve", help="Prompt before each file change")
+    ] = False,
+    approval_dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--approval-dry-run",
+            help="Show file change diffs without applying them during execution",
+        ),
+    ] = False,
+    audit: Annotated[
+        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
 ) -> None:
     """
@@ -1801,6 +1954,8 @@ def plan_command(
             console.print(f"[yellow]{warning}[/yellow]")
 
         config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
+        if context_budget is not None:
+            config.context_budget = context_budget
 
         # Skills options
         if skill_dir:
@@ -1809,6 +1964,16 @@ def plan_command(
             config.disabled_skills.extend(disable_skill)
         if no_auto_skills:
             config.auto_discover_skills = False
+        _apply_approval_flags(
+            config,
+            auto_approve=auto_approve,
+            approve=approve,
+            dry_run=approval_dry_run,
+            audit=audit,
+        )
+    except typer.BadParameter as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
@@ -2342,6 +2507,10 @@ def fleet_command(
         bool, typer.Option("--fail-fast", help="Stop all tasks on first failure")
     ] = False,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
+    context_budget: Annotated[
+        int | None,
+        typer.Option("--context-budget", help="Override context window budget in tokens"),
+    ] = None,
     reasoning: Annotated[
         str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
     ] = ReasoningEffort.HIGH.value,
@@ -2395,6 +2564,23 @@ def fleet_command(
             help="Preview fleet actions without executing",
         ),
     ] = False,
+    approval_dry_run: Annotated[
+        bool,
+        typer.Option(
+            "--approval-dry-run",
+            is_flag=True,
+            help="Show file change diffs without applying them during execution",
+        ),
+    ] = False,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
+    ] = False,
+    approve: Annotated[
+        bool, typer.Option("--approve", help="Prompt before each file change")
+    ] = False,
+    audit: Annotated[
+        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
+    ] = False,
     commit_msg: Annotated[
         str | None,
         typer.Option(
@@ -2446,11 +2632,24 @@ def fleet_command(
             console.print(f"[yellow]{warning}[/yellow]")
 
         config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
+        if context_budget is not None:
+            config.context_budget = context_budget
         if mcp_config:
             if not mcp_config.exists():
                 console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
                 raise typer.Exit(1) from None
             config.mcp_config_file = str(mcp_config)
+        _apply_approval_flags(
+            config,
+            auto_approve=auto_approve,
+            approve=approve,
+            dry_run=approval_dry_run,
+            audit=audit,
+            default_auto=True,
+        )
+    except typer.BadParameter as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
     except ValueError as e:
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
@@ -3722,6 +3921,18 @@ def agent_command(
         Path | None, typer.Option("--config", "-c", help="Config file path")
     ] = None,
     stdin: Annotated[bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")] = False,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
+    ] = False,
+    approve: Annotated[
+        bool, typer.Option("--approve", help="Prompt before each file change")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show file change diffs without applying them")
+    ] = False,
+    audit: Annotated[
+        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
+    ] = False,
 ) -> None:
     """Run an agent loop: prompt → tool calls → respond → repeat.
 
@@ -3962,6 +4173,18 @@ def squad_command(
 
     if use_cli:
         config.use_cli = True
+    try:
+        _apply_approval_flags(
+            config,
+            auto_approve=auto_approve,
+            approve=approve,
+            dry_run=dry_run,
+            audit=audit,
+            default_auto=True,
+        )
+    except typer.BadParameter as e:
+        console.print(f"[red]Error: {e}[/red]")
+        raise typer.Exit(1) from None
 
     if subcommand == "init":
         if len(raw_args) != 1:
@@ -4372,6 +4595,54 @@ def stats_command() -> None:
     successes = sum(1 for r in today_runs if r.get("success", True))
     _val("Success rate", f"{successes}/{len(today_runs)}", "green" if successes == len(today_runs) else "red")
     console.print()
+
+
+# ──────────────────────────────────────────────────────────────────────
+# copex audit
+# ──────────────────────────────────────────────────────────────────────
+
+@app.command("audit")
+def audit_command(
+    action: Annotated[
+        str, typer.Argument(help="Action to perform (currently only: show)")
+    ] = "show",
+    last: Annotated[
+        int, typer.Option("--last", help="Show the last N audit entries")
+    ] = 10,
+    file: Annotated[
+        str | None, typer.Option("--file", help="Filter by file path")
+    ] = None,
+) -> None:
+    """Show approval audit log entries."""
+    if action.lower() != "show":
+        console.print(f"[red]Unknown audit action: {action}[/red]")
+        console.print("[red]Usage: copex audit show [--last N] [--file PATH][/red]")
+        raise typer.Exit(1) from None
+
+    entries = AuditLogger().query(last=max(0, last), file=file)
+    if not entries:
+        console.print("[yellow]No audit entries found.[/yellow]")
+        return
+
+    from rich.table import Table
+
+    table = Table(title="Approval Audit Log", expand=True)
+    table.add_column("Timestamp", style="dim", no_wrap=True)
+    table.add_column("Mode", style="cyan", no_wrap=True)
+    table.add_column("Model", style="magenta", no_wrap=True)
+    table.add_column("File", style="white")
+    table.add_column("Summary", style="green")
+    table.add_column("Risk", style="yellow")
+    for entry in entries:
+        table.add_row(
+            entry.timestamp,
+            entry.mode,
+            entry.model,
+            entry.file,
+            entry.diff_summary,
+            ", ".join(entry.risk_flags) if entry.risk_flags else "low",
+        )
+    console.print(table)
 
 
 # ──────────────────────────────────────────────────────────────────────

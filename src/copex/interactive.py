@@ -135,6 +135,8 @@ class StreamState:
     retries: int = 0
     input_tokens: int | None = None
     output_tokens: int | None = None
+    context_used_tokens: int | None = None
+    context_budget_tokens: int | None = None
     model: str = ""
 
     # Animation state
@@ -384,6 +386,12 @@ def _build_stats_line(state: StreamState) -> Text:
         inp = state.input_tokens or 0
         out = state.output_tokens or 0
         text.append(f"{inp:,} in, {out:,} out", style=Colors.TEXT_MUTED)
+    if state.context_used_tokens is not None and state.context_budget_tokens is not None:
+        text.append("  Context: ", style=Colors.TEXT_DIM)
+        text.append(
+            f"{state.context_used_tokens:,}/{state.context_budget_tokens:,}",
+            style=Colors.TEXT_MUTED,
+        )
 
     # Tool calls
     if state.tool_calls:
@@ -674,6 +682,8 @@ async def _stream_message(console: Console, client: Copex, prompt: str) -> None:
                 state.reasoning = response.reasoning
             state.input_tokens = response.prompt_tokens
             state.output_tokens = response.completion_tokens
+            state.context_used_tokens = response.context_used_tokens
+            state.context_budget_tokens = response.context_budget_tokens
             state.retries = response.retries
             state.phase = "done"
         except Exception as e:  # Catch-all: show error and continue interactive session
