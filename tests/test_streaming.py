@@ -194,3 +194,64 @@ class TestResponse:
         assert r.retries == 0
         assert r.auto_continues == 0
         assert r.raw_events == []
+
+    def test_server_model_and_cost(self):
+        r = Response(content="hi", server_model="gpt-5", cost=0.01)
+        assert r.server_model == "gpt-5"
+        assert r.cost == 0.01
+
+
+# ── Edge Cases ───────────────────────────────────────────────────────
+
+
+class TestStreamingEdgeCases:
+    def test_record_chunk_empty_delta(self):
+        """Empty string delta should not add bytes."""
+        m = StreamingMetrics()
+        m.record_chunk(StreamChunk(type="message", delta=""))
+        assert m.total_chunks == 1
+        assert m.total_bytes == 0
+
+    def test_record_chunk_system_type(self):
+        """System chunks should not count as message/reasoning/tool."""
+        m = StreamingMetrics()
+        m.record_chunk(StreamChunk(type="system", delta="info"))
+        assert m.total_chunks == 1
+        assert m.message_chunks == 0
+        assert m.reasoning_chunks == 0
+        assert m.tool_chunks == 0
+
+    def test_batcher_empty_delta_not_batched(self):
+        """Chunks with empty delta are passed through, not batched."""
+        received = []
+        batcher = ChunkBatcher(callback=received.append)
+        chunk = StreamChunk(type="message", delta="")
+        batcher.push(chunk)
+        # Empty delta is not "is_delta", so passed through directly
+        assert len(received) == 1
+
+    def test_metrics_multiple_chunks_timing(self):
+        """Verify first/last chunk times are tracked correctly."""
+        m = StreamingMetrics(_start_time=time.monotonic())
+        m.record_chunk(StreamChunk(type="message", delta="a"))
+        first = m.first_chunk_time
+        time.sleep(0.01)
+        m.record_chunk(StreamChunk(type="message", delta="b"))
+        assert m.first_chunk_time == first  # Should not change
+        assert m.last_chunk_time > first
+        assert m.total_chunks == 2
+
+    def test_response_usage_both_none(self):
+        """Both tokens None should yield None usage."""
+        r = Response(content="x", prompt_tokens=None, completion_tokens=None)
+        assert r.usage is None
+
+    def test_chunks_per_second_no_first_chunk(self):
+        """No first chunk should return 0."""
+        m = StreamingMetrics(last_chunk_time=time.monotonic(), total_chunks=5)
+        assert m.chunks_per_second == 0.0
+
+    def test_chunks_per_second_no_last_chunk(self):
+        """No last chunk should return 0."""
+        m = StreamingMetrics(first_chunk_time=time.monotonic(), total_chunks=5)
+        assert m.chunks_per_second == 0.0

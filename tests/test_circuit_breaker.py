@@ -245,3 +245,86 @@ def test_default_fallback_chains_exist() -> None:
         assert isinstance(key, str)
         assert isinstance(chain, list)
         assert all(isinstance(m, str) for m in chain)
+
+
+# ---------------------------------------------------------------------------
+# Edge cases
+# ---------------------------------------------------------------------------
+
+
+class TestSlidingWindowBreakerEdgeCases:
+    """Edge case tests for SlidingWindowBreaker."""
+
+    def test_check_resets_window_on_half_open(self) -> None:
+        """After cooldown, check() should clear the window for fresh tracking."""
+        b = SlidingWindowBreaker(window_size=4, threshold=0.5, cooldown_seconds=0.01)
+        b.record_failure()
+        b.record_failure()
+        assert b.is_open
+        time.sleep(0.02)
+        b.check()  # Transition to half-open → closed
+        assert len(b._window) == 0
+        assert b.failure_rate == 0.0
+
+    def test_threshold_exactly_one(self) -> None:
+        """Threshold of 1.0 means only opens at 100% failure rate."""
+        b = SlidingWindowBreaker(window_size=4, threshold=1.0, cooldown_seconds=100)
+        b.record_failure()
+        b.record_failure()
+        b.record_success()  # Not 100%
+        assert not b.is_open
+        b.record_failure()
+        # Still not 100%: 3/4 = 75%
+        assert not b.is_open
+
+    def test_window_size_one(self) -> None:
+        """Minimum window size of 1 should work correctly."""
+        b = SlidingWindowBreaker(window_size=1, threshold=1.0, cooldown_seconds=100)
+        b.record_failure()
+        assert b.is_open
+
+    def test_rapid_success_failure_alternation(self) -> None:
+        """Alternating success/failure should maintain correct rate."""
+        b = SlidingWindowBreaker(window_size=4, threshold=0.5, cooldown_seconds=100)
+        for _ in range(10):
+            b.record_success()
+            b.record_failure()
+        assert b.failure_rate == 0.5
+
+    def test_multiple_resets(self) -> None:
+        """Multiple resets should be safe."""
+        b = SlidingWindowBreaker(window_size=2, threshold=0.5, cooldown_seconds=100)
+        b.reset()
+        b.reset()
+        assert not b.is_open
+        assert b.failure_rate == 0.0
+
+
+class TestModelAwareBreakerEdgeCases:
+    """Edge case tests for ModelAwareBreaker."""
+
+    def test_reset_nonexistent_model(self) -> None:
+        """Resetting a model that was never used should be safe."""
+        mab = ModelAwareBreaker()
+        mab.reset("nonexistent")  # Should not raise
+
+    def test_get_status_empty(self) -> None:
+        """Status of empty breaker should be empty dict."""
+        mab = ModelAwareBreaker()
+        assert mab.get_status() == {}
+
+    def test_fallback_skips_open_models(self) -> None:
+        """Fallback should skip multiple open models."""
+        mab = ModelAwareBreaker(window_size=2, threshold=0.5, cooldown_seconds=100)
+        mab.record_failure("m-a")
+        mab.record_failure("m-a")
+        mab.record_failure("m-b")
+        mab.record_failure("m-b")
+        result = mab.get_available_model("m-a", ["m-b", "m-c"])
+        assert result == "m-c"
+
+    def test_check_creates_breaker_lazily(self) -> None:
+        """Checking a new model should create its breaker."""
+        mab = ModelAwareBreaker()
+        mab.check("new-model")  # Should not raise
+        assert "new-model" in mab._breakers

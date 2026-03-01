@@ -261,3 +261,57 @@ class TestSessionPool:
         stats = pool.stats()
         # Session should have been evicted
         assert "test-model" not in stats or stats["test-model"]["total"] == 0
+
+    @pytest.mark.asyncio
+    async def test_evict_idle_keeps_in_use_sessions(self) -> None:
+        """In-use sessions should not be evicted even if idle."""
+        pool = SessionPool(max_sessions=2, max_idle_time=0.01)
+        client = _FakeClient()
+        config = _FakeConfig()
+
+        async with pool.acquire(client, config) as s1:
+            await asyncio.sleep(0.02)
+            await pool._evict_idle()
+            # Session should NOT be evicted while in use
+            stats = pool.stats()
+            assert stats["test-model"]["in_use"] == 1
+
+    @pytest.mark.asyncio
+    async def test_warm_failure_is_nonfatal(self) -> None:
+        """Pre-warm failure should not raise."""
+        pool = SessionPool(max_sessions=3, pre_warm=2)
+
+        class _FailClient:
+            async def create_session(self, _: Any) -> _FakeSession:
+                raise RuntimeError("connect failed")
+
+        await pool.warm(_FailClient(), [_FakeConfig()])
+        assert len(pool._pools.get("test-model", [])) == 0
+
+    @pytest.mark.asyncio
+    async def test_stats_empty_pool(self) -> None:
+        """Stats on empty pool should have zero metrics."""
+        pool = SessionPool()
+        stats = pool.stats()
+        assert stats["_pool_metrics"]["hits"] == 0
+        assert stats["_pool_metrics"]["misses"] == 0
+        assert stats["_pool_metrics"]["hit_rate"] == 0.0
+
+    @pytest.mark.asyncio
+    async def test_lru_eviction_with_full_pool(self) -> None:
+        """When pool is full with idle sessions, LRU should be evicted."""
+        pool = SessionPool(max_sessions=1)
+        client = _FakeClient()
+        config = _FakeConfig()
+
+        # Create and release session
+        async with pool.acquire(client, config) as s1:
+            old_id = s1.session_id
+
+        # Force a new session while pool is full but all idle
+        # Acquire 2 concurrently — second forces eviction
+        async with pool.acquire(client, config) as s2:
+            async with pool.acquire(client, config) as s3:
+                # s2 reuses old session, s3 is new (evicts or unpooled)
+                assert s2.session_id == old_id
+                assert s3.session_id != old_id

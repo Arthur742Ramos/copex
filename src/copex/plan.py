@@ -700,7 +700,12 @@ class PlanExecutor:
         if not step:
             raise ValueError(f"Step {step_number} not found in plan")
 
-        await self.execute_plan(plan, from_step=step_number)
+        # Only execute this step by setting from_step and cancelling after it completes
+        def _stop_after_step(completed: PlanStep) -> None:
+            if completed.number == step_number:
+                self._cancelled = True
+
+        await self.execute_plan(plan, from_step=step_number, on_step_complete=_stop_after_step)
         return step
 
 

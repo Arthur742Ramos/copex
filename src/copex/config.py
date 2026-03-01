@@ -336,8 +336,13 @@ class CopexConfig(BaseModel):
         if not path.exists():
             return cls()
 
-        with open(path, "rb") as f:
-            data = tomllib.load(f)
+        try:
+            with open(path, "rb") as f:
+                data = tomllib.load(f)
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning("Failed to load config from %s: %s", path, e)
+            return cls()
 
         return cls(**data)
 
