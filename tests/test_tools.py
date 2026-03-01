@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import asyncio
 import io
 from dataclasses import dataclass
 from pathlib import Path
@@ -243,3 +244,44 @@ async def test_execute_dry_run_returns_preview_and_avoids_side_effects(tmp_path:
     assert [entry.event for entry in entries] == ["decision", "execution"]
     assert entries[0].dry_run is True
     assert entries[1].dry_run is True
+
+
+@pytest.mark.asyncio
+async def test_execute_parallel_empty_calls_returns_empty_list() -> None:
+    registry = ToolRegistry(ParallelToolConfig(retry_on_error=False))
+    assert await registry.execute_parallel([]) == []
+
+
+@pytest.mark.asyncio
+async def test_execute_parallel_fail_fast_marks_remaining_calls_cancelled() -> None:
+    async def fail_tool() -> str:
+        raise RuntimeError("boom")
+
+    async def slow_tool() -> str:
+        await asyncio.sleep(30)
+        return "slow"
+
+    registry = ToolRegistry(
+        ParallelToolConfig(
+            fail_fast=True,
+            retry_on_error=False,
+            max_concurrent=2,
+        )
+    )
+    registry.add_tool("fail", fail_tool)
+    registry.add_tool("slow", slow_tool)
+
+    results = await registry.execute_parallel(
+        [
+            ("fail", {}),
+            ("slow", {}),
+        ]
+    )
+
+    assert len(results) == 2
+    assert results[0].name == "fail"
+    assert results[0].success is False
+    assert "boom" in (results[0].error or "")
+    assert results[1].name == "slow"
+    assert results[1].success is False
+    assert results[1].error == "Cancelled due to fail_fast"

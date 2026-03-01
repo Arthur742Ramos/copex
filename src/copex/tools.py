@@ -430,6 +430,9 @@ class ToolRegistry:
         Returns:
             List of ToolResult in same order as calls
         """
+        if not calls:
+            return []
+
         max_concurrent = max_concurrent or self.config.max_concurrent
         semaphore = asyncio.Semaphore(max_concurrent)
 
@@ -440,54 +443,61 @@ class ToolRegistry:
                 return idx, await self.execute(name, params)
 
         tasks: list[asyncio.Task[tuple[int, ToolResult]]] = []
+        task_indices: dict[asyncio.Task[tuple[int, ToolResult]], int] = {}
         for idx, (name, params) in enumerate(calls):
             task = asyncio.create_task(limited_execute(idx, name, params))
             tasks.append(task)
+            task_indices[task] = idx
 
         results: list[ToolResult | None] = [None] * len(calls)
-        pending = set(tasks)
+        pending: set[asyncio.Task[tuple[int, ToolResult]]] = set(tasks)
+
+        def _task_to_result(task: asyncio.Task[tuple[int, ToolResult]]) -> tuple[int, ToolResult]:
+            fallback_idx = task_indices[task]
+            try:
+                idx, result = task.result()
+                return idx, result
+            except asyncio.CancelledError:
+                return fallback_idx, ToolResult(
+                    name=calls[fallback_idx][0],
+                    success=False,
+                    error="Cancelled",
+                )
+            except Exception as exc:
+                return fallback_idx, ToolResult(
+                    name=calls[fallback_idx][0],
+                    success=False,
+                    error=str(exc),
+                )
 
         try:
-            done_tasks, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED) if not self.config.fail_fast else (set(), set())
             if self.config.fail_fast:
-                # Process tasks as they complete to support fail_fast
+                # Process tasks incrementally so we can stop on first failure.
                 while pending:
                     done_set, pending = await asyncio.wait(
-                        pending, return_when=asyncio.FIRST_COMPLETED
+                        pending,
+                        return_when=asyncio.FIRST_COMPLETED,
                     )
                     for task in done_set:
-                        try:
-                            idx, result = task.result()
-                        except Exception as exc:
-                            # Find the index from any remaining approach
-                            idx = tasks.index(task)
-                            result = ToolResult(
-                                name=calls[idx][0],
-                                success=False,
-                                error=str(exc),
-                            )
+                        idx, result = _task_to_result(task)
                         results[idx] = result
-                        if self.config.fail_fast and not result.success:
+                        if not result.success:
                             for pending_task in pending:
                                 pending_task.cancel()
+                            if pending:
+                                await asyncio.gather(*pending, return_exceptions=True)
                             pending = set()
                             break
             else:
-                for task in done_tasks:
-                    try:
-                        idx, result = task.result()
-                    except Exception as exc:
-                        idx = tasks.index(task)
-                        result = ToolResult(
-                            name=calls[idx][0],
-                            success=False,
-                            error=str(exc),
-                        )
+                await asyncio.gather(*tasks, return_exceptions=True)
+                pending = set()
+                for task in tasks:
+                    idx, result = _task_to_result(task)
                     results[idx] = result
         finally:
             if pending:
-                for t in pending:
-                    t.cancel()
+                for task in pending:
+                    task.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
 
         if self.config.fail_fast and any(r is None for r in results):
