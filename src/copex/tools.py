@@ -478,16 +478,19 @@ class ToolRegistry:
                         pending,
                         return_when=asyncio.FIRST_COMPLETED,
                     )
+                    should_abort = False
                     for task in done_set:
                         idx, result = _task_to_result(task)
                         results[idx] = result
                         if not result.success:
-                            for pending_task in pending:
-                                pending_task.cancel()
-                            if pending:
-                                await asyncio.gather(*pending, return_exceptions=True)
-                            pending = set()
-                            break
+                            should_abort = True
+                    if should_abort:
+                        for pending_task in pending:
+                            pending_task.cancel()
+                        if pending:
+                            await asyncio.gather(*pending, return_exceptions=True)
+                        pending = set()
+                        break
             else:
                 await asyncio.gather(*tasks, return_exceptions=True)
                 pending = set()

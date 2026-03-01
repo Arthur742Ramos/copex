@@ -285,3 +285,44 @@ async def test_execute_parallel_fail_fast_marks_remaining_calls_cancelled() -> N
     assert results[1].name == "slow"
     assert results[1].success is False
     assert results[1].error == "Cancelled due to fail_fast"
+
+
+@pytest.mark.asyncio
+async def test_execute_parallel_fail_fast_keeps_completed_results(monkeypatch: pytest.MonkeyPatch) -> None:
+    async def fail_tool() -> str:
+        raise RuntimeError("boom")
+
+    async def ok_tool() -> str:
+        return "ok"
+
+    registry = ToolRegistry(
+        ParallelToolConfig(
+            fail_fast=True,
+            retry_on_error=False,
+            max_concurrent=2,
+        )
+    )
+    registry.add_tool("fail", fail_tool)
+    registry.add_tool("ok", ok_tool)
+
+    real_wait = asyncio.wait
+
+    async def ordered_wait(tasks, *, return_when):
+        done, _ = await real_wait(tasks, return_when=asyncio.ALL_COMPLETED)
+        ordered_done = sorted(done, key=lambda task: task.result()[1].success)
+        return ordered_done, set()
+
+    monkeypatch.setattr("copex.tools.asyncio.wait", ordered_wait)
+
+    results = await registry.execute_parallel(
+        [
+            ("fail", {}),
+            ("ok", {}),
+        ]
+    )
+
+    assert len(results) == 2
+    assert results[0].success is False
+    assert "boom" in (results[0].error or "")
+    assert results[1].success is True
+    assert results[1].result == "ok"
