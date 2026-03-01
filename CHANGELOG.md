@@ -1,5 +1,17 @@
 # Changelog
 
+## v2.12.0 (2026-03-01)
+
+### Features
+- **Subtask parallelism**: Squad agents can now have `subtasks` — a list of parallel work items that fan out as separate Fleet tasks within the same phase
+- When an agent has subtasks, each becomes an independent Fleet task sharing the agent's system prompt but with a focused instruction
+- All subtasks within an agent run concurrently (up to `max_concurrent` limit) and results are merged back into a single `SquadAgentResult`
+- AI repo analysis (`from_repo_ai()`) can now optionally return subtasks per agent for naturally parallelizable work
+- Subtasks persist through `.copex/squad.json` save/load
+
+### Tests
+- 9 new tests covering subtask fan-out, dependency expansion, result merging, partial failures, and persistence
+
 ## v2.11.0 (2026-03-01)
 
 ### Features

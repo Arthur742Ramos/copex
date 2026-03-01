@@ -269,6 +269,7 @@ class SquadAgent:
     emoji: str
     system_prompt: str
     phase: int = 2
+    subtasks: list[str] = field(default_factory=list)
 
     @classmethod
     def default_for_role(cls, role: SquadRole | str) -> SquadAgent:
@@ -444,12 +445,18 @@ class SquadTeam:
                 '- "emoji": single emoji for display',
                 '- "prompt": system prompt describing the agent\'s expertise and focus',
                 '- "phase": execution order (1=analyze first, 2=build, 3=verify, 4=document)',
+                '- "subtasks": (optional) list of strings describing parallel work items.',
+                '  When provided, the agent\'s work is split into parallel Fleet tasks —',
+                '  one per subtask — all running within the same phase.',
+                '  Use subtasks when an agent has clearly separable concerns',
+                '  (e.g., a developer handling 3 independent modules).',
                 "",
                 "Rules:",
                 "- Always include a 'lead' role with phase 1",
                 "- Keep the team small (3-5 roles typical)",
                 "- Only include roles clearly needed for THIS specific repository",
                 "- Phase ordering determines dependencies (phase 2 waits for phase 1, etc.)",
+                "- Subtasks are optional — only add them when work is naturally parallelizable",
                 "- If a current team is shown above, use it as a starting point —"
                 " keep roles that still make sense, remove unnecessary ones, and add new ones if needed",
                 "",
@@ -458,7 +465,8 @@ class SquadTeam:
                 '  {"role": "lead", "name": "Lead Architect", "emoji": "🏗️", '
                 '"prompt": "You are the Lead Architect. Analyze the task...", "phase": 1},',
                 '  {"role": "developer", "name": "Developer", "emoji": "🔧", '
-                '"prompt": "You are the Developer. Implement the task...", "phase": 2},',
+                '"prompt": "You are the Developer. Implement the task...", "phase": 2,',
+                '   "subtasks": ["Core module implementation", "API endpoint handlers"]},',
                 '  {"role": "tester", "name": "Tester", "emoji": "🧪", '
                 '"prompt": "You are the Tester. Write comprehensive tests...", "phase": 3}',
                 ']',
@@ -509,6 +517,12 @@ class SquadTeam:
                             phase = int(phase)
                         except (TypeError, ValueError):
                             phase = 2
+                        subtasks_raw = item.get("subtasks", [])
+                        subtasks = (
+                            [str(s) for s in subtasks_raw]
+                            if isinstance(subtasks_raw, list)
+                            else []
+                        )
                         agents.append(SquadAgent(
                             name=item.get("name", role_str.replace("_", " ").title()),
                             role=role_str,
@@ -519,6 +533,7 @@ class SquadTeam:
                                 f"Focus on your area of expertise for this task.",
                             )),
                             phase=max(1, min(4, phase)),
+                            subtasks=subtasks,
                         ))
 
                 # Ensure lead exists
@@ -553,6 +568,7 @@ class SquadTeam:
                 "emoji": a.emoji,
                 "prompt": a.system_prompt,
                 "phase": a.phase,
+                **({"subtasks": a.subtasks} if a.subtasks else {}),
             }
             for a in self.agents
         ]
@@ -584,6 +600,12 @@ class SquadTeam:
                     phase = int(phase)
                 except (TypeError, ValueError):
                     phase = 2
+                subtasks_raw = item.get("subtasks", [])
+                subtasks = (
+                    [str(s) for s in subtasks_raw]
+                    if isinstance(subtasks_raw, list)
+                    else []
+                )
                 agents.append(SquadAgent(
                     name=item.get("name", role_str.replace("_", " ").title()),
                     role=role_str,
@@ -594,6 +616,7 @@ class SquadTeam:
                         f"Focus on your area of expertise for this task.",
                     )),
                     phase=max(1, min(4, phase)),
+                    subtasks=subtasks,
                 ))
             if agents:
                 logger.info(f"Loaded squad team from {config_path}: {[a.role for a in agents]}")
@@ -757,20 +780,46 @@ class SquadCoordinator:
         return result
 
     def _add_tasks(self, fleet: Fleet, prompt: str) -> dict[str, str]:
-        """Add fleet tasks for each agent."""
+        """Add fleet tasks for each agent.
+
+        When an agent has subtasks, each subtask becomes a separate Fleet task
+        within the same phase, running in parallel. Results are later merged
+        back per agent in ``_build_result()``.
+        """
         task_ids: dict[str, str] = {}
 
         for agent in self.team.agents:  # Use property for lazy init
             deps = self._get_dependencies(agent, task_ids)
-            agent_prompt = self._build_agent_prompt(agent, prompt, task_ids)
 
-            tid = fleet.add(
-                agent_prompt,
-                task_id=agent.role,
-                depends_on=deps,
-                model=self._config.model,
-            )
-            task_ids[agent.role] = tid
+            if agent.subtasks:
+                # Fan out: one Fleet task per subtask, all in same phase
+                sub_ids: list[str] = []
+                for i, subtask_desc in enumerate(agent.subtasks):
+                    sub_prompt = self._build_agent_prompt(
+                        agent,
+                        f"{prompt}\n\n## Subtask ({i + 1}/{len(agent.subtasks)})"
+                        f"\n\nFocus on: {subtask_desc}",
+                        task_ids,
+                    )
+                    sub_id = f"{agent.role}__sub{i + 1}"
+                    tid = fleet.add(
+                        sub_prompt,
+                        task_id=sub_id,
+                        depends_on=deps,
+                        model=self._config.model,
+                    )
+                    sub_ids.append(tid)
+                # Store pipe-joined subtask IDs so deps and result mapping work
+                task_ids[agent.role] = "|".join(sub_ids)
+            else:
+                agent_prompt = self._build_agent_prompt(agent, prompt, task_ids)
+                tid = fleet.add(
+                    agent_prompt,
+                    task_id=agent.role,
+                    depends_on=deps,
+                    model=self._config.model,
+                )
+                task_ids[agent.role] = tid
 
         return task_ids
 
@@ -783,6 +832,9 @@ class SquadCoordinator:
         Phase 2 (build): depends on all phase 1 agents
         Phase 3 (verify): depends on all phase 2 agents
         Phase 4 (document): depends on all phase 2 and 3 agents
+
+        When a dependency agent has subtasks, all its subtask IDs are
+        included (the dependent agent waits for all subtasks to finish).
         """
         if agent.phase <= 1:
             return []
@@ -792,7 +844,8 @@ class SquadCoordinator:
                 continue
             tid = task_ids.get(other.role)
             if tid and other.phase < agent.phase:
-                deps.append(tid)
+                # Expand pipe-joined subtask IDs
+                deps.extend(tid.split("|"))
         return deps
 
     def _build_agent_prompt(
@@ -856,34 +909,83 @@ class SquadCoordinator:
         fleet_results: list[FleetResult],
         task_ids: dict[str, str],
     ) -> SquadResult:
-        """Convert fleet results to SquadResult."""
-        id_to_role = {tid: role for role, tid in task_ids.items()}
+        """Convert fleet results to SquadResult.
+
+        When an agent has subtasks, its multiple FleetResults are merged
+        into a single SquadAgentResult with combined content and totals.
+        """
+        # Build reverse map: fleet task_id → role
+        id_to_role: dict[str, str] = {}
+        for role, tid_value in task_ids.items():
+            for tid in tid_value.split("|"):
+                id_to_role[tid] = role
+
+        # Group fleet results by role
+        role_results: dict[str, list[FleetResult]] = {}
+        for fr in fleet_results:
+            role = id_to_role.get(fr.task_id)
+            if role is not None:
+                role_results.setdefault(role, []).append(fr)
 
         agent_results = []
         all_success = True
 
-        for fr in fleet_results:
-            role = id_to_role.get(fr.task_id)
-            if role is None:
-                continue
-            agent = self.team.get_agent(role)  # Use property for lazy init
-            if agent is None:
+        for agent in self.team.agents:
+            results = role_results.get(agent.role, [])
+            if not results:
                 continue
 
-            content = fr.response.content if fr.response else ""
+            if len(results) == 1:
+                # Single task (no subtasks) — same as before
+                fr = results[0]
+                content = fr.response.content if fr.response else ""
+                ar = SquadAgentResult(
+                    agent=agent,
+                    content=content,
+                    success=fr.success,
+                    duration_ms=fr.duration_ms,
+                    error=str(fr.error) if fr.error else None,
+                    prompt_tokens=fr.prompt_tokens,
+                    completion_tokens=fr.completion_tokens,
+                )
+            else:
+                # Merge multiple subtask results
+                parts: list[str] = []
+                total_duration = 0.0
+                total_prompt = 0
+                total_completion = 0
+                sub_success = True
+                errors: list[str] = []
 
-            ar = SquadAgentResult(
-                agent=agent,
-                content=content,
-                success=fr.success,
-                duration_ms=fr.duration_ms,
-                error=str(fr.error) if fr.error else None,
-                prompt_tokens=fr.prompt_tokens,
-                completion_tokens=fr.completion_tokens,
-            )
+                for j, fr in enumerate(results):
+                    content = fr.response.content if fr.response else ""
+                    if content:
+                        label = (
+                            agent.subtasks[j]
+                            if j < len(agent.subtasks)
+                            else f"Subtask {j + 1}"
+                        )
+                        parts.append(f"### {label}\n\n{content}")
+                    total_duration += fr.duration_ms
+                    total_prompt += fr.prompt_tokens
+                    total_completion += fr.completion_tokens
+                    if not fr.success:
+                        sub_success = False
+                        if fr.error:
+                            errors.append(str(fr.error))
+
+                ar = SquadAgentResult(
+                    agent=agent,
+                    content="\n\n".join(parts),
+                    success=sub_success,
+                    duration_ms=total_duration,
+                    error="; ".join(errors) if errors else None,
+                    prompt_tokens=total_prompt,
+                    completion_tokens=total_completion,
+                )
+
             agent_results.append(ar)
-
-            if not fr.success:
+            if not ar.success:
                 all_success = False
 
         return SquadResult(

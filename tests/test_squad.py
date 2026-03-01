@@ -1208,3 +1208,190 @@ class TestSquadTeamPersistence:
         loaded = SquadTeam.load(config_path)
         assert loaded is not None
         assert len(loaded.agents) == 4
+
+
+# ===========================================================================
+# Subtask parallelism
+# ===========================================================================
+
+
+class TestSubtasks:
+    """Tests for SquadAgent subtask parallelism within a phase."""
+
+    def test_agent_default_has_no_subtasks(self):
+        agent = SquadAgent.default_for_role("developer")
+        assert agent.subtasks == []
+
+    def test_agent_with_subtasks(self):
+        agent = SquadAgent(
+            name="Dev", role="developer", emoji="🔧",
+            system_prompt="Build it.", phase=2,
+            subtasks=["API routes", "Database models", "Middleware"],
+        )
+        assert len(agent.subtasks) == 3
+        assert agent.subtasks[0] == "API routes"
+
+    def test_add_tasks_fans_out_subtasks(self):
+        """Agent with subtasks creates multiple fleet tasks."""
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent(name="Lead", role="lead", emoji="🏗️",
+                       system_prompt="Lead.", phase=1),
+            SquadAgent(name="Dev", role="developer", emoji="🔧",
+                       system_prompt="Build.", phase=2,
+                       subtasks=["Module A", "Module B"]),
+        ])
+        coord = SquadCoordinator(config, team=team)
+        fleet = Fleet(config, fleet_config=FleetConfig(max_concurrent=3))
+        task_ids = coord._add_tasks(fleet, "Do work")
+
+        # Lead gets one task
+        assert task_ids["lead"] == "lead"
+        # Developer gets pipe-joined subtask IDs
+        sub_ids = task_ids["developer"].split("|")
+        assert len(sub_ids) == 2
+        assert sub_ids[0] == "developer__sub1"
+        assert sub_ids[1] == "developer__sub2"
+
+    def test_subtask_dependencies_expand(self):
+        """When a dep agent has subtasks, all subtask IDs are included."""
+        config = CopexConfig()
+        lead_agent = SquadAgent(
+            name="Lead", role="lead", emoji="🏗️",
+            system_prompt="Lead.", phase=1,
+            subtasks=["Architecture review", "Security review"],
+        )
+        dev_agent = SquadAgent(
+            name="Dev", role="developer", emoji="🔧",
+            system_prompt="Build.", phase=2,
+        )
+        team = SquadTeam(agents=[lead_agent, dev_agent])
+        coord = SquadCoordinator(config, team=team)
+
+        # Simulate lead having pipe-joined subtask IDs
+        task_ids = {"lead": "lead__sub1|lead__sub2"}
+        deps = coord._get_dependencies(dev_agent, task_ids)
+        assert "lead__sub1" in deps
+        assert "lead__sub2" in deps
+        assert len(deps) == 2
+
+    def test_build_result_merges_subtasks(self):
+        """Multiple fleet results for subtasks are merged into one agent result."""
+        config = CopexConfig()
+        dev_agent = SquadAgent(
+            name="Dev", role="developer", emoji="🔧",
+            system_prompt="Build.", phase=2,
+            subtasks=["API routes", "Database models"],
+        )
+        team = SquadTeam(agents=[dev_agent])
+        coord = SquadCoordinator(config, team=team)
+
+        task_ids = {"developer": "developer__sub1|developer__sub2"}
+        fleet_results = [
+            FleetResult(
+                task_id="developer__sub1", success=True,
+                response=Response(content="Routes done"), duration_ms=100,
+                prompt_tokens=50, completion_tokens=30,
+            ),
+            FleetResult(
+                task_id="developer__sub2", success=True,
+                response=Response(content="Models done"), duration_ms=80,
+                prompt_tokens=40, completion_tokens=20,
+            ),
+        ]
+
+        result = coord._build_result(fleet_results, task_ids)
+        assert len(result.agent_results) == 1
+        ar = result.agent_results[0]
+        assert ar.success is True
+        assert "API routes" in ar.content
+        assert "Routes done" in ar.content
+        assert "Database models" in ar.content
+        assert "Models done" in ar.content
+        assert ar.duration_ms == 180  # sum
+        assert ar.prompt_tokens == 90
+        assert ar.completion_tokens == 50
+
+    def test_build_result_subtask_partial_failure(self):
+        """If one subtask fails, the merged result reports failure."""
+        config = CopexConfig()
+        dev_agent = SquadAgent(
+            name="Dev", role="developer", emoji="🔧",
+            system_prompt="Build.", phase=2,
+            subtasks=["Module A", "Module B"],
+        )
+        team = SquadTeam(agents=[dev_agent])
+        coord = SquadCoordinator(config, team=team)
+
+        task_ids = {"developer": "developer__sub1|developer__sub2"}
+        fleet_results = [
+            FleetResult(
+                task_id="developer__sub1", success=True,
+                response=Response(content="A done"), duration_ms=100,
+            ),
+            FleetResult(
+                task_id="developer__sub2", success=False,
+                error=RuntimeError("compile error"), duration_ms=50,
+            ),
+        ]
+
+        result = coord._build_result(fleet_results, task_ids)
+        assert result.success is False
+        ar = result.agent_results[0]
+        assert ar.success is False
+        assert "compile error" in ar.error
+
+    def test_subtasks_persist_save_load(self, tmp_path):
+        """Subtasks survive save/load roundtrip."""
+        team = SquadTeam(agents=[
+            SquadAgent(
+                name="Dev", role="developer", emoji="🔧",
+                system_prompt="Build.", phase=2,
+                subtasks=["API", "DB", "Auth"],
+            ),
+        ])
+        config_path = tmp_path / "squad.json"
+        team.save(config_path)
+
+        loaded = SquadTeam.load(config_path)
+        assert loaded is not None
+        assert loaded.agents[0].subtasks == ["API", "DB", "Auth"]
+
+    def test_subtasks_not_saved_when_empty(self, tmp_path):
+        """Empty subtasks list is omitted from JSON."""
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role("lead"),
+        ])
+        config_path = tmp_path / "squad.json"
+        team.save(config_path)
+
+        data = json.loads(config_path.read_text(encoding="utf-8"))
+        assert "subtasks" not in data[0]
+
+    def test_mixed_subtask_and_normal_agents(self):
+        """Team with both subtask and normal agents works correctly."""
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent(name="Lead", role="lead", emoji="🏗️",
+                       system_prompt="Lead.", phase=1),
+            SquadAgent(name="Dev", role="developer", emoji="🔧",
+                       system_prompt="Build.", phase=2,
+                       subtasks=["Frontend", "Backend"]),
+            SquadAgent(name="Tester", role="tester", emoji="🧪",
+                       system_prompt="Test.", phase=3),
+        ])
+        coord = SquadCoordinator(config, team=team)
+        fleet = Fleet(config, fleet_config=FleetConfig(max_concurrent=3))
+        task_ids = coord._add_tasks(fleet, "Build app")
+
+        # Lead: single task
+        assert task_ids["lead"] == "lead"
+        # Dev: two subtasks
+        assert "developer__sub1" in task_ids["developer"]
+        assert "developer__sub2" in task_ids["developer"]
+        # Tester depends on lead AND both dev subtasks
+        tester = team.get_agent("tester")
+        deps = coord._get_dependencies(tester, task_ids)
+        assert "lead" in deps
+        assert "developer__sub1" in deps
+        assert "developer__sub2" in deps
