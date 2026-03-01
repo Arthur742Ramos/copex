@@ -209,7 +209,6 @@ class StreamRenderer:
         elif self.state.phase == "responding":
             text.append(f"  {spinner} ", style=Colors.TEXT_MUTED)
         elif self.state.phase == "tool_call":
-            sum(1 for t in self.state.tool_calls if t.status == "running")
             tool = next((t for t in self.state.tool_calls if t.status == "running"), None)
             text.append(f"  {spinner} ", style=Colors.TEXT_MUTED)
             if tool:

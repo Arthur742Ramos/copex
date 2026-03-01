@@ -14,11 +14,14 @@ improve until the task is complete.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import datetime
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -166,6 +169,12 @@ class RalphWiggum:
 
                 except Exception:  # Catch-all: error counting for circuit-breaker logic
                     consecutive_errors += 1
+                    logger.warning(
+                        "Ralph iteration %d failed (consecutive errors: %d)",
+                        self._state.iteration,
+                        consecutive_errors,
+                        exc_info=True,
+                    )
                     if consecutive_errors >= self.config.max_consecutive_errors:
                         self._state.completed = True
                         self._state.completion_reason = (

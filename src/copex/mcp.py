@@ -183,45 +183,46 @@ class StdioTransport(MCPTransport):
         if not self._process or not self._process.stdout:
             return
 
-        while True:
-            try:
-                line = await self._process.stdout.readline()
-                if not line:
-                    break
-
-                text = line.decode("utf-8").strip()
-                if not text:
-                    continue
-
+        try:
+            while True:
                 try:
-                    message = json.loads(text)
-                except json.JSONDecodeError:
+                    line = await self._process.stdout.readline()
+                    if not line:
+                        break
+
+                    text = line.decode("utf-8").strip()
+                    if not text:
+                        continue
+
+                    try:
+                        message = json.loads(text)
+                    except json.JSONDecodeError:
+                        continue
+
+                    # Handle response
+                    if "id" in message:
+                        request_id = message["id"]
+                        if request_id in self._pending:
+                            future = self._pending.pop(request_id)
+                            if "error" in message:
+                                future.set_exception(
+                                    RuntimeError(message["error"].get("message", "Unknown error"))
+                                )
+                            else:
+                                future.set_result(message.get("result"))
+
+                except asyncio.CancelledError:
+                    break
+                except Exception:  # Catch-all: reader loop must not crash
+                    logger.debug("Error in MCP reader loop", exc_info=True)
                     continue
-
-                # Handle response
-                if "id" in message:
-                    request_id = message["id"]
-                    if request_id in self._pending:
-                        future = self._pending.pop(request_id)
-                        if "error" in message:
-                            future.set_exception(
-                                RuntimeError(message["error"].get("message", "Unknown error"))
-                            )
-                        else:
-                            future.set_result(message.get("result"))
-
-            except asyncio.CancelledError:
-                break
-            except Exception:  # Catch-all: reader loop must not crash
-                logger.debug("Error in MCP reader loop", exc_info=True)
-                continue
-
-        # Fail all pending futures since transport is closed
-        pending = dict(self._pending)
-        self._pending.clear()
-        for future in pending.values():
-            if not future.done():
-                future.set_exception(ConnectionError("MCP transport closed unexpectedly"))
+        finally:
+            # Fail all pending futures since transport is closed
+            pending = dict(self._pending)
+            self._pending.clear()
+            for future in pending.values():
+                if not future.done():
+                    future.set_exception(ConnectionError("MCP transport closed unexpectedly"))
 
     async def _write(self, message: dict[str, Any]) -> None:
         """Write a message to the server."""

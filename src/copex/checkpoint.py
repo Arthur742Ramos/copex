@@ -10,10 +10,13 @@ Enables:
 from __future__ import annotations
 
 import json
+import logging
 from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from pathlib import Path
 from typing import Any
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -185,7 +188,11 @@ class CheckpointStore:
             return None
 
         with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+            try:
+                data = json.load(f)
+            except json.JSONDecodeError:
+                logger.warning("Corrupted checkpoint file: %s", path)
+                return None
 
         return Checkpoint.from_dict(data)
 

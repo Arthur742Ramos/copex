@@ -240,9 +240,10 @@ class CopilotCLI:
             raise
 
         if process.returncode != 0:
-            assert process.stderr is not None
-            stderr_bytes = await process.stderr.read()
-            stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+            stderr_text = ""
+            if process.stderr is not None:
+                stderr_bytes = await process.stderr.read()
+                stderr_text = stderr_bytes.decode("utf-8", errors="replace")
             raise CopexError(
                 f"CLI exited with code {process.returncode}: {stderr_text}",
                 context={"returncode": process.returncode},

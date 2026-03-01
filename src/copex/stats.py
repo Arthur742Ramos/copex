@@ -100,21 +100,9 @@ class StatsTracker:
     # ------------------------------------------------------------------
 
     def _update_state(self, stats: RunStats) -> None:
-        state_path = _state_path()
-        state_path.parent.mkdir(parents=True, exist_ok=True)
-
-        data: dict[str, Any] = {}
-        if state_path.exists():
-            try:
-                with open(state_path, encoding="utf-8") as f:
-                    data = json.load(f)
-            except (OSError, json.JSONDecodeError):
-                pass
-
+        data = load_state()
         data["last_run"] = stats.to_dict()
-
-        with open(state_path, "w", encoding="utf-8") as f:
-            json.dump(data, f, indent=2)
+        _save_state(data)
 
 
 # ------------------------------------------------------------------
@@ -122,24 +110,20 @@ class StatsTracker:
 # ------------------------------------------------------------------
 
 
-def save_start_commit(commit_hash: str) -> None:
-    """Store the HEAD commit hash at the start of a copex run."""
+def _save_state(data: dict[str, Any]) -> None:
+    """Write state dict to disk."""
     state_path = _state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
-
-    data: dict[str, Any] = {}
-    if state_path.exists():
-        try:
-            with open(state_path, encoding="utf-8") as f:
-                data = json.load(f)
-        except (OSError, json.JSONDecodeError):
-            pass
-
-    data["last_start_commit"] = commit_hash
-    data["last_start_time"] = datetime.now(timezone.utc).isoformat()
-
     with open(state_path, "w", encoding="utf-8") as f:
         json.dump(data, f, indent=2)
+
+
+def save_start_commit(commit_hash: str) -> None:
+    """Store the HEAD commit hash at the start of a copex run."""
+    data = load_state()
+    data["last_start_commit"] = commit_hash
+    data["last_start_time"] = datetime.now(timezone.utc).isoformat()
+    _save_state(data)
 
 
 def load_start_commit() -> str | None:
