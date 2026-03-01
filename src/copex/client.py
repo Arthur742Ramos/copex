@@ -27,6 +27,7 @@ from copex.circuit_breaker import (
     SlidingWindowBreaker,  # noqa: F401
 )
 from copex.config import CopexConfig
+from copex.exceptions import CircuitBreakerOpen
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
 from copex.sdk_patch import patch_copilot_client  # noqa: F401
@@ -297,11 +298,11 @@ class Copex:
         return delay + jitter
 
     def _cb_check(self) -> None:
-        """Check circuit breaker state; raise if circuit is open."""
+        """Check circuit breaker state; raise CircuitBreakerOpen if open."""
         if self._cb_opened_at is not None:
             elapsed = time.monotonic() - self._cb_opened_at
             if elapsed < _CB_COOLDOWN_SECONDS:
-                raise RuntimeError(
+                raise CircuitBreakerOpen(
                     f"Circuit breaker open: too many consecutive failures. "
                     f"Retry in {_CB_COOLDOWN_SECONDS - elapsed:.0f}s."
                 )
@@ -928,8 +929,9 @@ class Copex:
                     # Check if we've had activity within the timeout window
                     idle_time = loop.time() - state.last_activity
                     if idle_time >= self.config.timeout:
+                        model_info = f" (model={self._current_model})" if self._current_model else ""
                         raise TimeoutError(
-                            f"Response timed out after {idle_time:.1f}s of inactivity"
+                            f"Response timed out after {idle_time:.1f}s of inactivity{model_info}"
                         ) from None
                     # Had recent activity, keep waiting
         finally:

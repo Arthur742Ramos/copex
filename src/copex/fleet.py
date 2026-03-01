@@ -475,7 +475,11 @@ class FleetContext:
             return self._state.get(key, default)
 
     def get_sync(self, key: str, default: Any = None) -> Any:
-        """Synchronous get (for use in callbacks)."""
+        """Synchronous get (for use in callbacks).
+
+        Note: Not protected by locks. Safe for reads in single-threaded
+        async code, but avoid mixing with concurrent async set() calls.
+        """
         return self._state.get(key, default)
 
     async def set(self, key: str, value: Any) -> None:
@@ -484,7 +488,12 @@ class FleetContext:
             self._state[key] = value
 
     def set_sync(self, key: str, value: Any) -> None:
-        """Synchronous set (for use in callbacks)."""
+        """Synchronous set (for use in callbacks).
+
+        Note: Not protected by locks. Safe for simple assignments in
+        single-threaded async code, but prefer the async ``set()``
+        method when calling from coroutines.
+        """
         self._state[key] = value
 
     async def update(self, updates: dict[str, Any]) -> None:
@@ -1412,7 +1421,7 @@ class Fleet:
                 loop = asyncio.get_running_loop()
                 await loop.run_in_executor(None, self._git_finalizer.finalize)
             except (subprocess.CalledProcessError, RuntimeError):
-                pass  # Best-effort on context exit
+                logger.debug("Git finalize failed on context exit", exc_info=True)
 
     def add(
         self,
@@ -1810,7 +1819,10 @@ class Fleet:
                                     try:
                                         event_queue.put_nowait(evt)
                                     except asyncio.QueueFull:
-                                        pass  # Drop delta events under backpressure
+                                        logger.debug(
+                                            "Fleet event queue full, dropping delta for task %s",
+                                            task.id,
+                                        )
 
                         response = await asyncio.wait_for(
                             copex.send(

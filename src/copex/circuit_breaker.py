@@ -8,6 +8,8 @@ import time
 from collections import deque
 from typing import Any
 
+from copex.exceptions import CircuitBreakerOpen
+
 logger = logging.getLogger(__name__)
 
 # Circuit breaker defaults
@@ -44,6 +46,8 @@ class SlidingWindowBreaker:
             raise ValueError("threshold must be between 0 and 1")
         if window_size < 1:
             raise ValueError("window_size must be >= 1")
+        if cooldown_seconds <= 0:
+            raise ValueError("cooldown_seconds must be > 0")
 
         self.window_size = window_size
         self.threshold = threshold
@@ -79,12 +83,12 @@ class SlidingWindowBreaker:
         return elapsed >= self.cooldown_seconds
 
     def check(self) -> None:
-        """Check circuit state; raise RuntimeError if open."""
+        """Check circuit state; raise CircuitBreakerOpen if open."""
         if self._opened_at is not None:
             elapsed = time.monotonic() - self._opened_at
             if elapsed < self.cooldown_seconds:
                 remaining = self.cooldown_seconds - elapsed
-                raise RuntimeError(
+                raise CircuitBreakerOpen(
                     f"Circuit breaker open (failure rate {self.failure_rate:.0%}). "
                     f"Retry in {remaining:.0f}s."
                 )

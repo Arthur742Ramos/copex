@@ -244,6 +244,14 @@ class SessionPool:
                             logger.debug(
                                 "Failed to destroy evicted session", exc_info=True
                             )
+                    else:
+                        # All sessions in use and pool full — cannot pool this session
+                        logger.debug(
+                            "Pool full for model %s (all %d sessions in use), "
+                            "session will be destroyed after use",
+                            model,
+                            self.max_sessions,
+                        )
         else:
             is_pooled = True
 

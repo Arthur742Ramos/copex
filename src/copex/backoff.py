@@ -44,6 +44,19 @@ class BackoffStrategy:
     max_retries: int = 5  # Maximum retry attempts
     retryable: bool = True  # Whether errors of this type are retryable
 
+    def __post_init__(self) -> None:
+        """Validate strategy parameters."""
+        if self.base_delay < 0:
+            raise ValueError("base_delay must be >= 0")
+        if self.max_delay < 0:
+            raise ValueError("max_delay must be >= 0")
+        if self.multiplier < 0:
+            raise ValueError("multiplier must be >= 0")
+        if not 0 <= self.jitter <= 1:
+            raise ValueError("jitter must be between 0 and 1")
+        if self.max_retries < 0:
+            raise ValueError("max_retries must be >= 0")
+
     def compute_delay(self, attempt: int) -> float:
         """Compute delay for a given attempt number (1-indexed).
 
@@ -330,8 +343,12 @@ class AdaptiveRetry:
 
                 # Special handling for rate limits with retry-after header
                 if isinstance(e, RateLimitError) and e.retry_after:
-                    delay = max(delay, e.retry_after)
-                    logger.info(f"Rate limit: waiting {e.retry_after}s (retry-after header)")
+                    # Cap retry_after to max_delay to prevent unbounded waits
+                    capped_retry_after = min(
+                        max(0, e.retry_after), strategy.max_delay
+                    )
+                    delay = max(delay, capped_retry_after)
+                    logger.info(f"Rate limit: waiting {capped_retry_after}s (retry-after header)")
 
                 logger.info(
                     f"Retry {state.attempt}: {category.value} error, waiting {delay:.1f}s ({e})"
