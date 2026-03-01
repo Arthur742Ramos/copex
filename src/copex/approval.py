@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections import Counter
 from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -58,6 +59,18 @@ class ChangeStatistics:
     files_changed: int
     lines_added: int
     lines_removed: int
+    touched_paths: list[str] = field(default_factory=list)
+    operations: dict[str, int] = field(default_factory=dict)
+    risky_operations: dict[str, list[str]] = field(default_factory=dict)
+    risk: RiskAssessment = field(default_factory=lambda: RiskAssessment(severity="low"))
+
+
+@dataclass(frozen=True)
+class RiskAssessment:
+    """Structured risk severity + reasons."""
+
+    severity: str
+    reasons: list[str] = field(default_factory=list)
 
 
 @dataclass(frozen=True)
@@ -73,6 +86,7 @@ class ChangePreview:
     lines_removed: int
     diff_truncated: bool = False
     diff_lines_total: int = 0
+    risk: RiskAssessment = field(default_factory=lambda: RiskAssessment(severity="low"))
     risk_flags: list[str] = field(default_factory=list)
 
 
@@ -195,6 +209,18 @@ PATCH_OP_MAP = {"add": "add", "update": "edit", "delete": "delete"}
 PATCH_OPERATION_RE = re.compile(r"^\*\*\* (Add|Update|Delete) File: (.+)$", re.MULTILINE)
 DEFAULT_MAX_DIFF_LINES = 400
 DEFAULT_MAX_DIFF_CHARS = 20_000
+SECRET_CONTENT_PATTERNS = (
+    re.compile(r"(?i)\b(api[_-]?key|secret|token|password|passwd)\b\s*[:=]"),
+    re.compile(r"AKIA[0-9A-Z]{16}"),
+    re.compile(r"ghp_[A-Za-z0-9]{20,}"),
+)
+RISK_REASON_SCORES = {
+    "large-deletion": 3,
+    "secret-like-content": 3,
+    "delete-operation": 2,
+    "security-sensitive-file": 2,
+    "config-file-change": 1,
+}
 
 
 def default_audit_log_path(cwd: Path | None = None) -> Path:
@@ -301,15 +327,45 @@ def _build_unified_diff(path: str, before: str, after: str) -> str:
     return "\n".join(diff)
 
 
-def _assess_risk(path: str, lines_removed: int) -> list[str]:
+def _contains_secret_like_content(content: str | None) -> bool:
+    if not content:
+        return False
+    return any(pattern.search(content) for pattern in SECRET_CONTENT_PATTERNS)
+
+
+def _risk_severity(reasons: Sequence[str]) -> str:
+    score = sum(RISK_REASON_SCORES.get(reason, 0) for reason in set(reasons))
+    if score >= 3:
+        return "high"
+    if score >= 1:
+        return "medium"
+    return "low"
+
+
+def _build_risk_assessment(reasons: Sequence[str]) -> RiskAssessment:
+    normalized = sorted(set(reasons))
+    return RiskAssessment(severity=_risk_severity(normalized), reasons=normalized)
+
+
+def _assess_risk(
+    path: str,
+    lines_removed: int,
+    *,
+    operation: str,
+    after_content: str | None,
+) -> list[str]:
     lowered = path.lower()
     flags: list[str] = []
+    if operation == "delete":
+        flags.append("delete-operation")
     if lines_removed >= 100:
         flags.append("large-deletion")
     if Path(path).name.lower() in CONFIG_FILE_NAMES:
         flags.append("config-file-change")
     if any(marker in lowered for marker in SECURITY_PATH_MARKERS):
         flags.append("security-sensitive-file")
+    if _contains_secret_like_content(after_content):
+        flags.append("secret-like-content")
     return flags
 
 
@@ -555,7 +611,13 @@ def build_preview(
         operation=operation,
         after_content=after_for_metadata,
     )
-    risk_flags = _assess_risk(change.display_path, lines_removed)
+    risk_flags = _assess_risk(
+        change.display_path,
+        lines_removed,
+        operation=operation,
+        after_content=after_for_metadata,
+    )
+    risk = _build_risk_assessment(risk_flags)
     return ChangePreview(
         file_path=change.display_path,
         operation=operation,
@@ -566,17 +628,31 @@ def build_preview(
         lines_removed=lines_removed,
         diff_truncated=diff_truncated,
         diff_lines_total=diff_lines_total,
-        risk_flags=risk_flags,
+        risk=risk,
+        risk_flags=risk.reasons,
     )
 
 
 def summarize_changes(previews: Iterable[ChangePreview]) -> ChangeStatistics:
     """Compute aggregate change statistics."""
     collected = list(previews)
+    touched_paths = [item.file_path for item in collected]
+    operations = dict(Counter(item.operation for item in collected))
+    risky_operations: dict[str, list[str]] = {}
+    for item in collected:
+        for reason in item.risk_flags:
+            risky_operations.setdefault(reason, [])
+            if item.file_path not in risky_operations[reason]:
+                risky_operations[reason].append(item.file_path)
+    aggregate_risk = _build_risk_assessment(list(risky_operations))
     return ChangeStatistics(
         files_changed=len(collected),
         lines_added=sum(item.lines_added for item in collected),
         lines_removed=sum(item.lines_removed for item in collected),
+        touched_paths=touched_paths,
+        operations=operations,
+        risky_operations=risky_operations,
+        risk=aggregate_risk,
     )
 
 
@@ -682,8 +758,12 @@ class ApprovalWorkflow:
                 f"Preview: truncated ({preview.diff_lines_total} total diff lines)\n",
                 style="yellow",
             )
-        if preview.risk_flags:
-            header.append(f"Risk: {', '.join(preview.risk_flags)}\n", style="yellow")
+        if preview.risk.reasons:
+            style = "red" if preview.risk.severity == "high" else "yellow"
+            header.append(
+                f"Risk: {preview.risk.severity} ({', '.join(preview.risk.reasons)})\n",
+                style=style,
+            )
         else:
             header.append("Risk: low\n", style="green")
         content = Group(header, Text(), self._colorize_diff(preview.unified_diff))

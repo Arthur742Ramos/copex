@@ -12,6 +12,7 @@ from .approval import (
     AuditLogger,
     ChangePreview,
     ChangeStatistics,
+    RiskAssessment,
 )
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
 from .cache import StepCache, clear_global_cache, get_cache
@@ -109,6 +110,7 @@ __all__ = [
     "AuditLogger",
     "ChangePreview",
     "ChangeStatistics",
+    "RiskAssessment",
     # Core
     "Copex",
     "CopilotCLI",
