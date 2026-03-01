@@ -1,5 +1,14 @@
 # Changelog
 
+## v2.13.0 (2026-03-01)
+
+### Fixes
+- **Error logging noise**: Reduce CopexError log level from error to debug for expected/retried errors
+- **Jitter randomness**: Use `random.random()` for proper retry jitter instead of event loop time hack
+- **OS import**: Fix inline `__import__("os")` to proper top-level import in MCP transport
+- **Parallel task ordering**: Rewrite `execute_batch` to preserve result ordering using index-carrying tasks and proper `asyncio.wait` patterns
+
+
 ## v2.12.0 (2026-03-01)
 
 ### Features
