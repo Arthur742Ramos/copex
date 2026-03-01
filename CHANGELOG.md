@@ -1,5 +1,23 @@
 # Changelog
 
+## [2.14.0] - 2026-03-01
+
+### Bug Fixes
+- Fixed race conditions in circuit breaker, client, and streaming modules
+- Fixed negative delay calculations in backoff logic
+- Fixed plan mode single-step execution bug
+- Fixed config error handling for invalid values
+- Improved session pool cleanup and validation
+
+### Performance
+- Code deduplication in fleet parallel execution
+- Optimized backoff and retry logic
+- Better diagnostics and error messages
+
+### Tests
+- Added ~2,400 lines of new tests covering: backoff, circuit breaker, cache, conditions, exceptions, fleet advanced scenarios, retry recovery, security, session pool, and streaming
+- Significantly expanded test coverage across all core modules
+
 ## v2.13.0 (2026-03-01)
 
 ### Fixes
