@@ -1,5 +1,30 @@
 # Changelog
 
+## v2.7.0 (2026-03-01)
+
+### New Features
+
+#### Agent Support
+- **Agent Loop** (`copex agent`) — Turn-based agent with tool calls, iterative reasoning, and JSON Lines output
+- **AgentSession** — Python API for running agents with configurable max turns
+- **AgentTurn & AgentResult** — JSON-serializable turn results for machine consumption by orchestrators
+- Design: dual-client support (SDK Copex + CLI subprocess), tool detection via on_chunk callbacks
+- Use cases: subprocess integration, fine-grained control, JSON-based tooling
+
+#### Squad Orchestration
+- **Squad Mode** (`copex squad`) — Built-in multi-agent team: Lead Architect, Developer, Tester, Docs Expert
+- **Default Mode** — `copex chat "prompt"` now runs squad by default; use `--no-squad` for single-agent
+- **Auto-discovery** — Squad discovers project context (README, pyproject.toml, directory structure, conventions)
+- **Parallel Execution** — Developer and Tester work in parallel via Fleet; Lead analyzes first
+- **SquadCoordinator, SquadTeam, SquadAgent, SquadRole** — Configurable multi-agent orchestration
+- **Cost Tracking & Retries** — Integrated with Fleet for adaptive concurrency and error handling
+
+### Internal
+- New `src/copex/agent.py` — AgentSession loop with tool detection and JSON Lines output
+- New `src/copex/squad.py` — SquadCoordinator, team composition, and role-based prompts
+- Enhanced `src/copex/cli.py` — `copex agent` and `copex squad` commands with JSON output support
+- Exports in `src/copex/__init__.py` — AgentSession, AgentTurn, AgentResult, SquadCoordinator, SquadTeam, SquadAgent, SquadRole, SquadResult
+
 ## 2.0.1 (2026-02-07)
 
 ### Bug Fixes

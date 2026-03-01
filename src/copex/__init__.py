@@ -1,8 +1,9 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
-__version__ = "2.7.0"
+__version__ = "2.8.0"
 
 # Re-export core components for convenience
+from .agent import AgentResult, AgentSession, AgentTurn
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
 from .cache import StepCache, clear_global_cache, get_cache
 from .checkpoint import CheckpointedRalph, CheckpointStore
@@ -56,6 +57,7 @@ from .models import (
 )
 from .persistence import PersistentSession, SessionStore
 from .skills import SkillDiscovery, SkillInfo, get_skill_content, list_skills
+from .squad import SquadAgent, SquadAgentResult, SquadCoordinator, SquadResult, SquadRole, SquadTeam
 from .stats import RunStats, StatsTracker, load_start_commit, load_state, save_start_commit
 from .templates import (
     StepInstance,
@@ -70,6 +72,10 @@ from .templates import (
 from .visualization import render_ascii, render_mermaid, visualize_plan
 
 __all__ = [
+    # Agent
+    "AgentSession",
+    "AgentTurn",
+    "AgentResult",
     # Core
     "Copex",
     "CopilotCLI",
@@ -160,6 +166,13 @@ __all__ = [
     "save_start_commit",
     "load_start_commit",
     "load_state",
+    # Squad
+    "SquadAgent",
+    "SquadAgentResult",
+    "SquadCoordinator",
+    "SquadResult",
+    "SquadRole",
+    "SquadTeam",
     # Metrics
     "MetricsCollector",
     "RequestMetrics",

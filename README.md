@@ -12,10 +12,14 @@ A resilient Python wrapper for the GitHub Copilot SDK with automatic retry, Ralp
 - **Circuit breaker** (sliding-window) to avoid hammering a failing backend
 - **Model fallback chains** — automatically try the next model when one fails
 - **Session pooling** with LRU eviction and pre-warming
+- **Agent loop** — turn-based agent with tool calls and iterative reasoning
+- **Squad orchestration** — multi-agent team (Lead architect, Developer, Tester, Docs expert) with auto-discovery of project context and parallel execution
+- **Squad as default** — `copex chat "prompt"` now runs squad mode by default; use `--no-squad` for single-agent chat
 - **Ralph Wiggum loops** — iterative AI development via repeated prompts
 - **Fleet mode** — run multiple tasks in parallel with dependency ordering
 - **Council mode** — multi-model deliberation with a chair model
 - **Plan mode** — AI-generated step-by-step plans with execution & checkpointing
+- **Repo-awareness** — automatic discovery of project structure, README, pyproject.toml, and conventions
 - **MCP integration** — connect external Model Context Protocol servers
 - **Skill discovery** — auto-discover and load skill files from repo/user dirs
 - **Beautiful CLI** with Rich terminal output, themes, and streaming
@@ -88,6 +92,66 @@ async with Copex(config) as client:
             print(f"\033[2m{chunk.delta}\033[0m", end="", flush=True)
 ```
 
+## Squad Orchestration
+
+Squad is Copex's built-in multi-agent team that auto-decomposes tasks and executes them in parallel:
+
+```bash
+# Default for `copex chat` — orchestrate with Lead, Developer, Tester
+copex chat "Build a REST API with auth and tests"
+
+# Or explicitly:
+copex squad "Build a REST API with CRUD operations"
+
+# With specific model:
+copex squad "Build a REST API" -m gpt-5.2-codex -r high
+```
+
+**How Squad works:**
+1. **Lead Architect** analyzes the task, breaks it into steps, identifies patterns and conventions
+2. **Developer** implements according to the plan (parallel with Tester)
+3. **Tester** writes comprehensive tests (parallel with Developer)
+4. **Docs Expert** updates documentation and examples
+
+Squad auto-discovers project context (README, pyproject.toml, directory structure) and applies project-specific conventions. Results are tracked via Fleet with adaptive concurrency, retries, and cost tracking.
+
+```python
+from copex import SquadCoordinator, CopexConfig
+
+async with SquadCoordinator(config) as squad:
+    result = await squad.run("Build a REST API with auth")
+    print(result.final_content)
+```
+
+Use `--no-squad` with `copex chat` to use single-agent mode instead:
+
+```bash
+copex chat "Explain quicksort" --no-squad
+```
+
+## Agent Loops
+
+For machine-consumption or fine-grained turn-by-turn control, use the Agent command with JSON Lines output:
+
+```bash
+# JSON Lines: one JSON object per turn (for subprocess/orchestrator consumption)
+copex agent "Build a simple HTTP server" --json --max-turns 10
+```
+
+Each turn outputs JSON with: `turn`, `content`, `tool_calls`, `stop_reason`, `error`, `duration_ms`.
+
+```python
+from copex import AgentSession, CopexConfig, make_client
+
+config = CopexConfig()
+client = make_client(config)
+
+async with AgentSession(client, max_turns=10) as agent:
+    result = await agent.run("Implement a stack data structure")
+    for turn in result.turns:
+        print(f"Turn {turn.turn}: {turn.content[:100]}...")
+```
+
 ## Configuration
 
 Copex loads configuration from `~/.config/copex/config.toml` automatically.
@@ -139,7 +203,9 @@ skills = ["code-review"]
 
 | Command | Description |
 |---|---|
-| `copex chat` | Send a prompt with automatic retry |
+| `copex chat` | Send a prompt (squad mode by default, use `--no-squad` for single-agent) |
+| `copex agent` | Run a single-agent loop with tool calls and JSON Lines output |
+| `copex squad` | Run a multi-agent team: Lead architect, Developer, Tester orchestrated via Fleet |
 | `copex interactive` | Start an interactive chat session |
 | `copex tui` | Launch the full TUI interface |
 | `copex ralph` | Start a Ralph Wiggum iterative loop |

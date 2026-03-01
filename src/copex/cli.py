@@ -103,7 +103,7 @@ _copex_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="chat plan ralph fleet council interactive render models skills status config init login logout tui completions stats diff"
+    opts="chat plan ralph fleet council interactive render models skills status config init login logout tui completions stats diff squad agent"
 
     case "${prev}" in
         -m|--model)
@@ -279,15 +279,23 @@ def main(
         bool,
         typer.Option("--use-cli", help="Use CLI subprocess instead of SDK (supports all models)"),
     ] = False,
+    no_squad: Annotated[
+        bool,
+        typer.Option("--no-squad", help="Disable squad mode; use single-agent chat instead"),
+    ] = False,
 ) -> None:
-    """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops."""
+    """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops.
+
+    By default, prompts run through the squad (Lead → Developer + Tester in
+    parallel).  Pass --no-squad to use single-agent chat mode instead.
+    """
     # Record HEAD commit before any command runs (for `copex diff`)
     _record_start_commit()
 
     if ctx.invoked_subcommand is None:
         effective_model = model or _DEFAULT_MODEL.value
 
-        # If -p/--prompt provided, run in non-interactive/chat mode
+        # If -p/--prompt provided, run squad (default) or chat
         if prompt is not None:
             try:
                 config = CopexConfig()
@@ -304,8 +312,12 @@ def main(
                     console.print(f"[yellow]{warning}[/yellow]")
                 config.reasoning_effort = normalized_effort
 
-                # Run chat with the prompt
-                asyncio.run(_run_chat(config, prompt, show_reasoning=True, raw=non_interactive))
+                if no_squad:
+                    # Single-agent chat mode
+                    asyncio.run(_run_chat(config, prompt, show_reasoning=True, raw=non_interactive))
+                else:
+                    # Squad mode (default): Lead → Developer + Tester
+                    asyncio.run(_run_squad(config, prompt, json_output=non_interactive))
             except ValueError:
                 console.print(f"[red]Invalid model: {effective_model}[/red]")
                 raise typer.Exit(1) from None
@@ -3608,6 +3620,354 @@ def campaign_command(
     )
 
     if failed_waves > 0 or remaining:
+        raise typer.Exit(1) from None
+
+
+# ──────────────────────────────────────────────────────────────────────
+# copex agent
+# ──────────────────────────────────────────────────────────────────────
+
+
+@app.command("agent")
+def agent_command(
+    prompt: Annotated[
+        str | None, typer.Argument(help="Prompt for the agent")
+    ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
+    reasoning: Annotated[
+        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH.value,
+    max_turns: Annotated[
+        int, typer.Option("--max-turns", "-t", help="Maximum agent turns")
+    ] = 10,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Output JSON Lines (one JSON object per turn)")
+    ] = False,
+    use_cli: Annotated[
+        bool,
+        typer.Option("--use-cli", help="Use CLI subprocess instead of SDK (supports all models)"),
+    ] = False,
+    config_file: Annotated[
+        Path | None, typer.Option("--config", "-c", help="Config file path")
+    ] = None,
+    stdin: Annotated[bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")] = False,
+) -> None:
+    """Run an agent loop: prompt → tool calls → respond → repeat.
+
+    The agent sends the prompt, observes tool calls, and continues
+    until the model stops calling tools or max-turns is reached.
+    Designed for machine consumption via --json (JSON Lines output).
+
+    Examples:
+        copex agent "Fix the failing test in src/auth.py" --max-turns 5
+        copex agent "Refactor the logger module" --json | jq .
+        echo "Add type hints" | copex agent --stdin --json
+    """
+    # Load config
+    if config_file and config_file.exists():
+        config = CopexConfig.from_file(config_file)
+    else:
+        default_path = CopexConfig.default_path()
+        config = CopexConfig.from_file(default_path) if default_path.exists() else CopexConfig()
+
+    # Override model
+    effective_model = model or _DEFAULT_MODEL.value
+    try:
+        config.model = _resolve_cli_model(effective_model)
+    except ValueError:
+        console.print(f"[red]Invalid model: {effective_model}[/red]")
+        raise typer.Exit(1) from None
+
+    # Reasoning effort
+    try:
+        requested_effort = parse_reasoning_effort(reasoning)
+        if requested_effort is None:
+            raise ValueError(reasoning)
+        normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
+        if warning and not json_output:
+            console.print(f"[yellow]{warning}[/yellow]")
+        config.reasoning_effort = normalized_effort
+    except ValueError:
+        console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
+        raise typer.Exit(1) from None
+
+    if use_cli:
+        config.use_cli = True
+
+    # Read prompt
+    if stdin:
+        if not sys.stdin.isatty():
+            prompt = sys.stdin.read().strip()
+        else:
+            console.print("[yellow]Enter prompt (Ctrl+D to submit):[/yellow]")
+            prompt = sys.stdin.read().strip()
+
+    if prompt is None and not stdin:
+        if sys.stdin.isatty():
+            console.print("[yellow]Enter prompt (Ctrl+D to submit):[/yellow]")
+        prompt = sys.stdin.read().strip()
+
+    if not prompt:
+        console.print("[red]No prompt provided[/red]")
+        raise typer.Exit(1) from None
+
+    asyncio.run(_run_agent(config, prompt, max_turns=max_turns, json_output=json_output))
+
+
+async def _run_agent(
+    config: CopexConfig,
+    prompt: str,
+    *,
+    max_turns: int = 10,
+    json_output: bool = False,
+) -> None:
+    """Run the agent loop."""
+    from copex.agent import AgentSession
+
+    client = make_client(config)
+
+    try:
+        session = AgentSession(client, max_turns=max_turns)
+        async with session:
+            if json_output:
+                async for turn in session.run_streaming(prompt):
+                    print(turn.to_json(), flush=True)
+            else:
+                result = await session.run(prompt)
+                for turn in result.turns:
+                    _print_agent_turn(turn)
+                # Summary
+                console.print()
+                stop_style = "green" if result.stop_reason == "end_turn" else "yellow"
+                console.print(
+                    Panel(
+                        f"[bold]{result.total_turns}[/bold] turns · "
+                        f"[bold]{result.total_duration_ms / 1000:.1f}s[/bold] · "
+                        f"stop: [{stop_style}]{result.stop_reason}[/{stop_style}]",
+                        title="[bold cyan]Agent Complete[/bold cyan]",
+                        border_style="cyan",
+                        expand=False,
+                    )
+                )
+                if result.error:
+                    console.print(f"[red]Error: {result.error}[/red]")
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Agent interrupted[/yellow]")
+    except Exception as e:
+        if json_output:
+            error_obj = {"turn": 0, "content": "", "tool_calls": [], "stop_reason": "error", "error": str(e)}
+            print(json.dumps(error_obj), flush=True)
+        else:
+            console.print(f"[red]Agent error: {e}[/red]")
+        raise typer.Exit(1) from None
+
+
+def _print_agent_turn(turn: Any) -> None:
+    """Render a single agent turn with Rich panels."""
+    title_style = "red" if turn.stop_reason == "error" else "cyan"
+    title = f"Turn {turn.turn}"
+
+    parts: list[str] = []
+
+    if turn.tool_calls:
+        tool_lines = []
+        for tc in turn.tool_calls:
+            name = tc.get("name", "unknown") if isinstance(tc, dict) else getattr(tc, "name", "unknown")
+            success = tc.get("success") if isinstance(tc, dict) else getattr(tc, "success", None)
+            duration = tc.get("duration") if isinstance(tc, dict) else getattr(tc, "duration", None)
+            status = "✓" if success is not False else "✗"
+            dur = f" ({duration:.0f}ms)" if duration else ""
+            tool_lines.append(f"  {status} {name}{dur}")
+        parts.append("[bold]Tools:[/bold]\n" + "\n".join(tool_lines))
+
+    if turn.content:
+        # Truncate long content for display
+        display_content = turn.content[:2000]
+        if len(turn.content) > 2000:
+            display_content += f"\n... ({len(turn.content)} chars total)"
+        parts.append(display_content)
+
+    if turn.error:
+        parts.append(f"[red]Error: {turn.error}[/red]")
+
+    body = "\n\n".join(parts) if parts else "[dim]No content[/dim]"
+
+    console.print(
+        Panel(
+            body,
+            title=f"[bold {title_style}]{title}[/bold {title_style}]",
+            subtitle=f"[dim]{turn.duration_ms / 1000:.1f}s[/dim]",
+            border_style=title_style,
+        )
+    )
+
+
+@app.command("squad")
+def squad_command(
+    prompt: Annotated[
+        str | None, typer.Argument(help="Task for the squad to work on")
+    ] = None,
+    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
+    reasoning: Annotated[
+        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH.value,
+    json_output: Annotated[
+        bool, typer.Option("--json", help="Output JSON result")
+    ] = False,
+    use_cli: Annotated[
+        bool,
+        typer.Option("--use-cli", help="Use CLI subprocess instead of SDK"),
+    ] = False,
+    config_file: Annotated[
+        Path | None, typer.Option("--config", "-c", help="Config file path")
+    ] = None,
+    stdin: Annotated[bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")] = False,
+) -> None:
+    """Run a squad of agents: Lead analyzes, Developer builds, Tester tests.
+
+    The squad automatically creates a team (Lead, Developer, Tester) and
+    orchestrates them through Fleet with parallel execution. The Lead
+    analyzes first, then Developer and Tester work in parallel using
+    the Lead's plan.
+
+    Uses Fleet features: parallel execution, adaptive concurrency,
+    rate limit handling, retries, session pooling, and cost tracking.
+
+    Examples:
+        copex squad "Build a REST API with auth"
+        copex squad "Add logging to the parser module" --model claude-sonnet-4.5
+        copex squad "Fix the failing tests" --reasoning medium --json
+    """
+    # Load config
+    if config_file and config_file.exists():
+        config = CopexConfig.from_file(config_file)
+    else:
+        default_path = CopexConfig.default_path()
+        config = CopexConfig.from_file(default_path) if default_path.exists() else CopexConfig()
+
+    # Override model
+    effective_model = model or _DEFAULT_MODEL.value
+    try:
+        config.model = _resolve_cli_model(effective_model)
+    except ValueError:
+        console.print(f"[red]Invalid model: {effective_model}[/red]")
+        raise typer.Exit(1) from None
+
+    # Reasoning effort
+    try:
+        requested_effort = parse_reasoning_effort(reasoning)
+        if requested_effort is None:
+            raise ValueError(reasoning)
+        normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
+        if warning and not json_output:
+            console.print(f"[yellow]{warning}[/yellow]")
+        config.reasoning_effort = normalized_effort
+    except ValueError:
+        console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
+        raise typer.Exit(1) from None
+
+    if use_cli:
+        config.use_cli = True
+
+    # Read prompt
+    if stdin:
+        if not sys.stdin.isatty():
+            prompt = sys.stdin.read().strip()
+        else:
+            console.print("[yellow]Enter prompt (Ctrl+D to submit):[/yellow]")
+            prompt = sys.stdin.read().strip()
+
+    if prompt is None and not stdin:
+        if sys.stdin.isatty():
+            console.print("[yellow]Enter prompt (Ctrl+D to submit):[/yellow]")
+        prompt = sys.stdin.read().strip()
+
+    if not prompt:
+        console.print("[red]No prompt provided[/red]")
+        raise typer.Exit(1) from None
+
+    asyncio.run(_run_squad(config, prompt, json_output=json_output))
+
+
+async def _run_squad(
+    config: CopexConfig,
+    prompt: str,
+    *,
+    json_output: bool = False,
+) -> None:
+    """Run the squad coordinator."""
+    from copex.squad import SquadCoordinator
+
+    def on_status(task_id: str, status: str) -> None:
+        if not json_output:
+            from copex.squad import SquadRole, _ROLE_EMOJIS
+
+            try:
+                role = SquadRole(task_id)
+                emoji = _ROLE_EMOJIS.get(role, "▸")
+                name = role.value.title()
+            except ValueError:
+                emoji = "▸"
+                name = task_id
+            console.print(f"  {emoji} {name}: [dim]{status}[/dim]")
+
+    try:
+        if not json_output:
+            console.print(
+                Panel(
+                    "[bold]🏗️ Lead[/bold] → analyzes task\n"
+                    "[bold]🔧 Developer[/bold] + [bold]🧪 Tester[/bold] → work in parallel",
+                    title="[bold cyan]Squad[/bold cyan]",
+                    border_style="cyan",
+                    expand=False,
+                )
+            )
+
+        coordinator = SquadCoordinator(config)
+        async with coordinator:
+            result = await coordinator.run(prompt, on_status=on_status)
+
+        if json_output:
+            print(result.to_json(indent=2), flush=True)
+        else:
+            for ar in result.agent_results:
+                style = "green" if ar.success else "red"
+                title = f"{ar.agent.emoji} {ar.agent.name}"
+                content = ar.content[:3000] if ar.content else "[dim]No output[/dim]"
+                if ar.content and len(ar.content) > 3000:
+                    content += f"\n... ({len(ar.content)} chars total)"
+                if ar.error:
+                    content += f"\n[red]Error: {ar.error}[/red]"
+                console.print(
+                    Panel(
+                        content,
+                        title=f"[bold {style}]{title}[/bold {style}]",
+                        subtitle=f"[dim]{ar.duration_ms / 1000:.1f}s[/dim]",
+                        border_style=style,
+                    )
+                )
+
+            console.print()
+            stop_style = "green" if result.success else "red"
+            agents_ok = sum(1 for ar in result.agent_results if ar.success)
+            agents_total = len(result.agent_results)
+            console.print(
+                Panel(
+                    f"[bold]{agents_ok}/{agents_total}[/bold] agents succeeded · "
+                    f"[bold]{result.total_duration_ms / 1000:.1f}s[/bold] total",
+                    title=f"[bold {stop_style}]Squad Complete[/bold {stop_style}]",
+                    border_style=stop_style,
+                    expand=False,
+                )
+            )
+    except KeyboardInterrupt:
+        console.print("\n[yellow]Squad interrupted[/yellow]")
+    except Exception as e:
+        if json_output:
+            error_obj = {"success": False, "error": str(e), "agents": []}
+            print(json.dumps(error_obj), flush=True)
+        else:
+            console.print(f"[red]Squad error: {e}[/red]")
         raise typer.Exit(1) from None
 
 
