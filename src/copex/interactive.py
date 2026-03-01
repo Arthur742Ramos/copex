@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -29,7 +30,10 @@ from rich.live import Live
 from rich.markdown import Markdown
 from rich.text import Text
 
+from copex.ui import print_approval_diff, print_approval_summary
+
 if TYPE_CHECKING:
+    from copex.approval import ChangePreview, ChangeStatistics
     from copex.client import Copex, StreamChunk
     from copex.config import CopexConfig
     from copex.models import Model
@@ -454,6 +458,48 @@ PROMPT_STYLE = Style.from_dict(
         "continuation": "#565f89",
     }
 )
+
+
+def prompt_approval_decision(
+    console: Console,
+    preview: ChangePreview,
+    stats: ChangeStatistics,
+    input_func: Callable[[str], str] | None = None,
+) -> str:
+    """Prompt for an approval decision with summary-first UX and diff drill-down."""
+    ask = input_func or input
+    print_approval_summary(console, preview, stats)
+
+    prompt = (
+        "Decision [y] approve/[n] reject/[d] defer/[v] view diff/"
+        "[a] approve-all/[r] reject-all: "
+    )
+    while True:
+        try:
+            answer = ask(prompt).strip().lower()
+        except EOFError:
+            return "reject"
+
+        if answer in {"v", "view", "view-diff", "diff", "full"}:
+            print_approval_diff(console, preview)
+            continue
+        if answer in {"y", "yes", "approve"}:
+            return "approve"
+        if answer in {"n", "no", "reject", "deny"}:
+            return "reject"
+        if answer in {"d", "defer", "later"}:
+            return "defer"
+        if answer in {"a", "all", "approve-all"}:
+            return "approve-all"
+        if answer in {"r", "reject-all", "deny-all"}:
+            return "reject-all"
+        if answer in {"e", "edit"}:
+            return "edit"
+
+        console.print(
+            f"[{Colors.WARNING}]Choose y/n/d/v/a/r (or e for edit).[/"
+            f"{Colors.WARNING}]"
+        )
 
 
 async def run_interactive(config: CopexConfig) -> None:

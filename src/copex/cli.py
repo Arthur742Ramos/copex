@@ -4159,6 +4159,18 @@ def squad_command(
         Path | None, typer.Option("--config", "-c", help="Config file path")
     ] = None,
     stdin: Annotated[bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")] = False,
+    auto_approve: Annotated[
+        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
+    ] = False,
+    approve: Annotated[
+        bool, typer.Option("--approve", help="Prompt before each file change")
+    ] = False,
+    dry_run: Annotated[
+        bool, typer.Option("--dry-run", help="Show file change diffs without applying them")
+    ] = False,
+    audit: Annotated[
+        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
+    ] = False,
 ) -> None:
     """Run a squad or manage the repo .squad file.
 

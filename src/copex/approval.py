@@ -32,6 +32,7 @@ class ApprovalAction(str, Enum):
 
     APPROVE = "approve"
     REJECT = "reject"
+    DEFER = "defer"
     EDIT = "edit"
 
 
@@ -705,10 +706,19 @@ class ApprovalWorkflow:
         edit_func: Callable[[Path, str], str] | None = None,
         policy_func: Callable[[ChangePreview], DecisionOutcome | ApprovalAction | bool | str]
         | None = None,
+        decision_prompt_func: Callable[
+            [Console, ChangePreview, ChangeStatistics, Callable[[str], str]],
+            ApprovalAction | str,
+        ]
+        | None = None,
     ):
         normalized_mode = normalize_approval_mode(mode)
         if normalized_mode == ApprovalMode.POLICY_BASED and policy_func is None:
             raise ValueError("policy_func is required when approval mode is policy-based")
+        if decision_prompt_func is None:
+            from copex.interactive import prompt_approval_decision
+
+            decision_prompt_func = prompt_approval_decision
         self.state = ApprovalState(mode=normalized_mode)
         self.model = model
         self.audit_enabled = audit_enabled
@@ -717,6 +727,7 @@ class ApprovalWorkflow:
         self._input = input_func or input
         self._edit = edit_func
         self._policy = policy_func
+        self._decision_prompt = decision_prompt_func
 
     @property
     def mode(self) -> ApprovalMode:
@@ -776,26 +787,41 @@ class ApprovalWorkflow:
             )
         )
 
-    def _prompt_action(self, preview: ChangePreview) -> ApprovalAction:
-        prompt = (
-            f"Approve change for {preview.file_path}? "
-            "[y]es/[n]o/[e]dit/[a]pprove-all/[r]eject-all: "
-        )
-        try:
-            answer = self._input(prompt).strip().lower()
-        except EOFError:
-            return ApprovalAction.REJECT
+    def _normalize_prompt_choice(self, choice: ApprovalAction | str) -> ApprovalAction:
+        if isinstance(choice, ApprovalAction):
+            return choice
+        answer = str(choice).strip().lower()
         if answer in {"a", "all", "approve-all"}:
             self.state.approve_all = True
             return ApprovalAction.APPROVE
         if answer in {"r", "reject-all", "deny-all"}:
             self.state.reject_all = True
             return ApprovalAction.REJECT
+        if answer in {"y", "yes", "approve"}:
+            return ApprovalAction.APPROVE
+        if answer in {"n", "no", "reject", "deny"}:
+            return ApprovalAction.REJECT
+        if answer in {"d", "defer", "later"}:
+            return ApprovalAction.DEFER
         if answer in {"e", "edit"}:
             return ApprovalAction.EDIT
-        if answer in {"n", "no", "reject"}:
+        raise ValueError(f"Unsupported approval choice: {choice}")
+
+    def _prompt_action(self, preview: ChangePreview, stats: ChangeStatistics) -> ApprovalAction:
+        if self._decision_prompt is not None:
+            choice = self._decision_prompt(self._console, preview, stats, self._input)
+            return self._normalize_prompt_choice(choice)
+
+        prompt = (
+            f"Approve change for {preview.file_path}? "
+            "[y]es/[n]o/[d]efer/[e]dit/[a]pprove-all/[r]eject-all: "
+        )
+        try:
+            return self._normalize_prompt_choice(self._input(prompt))
+        except EOFError:
             return ApprovalAction.REJECT
-        return ApprovalAction.APPROVE
+        except ValueError:
+            return ApprovalAction.APPROVE
 
     def _coerce_policy_outcome(
         self, value: DecisionOutcome | ApprovalAction | bool | str
@@ -807,6 +833,8 @@ class ApprovalWorkflow:
                 return DecisionOutcome.APPROVE
             if value == ApprovalAction.REJECT:
                 return DecisionOutcome.REJECT
+            if value == ApprovalAction.DEFER:
+                return DecisionOutcome.REQUIRE_INPUT
             return DecisionOutcome.REQUIRE_INPUT
         if isinstance(value, bool):
             return DecisionOutcome.APPROVE if value else DecisionOutcome.REJECT
@@ -844,13 +872,13 @@ class ApprovalWorkflow:
             return DecisionOutcome.REQUIRE_INPUT
         raise ValueError(f"Unsupported approval mode: {self.mode.value}")
 
-    def _decide_action(self, preview: ChangePreview) -> ApprovalAction:
+    def _decide_action(self, preview: ChangePreview, stats: ChangeStatistics) -> ApprovalAction:
         outcome = self._decide_outcome(preview)
         if outcome == DecisionOutcome.APPROVE:
             return ApprovalAction.APPROVE
         if outcome == DecisionOutcome.REJECT:
             return ApprovalAction.REJECT
-        return self._prompt_action(preview)
+        return self._prompt_action(preview, stats)
 
     def _edited_content(self, change: ProposedFileChange, fallback: str) -> str:
         if self._edit is not None:
@@ -877,8 +905,9 @@ class ApprovalWorkflow:
 
         reviewed: list[ReviewedChange] = []
         for proposal, preview in zip(proposals, previews, strict=False):
-            self._render_preview(preview, stats)
-            action = self._decide_action(preview)
+            if self.mode != ApprovalMode.MANUAL or self._decision_prompt is None:
+                self._render_preview(preview, stats)
+            action = self._decide_action(preview, stats)
             dry_run = self.mode == ApprovalMode.DRY_RUN
             apply_change = action in {ApprovalAction.APPROVE, ApprovalAction.EDIT} and not dry_run
             edited_content = None
@@ -926,7 +955,10 @@ class ApprovalWorkflow:
                     path.write_text(proposal.before_content, encoding="utf-8")
                 elif path.exists():
                     path.unlink()
-                state = "dry-run revert" if item.dry_run else "reverted"
+                if item.action == ApprovalAction.DEFER:
+                    state = "deferred"
+                else:
+                    state = "dry-run revert" if item.dry_run else "reverted"
                 messages.append(f"{state}: {proposal.display_path}")
                 continue
 

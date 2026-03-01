@@ -6,7 +6,15 @@ import time
 
 import pytest
 
-from copex.ui import ActivityType, CopexUI, Theme, ToolCallInfo
+from copex.approval import ProposedFileChange, build_preview, summarize_changes
+from copex.ui import (
+    ActivityType,
+    CopexUI,
+    Theme,
+    ToolCallInfo,
+    build_approval_diff_panel,
+    build_approval_summary_panel,
+)
 
 
 class TestCopexUISpinner:
@@ -232,3 +240,45 @@ class TestPlanUI:
         spinner2 = ui._get_spinner()
         # Spinner should cycle
         assert spinner1 != spinner2 or len(ui._spinners) == 1
+
+
+class TestApprovalPanels:
+    """Tests for approval UX panels."""
+
+    def test_build_approval_summary_panel_shows_risk_and_paths(self, tmp_path):
+        preview = build_preview(
+            ProposedFileChange(
+                path=tmp_path / "auth" / "token.txt",
+                display_path="auth/token.txt",
+                existed_before=True,
+                before_content="token = 'old'\n",
+                after_content="api_key = 'new'\n",
+            )
+        )
+        stats = summarize_changes([preview])
+
+        panel = build_approval_summary_panel(preview, stats)
+        plain = str(panel.renderable)
+
+        assert "File: auth/token.txt" in plain
+        assert "Risk: high" in plain
+        assert "Touched paths: auth/token.txt" in plain
+
+    def test_build_approval_diff_panel_shows_diff_content(self, tmp_path):
+        preview = build_preview(
+            ProposedFileChange(
+                path=tmp_path / "sample.txt",
+                display_path="sample.txt",
+                existed_before=True,
+                before_content="before\n",
+                after_content="after\n",
+            )
+        )
+
+        panel = build_approval_diff_panel(preview)
+        plain = str(panel.renderable)
+
+        assert "--- a/sample.txt" in plain
+        assert "+++ b/sample.txt" in plain
+        assert "-before" in plain
+        assert "+after" in plain

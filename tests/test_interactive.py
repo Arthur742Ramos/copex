@@ -3,15 +3,17 @@
 import pytest
 import time
 
+from copex.approval import ProposedFileChange, build_preview, summarize_changes
 from copex.interactive import (
     Colors,
     Icons,
-    Spinners,
-    ToolCall,
-    StreamState,
-    StreamRenderer,
     SlashCompleter,
+    Spinners,
+    StreamRenderer,
+    StreamState,
+    ToolCall,
     _build_stats_line,
+    prompt_approval_decision,
 )
 from rich.console import Console
 
@@ -238,3 +240,55 @@ class TestFormatArgPreview:
         
         result = renderer._format_arg_preview({})
         assert result == ""
+
+
+class TestApprovalDecisionPrompt:
+    """Tests for interactive approval decision flow."""
+
+    def test_prompt_approval_decision_supports_defer(self, tmp_path):
+        preview = build_preview(
+            ProposedFileChange(
+                path=tmp_path / "sample.txt",
+                display_path="sample.txt",
+                existed_before=True,
+                before_content="old\n",
+                after_content="new\n",
+            )
+        )
+        stats = summarize_changes([preview])
+        console = Console(force_terminal=False, color_system=None)
+
+        decision = prompt_approval_decision(
+            console,
+            preview,
+            stats,
+            input_func=lambda _: "d",
+        )
+
+        assert decision == "defer"
+
+    def test_prompt_approval_decision_allows_diff_drilldown_then_approve(self, tmp_path):
+        preview = build_preview(
+            ProposedFileChange(
+                path=tmp_path / "sample.txt",
+                display_path="sample.txt",
+                existed_before=True,
+                before_content="old\n",
+                after_content="new\n",
+            )
+        )
+        stats = summarize_changes([preview])
+        console = Console(force_terminal=False, color_system=None, record=True)
+        answers = iter(["v", "y"])
+
+        decision = prompt_approval_decision(
+            console,
+            preview,
+            stats,
+            input_func=lambda _: next(answers),
+        )
+
+        output = console.export_text()
+        assert decision == "approve"
+        assert "Approval Summary" in output
+        assert "Full Diff" in output

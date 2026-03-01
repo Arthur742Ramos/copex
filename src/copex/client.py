@@ -27,11 +27,11 @@ from copex.circuit_breaker import (
     ModelAwareBreaker,
     SlidingWindowBreaker,  # noqa: F401
 )
-from copex.context import SmartContextWindow
 from copex.config import CopexConfig
+from copex.context import SmartContextWindow
 from copex.exceptions import AllModelsUnavailable, CircuitBreakerOpen
-from copex.metrics import MetricsCollector, get_collector
 from copex.memory import auto_capture_memory
+from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
 from copex.sdk_patch import patch_copilot_client  # noqa: F401
 from copex.session_pool import SessionPool  # noqa: F401

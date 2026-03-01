@@ -1085,6 +1085,121 @@ def print_tool_result(
     console.print(text)
 
 
+def _risk_style(severity: str) -> str:
+    normalized = severity.strip().lower()
+    if normalized == "high":
+        return Theme.ERROR
+    if normalized == "medium":
+        return Theme.WARNING
+    return Theme.SUCCESS
+
+
+def _colorize_diff_text(unified_diff: str) -> Text:
+    text = Text()
+    for line in unified_diff.splitlines():
+        style = ""
+        if line.startswith("+++") or line.startswith("---"):
+            style = "bold cyan"
+        elif line.startswith("@@"):
+            style = "cyan"
+        elif line.startswith("+"):
+            style = "green"
+        elif line.startswith("-"):
+            style = "red"
+        text.append(line + "\n", style=style)
+    return text
+
+
+def build_approval_summary_panel(preview: Any, stats: Any | None = None) -> Panel:
+    """Build a compact approval summary panel (summary/risk first)."""
+    file_path = str(getattr(preview, "file_path", "unknown"))
+    operation = str(getattr(preview, "operation", "edit"))
+    summary = str(getattr(preview, "summary", ""))
+    risk = getattr(preview, "risk", None)
+    severity = str(getattr(risk, "severity", "low"))
+    reasons = list(getattr(risk, "reasons", []) or getattr(preview, "risk_flags", []))
+    risk_style = _risk_style(severity)
+
+    files_changed = int(getattr(stats, "files_changed", 1) if stats is not None else 1)
+    lines_added = int(
+        getattr(stats, "lines_added", getattr(preview, "lines_added", 0))
+        if stats is not None
+        else getattr(preview, "lines_added", 0)
+    )
+    lines_removed = int(
+        getattr(stats, "lines_removed", getattr(preview, "lines_removed", 0))
+        if stats is not None
+        else getattr(preview, "lines_removed", 0)
+    )
+    touched_paths = list(getattr(stats, "touched_paths", []) if stats is not None else [])
+    if not touched_paths:
+        touched_paths = [file_path]
+    touched_preview = ", ".join(touched_paths[:3])
+    if len(touched_paths) > 3:
+        touched_preview += f", +{len(touched_paths) - 3} more"
+
+    text = Text()
+    text.append(f"File: {file_path}\n", style=f"bold {Theme.PRIMARY}")
+    text.append(f"Operation: {operation}\n", style=Theme.INFO)
+    text.append(f"Summary: {summary}\n", style=Theme.MUTED)
+    text.append(f"Change set: files={files_changed} +{lines_added} -{lines_removed}\n", style=Theme.MUTED)
+    text.append(f"Touched paths: {touched_preview}\n", style=Theme.MUTED)
+    if reasons:
+        text.append(f"Risk: {severity.lower()} ({', '.join(reasons)})\n", style=risk_style)
+    else:
+        text.append("Risk: low\n", style=Theme.SUCCESS)
+    text.append(
+        "Actions: [y] approve • [n] reject • [d] defer • [v] view diff "
+        "• [a] approve-all • [r] reject-all",
+        style=Theme.MUTED,
+    )
+
+    return Panel(
+        text,
+        title=f"[{Theme.WARNING}]Approval Summary[/{Theme.WARNING}]",
+        title_align="left",
+        border_style=risk_style if reasons else Theme.BORDER_ACTIVE,
+        box=ROUNDED,
+        padding=(0, 1),
+        expand=True,
+    )
+
+
+def build_approval_diff_panel(preview: Any) -> Panel:
+    """Build a full diff drill-down panel for approval flow."""
+    file_path = str(getattr(preview, "file_path", "unknown"))
+    diff_text = str(getattr(preview, "unified_diff", ""))
+    truncated = bool(getattr(preview, "diff_truncated", False))
+    total_lines = int(getattr(preview, "diff_lines_total", 0) or 0)
+
+    content = _colorize_diff_text(diff_text) if diff_text else Text("(no diff available)", style=Theme.MUTED)
+    if truncated and total_lines > 0:
+        content.append(
+            f"\n[truncated preview shown: {total_lines} total diff lines]",
+            style=Theme.WARNING,
+        )
+
+    return Panel(
+        content,
+        title=f"[{Theme.INFO}]Full Diff · {file_path}[/{Theme.INFO}]",
+        title_align="left",
+        border_style=Theme.INFO,
+        box=ROUNDED,
+        padding=(0, 1),
+        expand=True,
+    )
+
+
+def print_approval_summary(console: Console, preview: Any, stats: Any | None = None) -> None:
+    """Print approval summary panel."""
+    console.print(build_approval_summary_panel(preview, stats))
+
+
+def print_approval_diff(console: Console, preview: Any) -> None:
+    """Print full diff drill-down panel."""
+    console.print(build_approval_diff_panel(preview))
+
+
 # ═══════════════════════════════════════════════════════════════════════════════
 # Progress Components for Ralph and Plan
 # ═══════════════════════════════════════════════════════════════════════════════
