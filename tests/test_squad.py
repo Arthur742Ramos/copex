@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import textwrap
 from unittest.mock import AsyncMock, patch
 
 import pytest
@@ -16,7 +17,6 @@ from copex.config import CopexConfig
 from copex.fleet import Fleet, FleetConfig, FleetResult
 from copex.models import Model, ReasoningEffort
 from copex.squad import (
-    _KNOWN_ROLE_PHASES,
     _ROLE_EMOJIS,
     _ROLE_PROMPTS,
     SquadAgent,
@@ -1592,3 +1592,221 @@ class TestSubtasks:
         assert "lead" in deps
         assert "developer__sub1" in deps
         assert "developer__sub2" in deps
+
+
+# ===========================================================================
+# 20. .squad TOML support and CLI management
+# ===========================================================================
+
+
+class TestSquadTomlSupport:
+
+    def test_load_squad_file(self, tmp_path):
+        squad_text = textwrap.dedent(
+            """
+            [squad]
+            lead = "Architect"
+            [[squad.agents]]
+            name = "Developer"
+            role = "Writes implementation code"
+            phase = 2
+            [[squad.agents]]
+            name = "Tester"
+            role = "Writes and runs tests"
+            phase = 3
+            """
+        ).strip()
+        (tmp_path / ".squad").write_text(squad_text, encoding="utf-8")
+
+        team = SquadTeam.load_squad_file(tmp_path)
+        assert team is not None
+        assert team.get_agent("lead") is not None
+        assert team.get_agent("lead").name == "Architect"
+        assert team.get_agent("developer") is not None
+        assert team.get_agent("developer").phase == 2
+        assert "Writes implementation code" in team.get_agent("developer").system_prompt
+        assert team.get_agent("tester") is not None
+        assert team.get_agent("tester").phase == 3
+
+    def test_save_squad_file(self, tmp_path):
+        team = SquadTeam.default()
+        team.save_squad_file(tmp_path)
+        squad_path = tmp_path / ".squad"
+        assert squad_path.is_file()
+        text = squad_path.read_text(encoding="utf-8")
+        assert "[squad]" in text
+        assert "lead = " in text
+        assert "[[squad.agents]]" in text
+
+
+class TestSquadPriorityOverAI:
+
+    def test_from_repo_or_file_prefers_squad_file(self, tmp_path):
+        (tmp_path / ".squad").write_text(
+            textwrap.dedent(
+                """
+                [squad]
+                lead = "Architect"
+                [[squad.agents]]
+                name = "Developer"
+                role = "Writes implementation code"
+                phase = 2
+                """
+            ).strip(),
+            encoding="utf-8",
+        )
+
+        async def _test():
+            with patch.object(SquadTeam, "from_repo_ai", new_callable=AsyncMock) as mock_ai:
+                team = await SquadTeam.from_repo_or_file(CopexConfig(), path=tmp_path)
+                assert mock_ai.await_count == 0
+                assert team.get_agent("lead").name == "Architect"
+                assert team.get_agent("developer") is not None
+
+        run(_test())
+
+    def test_from_repo_or_file_falls_back_to_ai(self, tmp_path):
+        ai_team = SquadTeam.default()
+
+        async def _test():
+            with patch.object(
+                SquadTeam,
+                "from_repo_ai",
+                new_callable=AsyncMock,
+                return_value=ai_team,
+            ) as mock_ai:
+                team = await SquadTeam.from_repo_or_file(CopexConfig(), path=tmp_path)
+                mock_ai.assert_awaited_once()
+                assert team is ai_team
+
+        run(_test())
+
+
+class TestSquadCLIManagement:
+
+    def test_squad_show_when_missing(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "show"])
+        assert result.exit_code == 0
+        assert "No .squad file found" in result.output
+
+    def test_squad_init_creates_file(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        with patch.object(SquadTeam, "from_repo_ai", new_callable=AsyncMock, return_value=SquadTeam.default()):
+            result = runner.invoke(app, ["squad", "init"])
+
+        assert result.exit_code == 0, result.output
+        assert (tmp_path / ".squad").is_file()
+
+    def test_squad_add_updates_file(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        SquadTeam.default().save_squad_file(tmp_path)
+        updated_team = SquadTeam(
+            agents=[
+                SquadAgent(name="Architect", role="lead", emoji="🏗️", system_prompt="Lead", phase=1),
+                SquadAgent(
+                    name="Developer",
+                    role="developer",
+                    emoji="🔧",
+                    system_prompt="Build code",
+                    phase=2,
+                ),
+                SquadAgent(
+                    name="Security Auditor",
+                    role="security_auditor",
+                    emoji="🔐",
+                    system_prompt="Review vulnerabilities",
+                    phase=3,
+                ),
+            ]
+        )
+
+        runner = CliRunner()
+        with patch.object(
+            SquadTeam,
+            "update_from_request",
+            new_callable=AsyncMock,
+            return_value=updated_team,
+        ) as mock_update:
+            result = runner.invoke(
+                app,
+                [
+                    "squad",
+                    "add",
+                    "Add a Security Auditor agent that reviews code for vulnerabilities",
+                ],
+            )
+
+        assert result.exit_code == 0, result.output
+        mock_update.assert_awaited_once()
+        assert "add:" in mock_update.await_args.args[0]
+        assert "Security Auditor" in (tmp_path / ".squad").read_text(encoding="utf-8")
+
+    def test_squad_remove_updates_file(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        SquadTeam.default().save_squad_file(tmp_path)
+        updated_team = SquadTeam(
+            agents=[
+                SquadAgent(name="Architect", role="lead", emoji="🏗️", system_prompt="Lead", phase=1),
+                SquadAgent(
+                    name="Developer",
+                    role="developer",
+                    emoji="🔧",
+                    system_prompt="Build code",
+                    phase=2,
+                ),
+                SquadAgent(
+                    name="Tester",
+                    role="tester",
+                    emoji="🧪",
+                    system_prompt="Test code",
+                    phase=3,
+                ),
+            ]
+        )
+
+        runner = CliRunner()
+        with patch.object(
+            SquadTeam,
+            "update_from_request",
+            new_callable=AsyncMock,
+            return_value=updated_team,
+        ) as mock_update:
+            result = runner.invoke(app, ["squad", "remove", "Remove the Docs agent"])
+
+        assert result.exit_code == 0, result.output
+        mock_update.assert_awaited_once()
+        assert "remove:" in mock_update.await_args.args[0]
+        assert "Docs" not in (tmp_path / ".squad").read_text(encoding="utf-8")
+
+    def test_squad_reset_deletes_file(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        SquadTeam.default().save_squad_file(tmp_path)
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "reset"])
+
+        assert result.exit_code == 0, result.output
+        assert not (tmp_path / ".squad").exists()

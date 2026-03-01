@@ -27,6 +27,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+try:
+    import tomllib
+except ImportError:  # pragma: no cover - Python < 3.11
+    import tomli as tomllib  # type: ignore
+
 from copex.config import CopexConfig
 from copex.fleet import Fleet, FleetConfig, FleetResult
 from copex.json_utils import extract_json_array
@@ -276,6 +281,29 @@ _KNOWN_ROLE_PHASES: dict[str, int] = {
     "docs": 4,
 }
 
+_ROLE_DESCRIPTIONS: dict[str, str] = {
+    "lead": "Leads architecture and task planning",
+    "developer": "Writes implementation code",
+    "tester": "Writes and runs tests",
+    "docs": "Updates documentation",
+    "devops": "Maintains CI/CD and infrastructure",
+    "frontend": "Builds frontend UI and client behavior",
+    "backend": "Builds backend services and APIs",
+}
+
+
+def _normalize_role_identifier(name: str) -> str:
+    normalized = re.sub(r"[^a-z0-9]+", "_", name.strip().lower()).strip("_")
+    return normalized or "agent"
+
+
+def _clamp_phase(value: Any, fallback: int = 2) -> int:
+    try:
+        phase = int(value)
+    except (TypeError, ValueError):
+        phase = fallback
+    return max(1, min(4, phase))
+
 
 @dataclass
 class SquadAgent:
@@ -315,6 +343,7 @@ class SquadTeam:
     """A team of squad agents."""
 
     agents: list[SquadAgent] = field(default_factory=list)
+    SQUAD_FILE = Path(".squad")
 
     @classmethod
     def default(cls) -> SquadTeam:
@@ -365,6 +394,313 @@ class SquadTeam:
             roles.append(SquadRole.DEVELOPER)
 
         return cls(agents=[SquadAgent.default_for_role(r) for r in roles])
+
+    @classmethod
+    def _resolve_squad_file_path(cls, path: Path | None = None) -> Path:
+        if path is None:
+            return cls.SQUAD_FILE
+        if path.name == ".squad":
+            return path
+        return path / cls.SQUAD_FILE
+
+    @staticmethod
+    def _squad_role_description(agent: SquadAgent) -> str:
+        known = _ROLE_DESCRIPTIONS.get(agent.role)
+        if known:
+            return known
+        prefix = f"You are the {agent.name}. "
+        if agent.system_prompt.startswith(prefix):
+            description = agent.system_prompt[len(prefix):].strip()
+            if description:
+                return description
+        text = agent.system_prompt.strip()
+        if text:
+            return text
+        return f"Handles {agent.name} responsibilities"
+
+    @classmethod
+    def _from_squad_payload(cls, data: dict[str, Any]) -> SquadTeam | None:
+        squad = data.get("squad")
+        if not isinstance(squad, dict):
+            return None
+
+        lead_name_raw = squad.get("lead", "Lead")
+        lead_name = str(lead_name_raw).strip() if lead_name_raw is not None else "Lead"
+        if not lead_name:
+            lead_name = "Lead"
+
+        lead_prompt = f"You are {lead_name}. {_ROLE_PROMPTS['lead']}"
+        agents: list[SquadAgent] = [
+            SquadAgent(
+                name=lead_name,
+                role=SquadRole.LEAD.value,
+                emoji=_ROLE_EMOJIS.get(SquadRole.LEAD.value, "🏗️"),
+                system_prompt=lead_prompt,
+                phase=1,
+            )
+        ]
+
+        raw_agents = squad.get("agents", [])
+        if not isinstance(raw_agents, list):
+            raw_agents = []
+
+        seen_roles: set[str] = {SquadRole.LEAD.value}
+        for item in raw_agents:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+
+            role_id_raw = str(item.get("id", "")).strip().lower()
+            role_id = role_id_raw or _normalize_role_identifier(name)
+            if not role_id or role_id in seen_roles:
+                continue
+            seen_roles.add(role_id)
+
+            role_description = str(item.get("role", "")).strip()
+            prompt_override = str(item.get("prompt", "")).strip()
+            if prompt_override:
+                system_prompt = prompt_override
+            elif role_description:
+                system_prompt = f"You are the {name}. {role_description}"
+            else:
+                system_prompt = _ROLE_PROMPTS.get(
+                    role_id,
+                    f"You are the {name}. Focus on your area of expertise for this task.",
+                )
+
+            phase = _clamp_phase(
+                item.get("phase", _KNOWN_ROLE_PHASES.get(role_id, 2)),
+                fallback=_KNOWN_ROLE_PHASES.get(role_id, 2),
+            )
+            subtasks_raw = item.get("subtasks", [])
+            subtasks = (
+                [str(s).strip() for s in subtasks_raw if str(s).strip()]
+                if isinstance(subtasks_raw, list)
+                else []
+            )
+
+            emoji_raw = str(item.get("emoji", "")).strip()
+            agents.append(
+                SquadAgent(
+                    name=name,
+                    role=role_id,
+                    emoji=emoji_raw or _ROLE_EMOJIS.get(role_id, "🔹"),
+                    system_prompt=system_prompt,
+                    phase=phase,
+                    subtasks=subtasks,
+                )
+            )
+
+        return cls(agents=agents)
+
+    def _to_squad_payload(self) -> dict[str, Any]:
+        lead_agent = self.get_agent(SquadRole.LEAD.value)
+        lead_name = lead_agent.name if lead_agent is not None else "Lead"
+        serialized_agents: list[dict[str, Any]] = []
+        for agent in self.agents:
+            if agent.role == SquadRole.LEAD.value:
+                continue
+            item: dict[str, Any] = {
+                "name": agent.name,
+                "role": self._squad_role_description(agent),
+                "phase": agent.phase,
+            }
+            normalized_name_role = _normalize_role_identifier(agent.name)
+            if normalized_name_role != agent.role:
+                item["id"] = agent.role
+            if agent.subtasks:
+                item["subtasks"] = agent.subtasks
+            serialized_agents.append(item)
+        return {
+            "squad": {
+                "lead": lead_name,
+                "agents": serialized_agents,
+            }
+        }
+
+    @classmethod
+    def load_squad_file(cls, path: Path | None = None) -> SquadTeam | None:
+        """Load team composition from .squad TOML."""
+        config_path = cls._resolve_squad_file_path(path)
+        if not config_path.is_file():
+            return None
+        try:
+            with open(config_path, "rb") as f:
+                data = tomllib.load(f)
+            if not isinstance(data, dict):
+                return None
+            team = cls._from_squad_payload(data)
+            if team and team.agents:
+                logger.info(f"Loaded squad team from {config_path}: {[a.role for a in team.agents]}")
+                return team
+        except Exception as e:
+            logger.warning(f"Failed to load .squad file from {config_path}: {e}")
+        return None
+
+    def save_squad_file(self, path: Path | None = None) -> None:
+        """Save team composition to .squad TOML."""
+        config_path = self._resolve_squad_file_path(path)
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = self._to_squad_payload().get("squad", {})
+        lead_name = str(payload.get("lead", "Lead"))
+        agents = payload.get("agents", [])
+
+        lines = [
+            "[squad]",
+            f"lead = {json.dumps(lead_name, ensure_ascii=False)}",
+        ]
+        if isinstance(agents, list):
+            for item in agents:
+                if not isinstance(item, dict):
+                    continue
+                name = str(item.get("name", "")).strip()
+                role_desc = str(item.get("role", "")).strip()
+                if not name or not role_desc:
+                    continue
+                lines.append("")
+                lines.append("[[squad.agents]]")
+                lines.append(f"name = {json.dumps(name, ensure_ascii=False)}")
+                lines.append(f"role = {json.dumps(role_desc, ensure_ascii=False)}")
+                lines.append(f"phase = {_clamp_phase(item.get('phase', 2), fallback=2)}")
+
+                role_id = str(item.get("id", "")).strip().lower()
+                if role_id:
+                    lines.append(f"id = {json.dumps(role_id, ensure_ascii=False)}")
+
+                subtasks = item.get("subtasks")
+                if isinstance(subtasks, list):
+                    normalized = [str(subtask).strip() for subtask in subtasks if str(subtask).strip()]
+                    if normalized:
+                        subtasks_str = ", ".join(
+                            json.dumps(subtask, ensure_ascii=False) for subtask in normalized
+                        )
+                        lines.append(f"subtasks = [{subtasks_str}]")
+
+        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        logger.info(f"Squad team saved to {config_path}")
+
+    @classmethod
+    async def from_repo_or_file(
+        cls,
+        config: CopexConfig | None = None,
+        path: Path | None = None,
+        *,
+        use_ai: bool = True,
+    ) -> SquadTeam:
+        """Prefer .squad file, then AI analysis (or pattern matching fallback)."""
+        root = path or Path.cwd()
+        from_file = cls.load_squad_file(root)
+        if from_file is not None:
+            return from_file
+        if not use_ai:
+            return cls.from_repo(root)
+        return await cls.from_repo_ai(config=config, path=root)
+
+    @classmethod
+    async def update_from_request(
+        cls,
+        request: str,
+        *,
+        config: CopexConfig | None = None,
+        path: Path | None = None,
+    ) -> SquadTeam:
+        """Use AI to apply a natural-language edit request to a squad definition."""
+        # Lazy import to avoid circular dependency
+        from copex.cli_client import CopilotCLI
+        from copex.models import Model, ReasoningEffort
+
+        root = path or Path.cwd()
+        current_team = cls.load_squad_file(root)
+        if current_team is None:
+            current_team = await cls.from_repo_ai(config=config, path=root)
+
+        current_payload = current_team._to_squad_payload()
+        squad_payload = current_payload.get("squad", {})
+        current_agents = squad_payload.get("agents", [])
+        lead_name = squad_payload.get("lead", "Lead")
+
+        prompt_parts = [
+            "You update a squad configuration from a natural-language request.",
+            "",
+            "Current configuration:",
+            f"Lead: {lead_name}",
+            json.dumps(current_agents, indent=2, ensure_ascii=False),
+            "",
+            f"Request: {request}",
+            "",
+            "Return ONLY a JSON array of objects with:",
+            '- "name": agent display name',
+            '- "role": short responsibility sentence',
+            '- "phase": integer 1-4',
+            '- "id": optional snake_case role identifier',
+            '- "lead": optional boolean (true for lead entry)',
+            "",
+            "Rules:",
+            "- Include exactly one lead entry (lead=true or phase=1).",
+            "- Keep unaffected agents unless the request removes them.",
+            "- Use unique names.",
+            "- Keep team compact (typically 3-6 agents).",
+        ]
+        prompt = "\n".join(prompt_parts)
+
+        ai_config = (config or CopexConfig()).model_copy()
+        ai_config.model = Model.CLAUDE_OPUS_4_6_FAST
+        ai_config.reasoning_effort = ReasoningEffort.LOW
+        ai_config.streaming = False
+        ai_config.use_cli = True
+
+        async with CopilotCLI(ai_config) as cli:
+            response = await cli.send(prompt)
+
+        parsed_agents = extract_json_array(response.content.strip())
+        if not parsed_agents:
+            raise ValueError("AI returned an empty squad configuration")
+
+        updated_lead = str(lead_name).strip() or "Lead"
+        updated_agents: list[dict[str, Any]] = []
+        seen_names: set[str] = set()
+
+        for item in parsed_agents:
+            if not isinstance(item, dict):
+                continue
+            name = str(item.get("name", "")).strip()
+            if not name:
+                continue
+            name_key = name.casefold()
+            if name_key in seen_names:
+                continue
+            seen_names.add(name_key)
+
+            phase = _clamp_phase(item.get("phase", 2), fallback=2)
+            if bool(item.get("lead")) or phase == 1:
+                updated_lead = name
+                continue
+
+            role_description = str(item.get("role", "")).strip()
+            role_id = str(item.get("id", "")).strip().lower()
+            agent_entry: dict[str, Any] = {
+                "name": name,
+                "role": role_description or f"Handles {name} responsibilities",
+                "phase": phase,
+            }
+            if role_id:
+                agent_entry["id"] = role_id
+            subtasks = item.get("subtasks")
+            if isinstance(subtasks, list):
+                normalized_subtasks = [
+                    str(subtask).strip() for subtask in subtasks if str(subtask).strip()
+                ]
+                if normalized_subtasks:
+                    agent_entry["subtasks"] = normalized_subtasks
+            updated_agents.append(agent_entry)
+
+        updated_payload = {"squad": {"lead": updated_lead, "agents": updated_agents}}
+        team = cls._from_squad_payload(updated_payload)
+        if team is None:
+            raise ValueError("AI returned an invalid squad definition")
+        return team
 
     @classmethod
     async def from_repo_ai(
@@ -746,7 +1082,7 @@ class SquadCoordinator:
         """The squad team."""
         if self._team is None:
             # Sync fallback if team requested before async init
-            self._team = SquadTeam.from_repo()
+            self._team = SquadTeam.load_squad_file() or SquadTeam.from_repo()
         return self._team
 
     async def __aenter__(self) -> SquadCoordinator:
@@ -772,9 +1108,9 @@ class SquadCoordinator:
         """
         start_time = time.monotonic()
 
-        # Lazy init: analyze repo with AI if team not provided
+        # Lazy init: prefer .squad, then AI repo analysis
         if self._team is None:
-            self._team = await SquadTeam.from_repo_ai(self._config)
+            self._team = await SquadTeam.from_repo_or_file(self._config)
 
         if self._project_context is None:
             self._project_context = self._discover_project_context()

@@ -3804,8 +3804,9 @@ def _print_agent_turn(turn: Any) -> None:
 
 @app.command("squad")
 def squad_command(
-    prompt: Annotated[
-        str | None, typer.Argument(help="Task for the squad to work on")
+    args: Annotated[
+        list[str] | None,
+        typer.Argument(help="Task for the squad, or subcommand (show/init/add/remove/reset)"),
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
@@ -3827,21 +3828,39 @@ def squad_command(
     ] = None,
     stdin: Annotated[bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")] = False,
 ) -> None:
-    """Run a squad of agents: Lead analyzes, Developer builds, Tester tests.
+    """Run a squad or manage the repo .squad file.
 
-    The squad automatically creates a team (Lead, Developer, Tester) and
-    orchestrates them through Fleet with parallel execution. The Lead
-    analyzes first, then Developer and Tester work in parallel using
-    the Lead's plan.
+    Management subcommands:
+      - show: display .squad content
+      - init: create .squad from AI repo analysis
+      - add/remove: apply natural-language edits to .squad using AI
+      - reset: delete .squad and fall back to dynamic AI analysis
 
-    Uses Fleet features: parallel execution, adaptive concurrency,
-    rate limit handling, retries, session pooling, and cost tracking.
+    Without a management subcommand, this runs the squad workflow.
 
     Examples:
         copex squad "Build a REST API with auth"
-        copex squad "Add logging to the parser module" --model claude-sonnet-4.5
-        copex squad "Fix the failing tests" --reasoning medium --json
+        copex squad show
+        copex squad init
+        copex squad add "Add a Security Auditor agent that reviews code for vulnerabilities"
+        copex squad remove "Remove the Docs agent"
+        copex squad reset
     """
+    raw_args = args or []
+    subcommand = raw_args[0].lower() if raw_args else None
+    if subcommand == "show":
+        if len(raw_args) != 1:
+            console.print("[red]Usage: copex squad show[/red]")
+            raise typer.Exit(1) from None
+        _show_squad_file(json_output=json_output)
+        return
+    if subcommand == "reset":
+        if len(raw_args) != 1:
+            console.print("[red]Usage: copex squad reset[/red]")
+            raise typer.Exit(1) from None
+        _reset_squad_file(json_output=json_output)
+        return
+
     # Load config
     if config_file and config_file.exists():
         config = CopexConfig.from_file(config_file)
@@ -3873,6 +3892,25 @@ def squad_command(
     if use_cli:
         config.use_cli = True
 
+    if subcommand == "init":
+        if len(raw_args) != 1:
+            console.print("[red]Usage: copex squad init[/red]")
+            raise typer.Exit(1) from None
+        asyncio.run(_init_squad_file(config, json_output=json_output))
+        return
+
+    if subcommand in {"add", "remove"}:
+        request = " ".join(raw_args[1:]).strip()
+        if not request:
+            console.print(f"[red]Usage: copex squad {subcommand} \"<request>\"[/red]")
+            raise typer.Exit(1) from None
+        asyncio.run(
+            _update_squad_file(config, request, action=subcommand, json_output=json_output)
+        )
+        return
+
+    prompt = " ".join(raw_args).strip() if raw_args else None
+
     # Read prompt
     if stdin:
         if not sys.stdin.isatty():
@@ -3891,6 +3929,95 @@ def squad_command(
         raise typer.Exit(1) from None
 
     asyncio.run(_run_squad(config, prompt, json_output=json_output, no_ai=no_ai))
+
+
+def _squad_file_path(path: Path | None = None) -> Path:
+    root = path or Path.cwd()
+    return root / ".squad"
+
+
+def _show_squad_file(*, json_output: bool = False) -> None:
+    squad_path = _squad_file_path()
+    if not squad_path.is_file():
+        if json_output:
+            print(json.dumps({"exists": False, "path": str(squad_path)}), flush=True)
+        else:
+            console.print("[yellow]No .squad file found.[/yellow]")
+        return
+
+    content = squad_path.read_text(encoding="utf-8")
+    if json_output:
+        print(
+            json.dumps({"exists": True, "path": str(squad_path), "content": content}, ensure_ascii=False),
+            flush=True,
+        )
+    else:
+        console.print(f"[cyan]{squad_path}[/cyan]")
+        console.print(content)
+
+
+def _reset_squad_file(*, json_output: bool = False) -> None:
+    squad_path = _squad_file_path()
+    existed = squad_path.is_file()
+    if existed:
+        squad_path.unlink()
+    if json_output:
+        print(json.dumps({"deleted": existed, "path": str(squad_path)}), flush=True)
+    elif existed:
+        console.print(f"[green]Deleted {squad_path}[/green]")
+    else:
+        console.print("[yellow]No .squad file found.[/yellow]")
+
+
+def _serialize_squad_file(team: Any, squad_path: Path) -> dict[str, Any]:
+    lead = team.get_agent("lead")
+    return {
+        "path": str(squad_path),
+        "lead": lead.name if lead else "Lead",
+        "agents": [
+            {
+                "name": agent.name,
+                "role": agent.role,
+                "phase": agent.phase,
+            }
+            for agent in team.agents
+            if agent.role != "lead"
+        ],
+    }
+
+
+async def _init_squad_file(config: CopexConfig, *, json_output: bool = False) -> None:
+    from copex.squad import SquadTeam
+
+    team = await SquadTeam.from_repo_ai(config=config, path=Path.cwd())
+    squad_path = _squad_file_path()
+    team.save_squad_file(squad_path)
+    if json_output:
+        print(json.dumps(_serialize_squad_file(team, squad_path), ensure_ascii=False), flush=True)
+    else:
+        console.print(f"[green]Created {squad_path}[/green]")
+
+
+async def _update_squad_file(
+    config: CopexConfig,
+    request: str,
+    *,
+    action: str,
+    json_output: bool = False,
+) -> None:
+    from copex.squad import SquadTeam
+
+    team = await SquadTeam.update_from_request(
+        f"{action}: {request}",
+        config=config,
+        path=Path.cwd(),
+    )
+    squad_path = _squad_file_path()
+    team.save_squad_file(squad_path)
+    if json_output:
+        print(json.dumps(_serialize_squad_file(team, squad_path), ensure_ascii=False), flush=True)
+    else:
+        console.print(f"[green]Updated {squad_path}[/green]")
 
 
 async def _run_squad(
@@ -3924,12 +4051,13 @@ async def _run_squad(
         # Create team based on --no-ai flag
         team = None
         if no_ai:
-            # Use pattern matching
-            team = SquadTeam.from_repo()
+            team = await SquadTeam.from_repo_or_file(config, use_ai=False)
         else:
-            # Show analysis status (AI will run lazily in coordinator.run())
             if not json_output:
-                console.print("🔍 Analyzing repository...")
+                if SquadTeam.load_squad_file() is not None:
+                    console.print("📄 Using .squad configuration")
+                else:
+                    console.print("🔍 Analyzing repository...")
 
         coordinator = SquadCoordinator(config, team=team)
         async with coordinator:
