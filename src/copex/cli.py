@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shutil
 import subprocess
 import sys
 import time
@@ -4140,7 +4141,7 @@ def _print_agent_turn(turn: Any) -> None:
 def squad_command(
     args: Annotated[
         list[str] | None,
-        typer.Argument(help="Task for the squad, or subcommand (show/init/add/remove/reset)"),
+        typer.Argument(help="Task for the squad, or subcommand (show/init/add/remove/reset/knowledge)"),
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
@@ -4181,6 +4182,7 @@ def squad_command(
       - init: create .squad from AI repo analysis
       - add/remove: apply natural-language edits to .squad using AI
       - reset: delete .squad and fall back to dynamic AI analysis
+      - knowledge: show/reset persistent squad knowledge store
 
     Without a management subcommand, this runs the squad workflow.
 
@@ -4191,6 +4193,8 @@ def squad_command(
         copex squad add "Add a Security Auditor agent that reviews code for vulnerabilities"
         copex squad remove "Remove the Docs agent"
         copex squad reset
+        copex squad knowledge
+        copex squad knowledge reset
     """
     raw_args = args or []
     subcommand = raw_args[0].lower() if raw_args else None
@@ -4206,6 +4210,22 @@ def squad_command(
             raise typer.Exit(1) from None
         _reset_squad_file(json_output=json_output)
         return
+    if subcommand == "knowledge":
+        action = raw_args[1].lower() if len(raw_args) > 1 else "show"
+        if action == "show":
+            if len(raw_args) not in {1, 2}:
+                console.print("[red]Usage: copex squad knowledge [show][/red]")
+                raise typer.Exit(1) from None
+            _show_squad_knowledge(json_output=json_output)
+            return
+        if action == "reset":
+            if len(raw_args) != 2:
+                console.print("[red]Usage: copex squad knowledge reset[/red]")
+                raise typer.Exit(1) from None
+            _reset_squad_knowledge(json_output=json_output)
+            return
+        console.print("[red]Usage: copex squad knowledge [reset][/red]")
+        raise typer.Exit(1) from None
 
     # Load config
     if config_file and config_file.exists():
@@ -4289,42 +4309,132 @@ def squad_command(
     asyncio.run(_run_squad(config, prompt, json_output=json_output, no_ai=no_ai))
 
 
+def _squad_dir_path(path: Path | None = None) -> Path:
+    root = path or Path.cwd()
+    return root / ".squad"
+
+
 def _squad_file_path(path: Path | None = None) -> Path:
+    return _squad_dir_path(path) / "team.toml"
+
+
+def _legacy_squad_file_path(path: Path | None = None) -> Path:
     root = path or Path.cwd()
     return root / ".squad"
 
 
 def _show_squad_file(*, json_output: bool = False) -> None:
     squad_path = _squad_file_path()
-    if not squad_path.is_file():
+    legacy_path = _legacy_squad_file_path()
+    selected_path: Path | None = None
+    if squad_path.is_file():
+        selected_path = squad_path
+    elif legacy_path.is_file():
+        selected_path = legacy_path
+
+    if selected_path is None:
         if json_output:
             print(json.dumps({"exists": False, "path": str(squad_path)}), flush=True)
         else:
             console.print("[yellow]No .squad file found.[/yellow]")
         return
 
-    content = squad_path.read_text(encoding="utf-8")
+    content = selected_path.read_text(encoding="utf-8")
     if json_output:
         print(
-            json.dumps({"exists": True, "path": str(squad_path), "content": content}, ensure_ascii=False),
+            json.dumps({"exists": True, "path": str(selected_path), "content": content}, ensure_ascii=False),
             flush=True,
         )
     else:
-        console.print(f"[cyan]{squad_path}[/cyan]")
+        console.print(f"[cyan]{selected_path}[/cyan]")
         console.print(content)
 
 
 def _reset_squad_file(*, json_output: bool = False) -> None:
-    squad_path = _squad_file_path()
-    existed = squad_path.is_file()
-    if existed:
-        squad_path.unlink()
+    squad_dir = _squad_dir_path()
+    legacy_file = _legacy_squad_file_path()
+    deleted = False
+    if squad_dir.is_dir():
+        shutil.rmtree(squad_dir)
+        deleted = True
+    elif legacy_file.is_file():
+        legacy_file.unlink()
+        deleted = True
     if json_output:
-        print(json.dumps({"deleted": existed, "path": str(squad_path)}), flush=True)
-    elif existed:
-        console.print(f"[green]Deleted {squad_path}[/green]")
+        print(json.dumps({"deleted": deleted, "path": str(squad_dir)}), flush=True)
+    elif deleted:
+        console.print(f"[green]Deleted {squad_dir}[/green]")
     else:
         console.print("[yellow]No .squad file found.[/yellow]")
+
+
+def _show_squad_knowledge(*, json_output: bool = False) -> None:
+    squad_dir = _squad_dir_path()
+    knowledge_dir = squad_dir / "knowledge"
+    decisions_path = squad_dir / "decisions.md"
+    knowledge: dict[str, str] = {}
+
+    if knowledge_dir.is_dir():
+        for file_path in sorted(knowledge_dir.glob("*.md")):
+            knowledge[file_path.stem] = file_path.read_text(encoding="utf-8")
+
+    decisions = decisions_path.read_text(encoding="utf-8") if decisions_path.is_file() else ""
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "path": str(squad_dir),
+                    "knowledge": knowledge,
+                    "decisions": decisions,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return
+
+    if not knowledge and not decisions:
+        console.print("[yellow]No squad knowledge found.[/yellow]")
+        return
+
+    console.print(f"[cyan]{squad_dir}[/cyan]")
+    if decisions:
+        console.print("[bold]Shared decisions[/bold]")
+        console.print(decisions)
+    for role, content in knowledge.items():
+        console.print(f"[bold]{role} knowledge[/bold]")
+        console.print(content)
+
+
+def _reset_squad_knowledge(*, json_output: bool = False) -> None:
+    squad_dir = _squad_dir_path()
+    knowledge_dir = squad_dir / "knowledge"
+    decisions_path = squad_dir / "decisions.md"
+
+    deleted_paths: list[str] = []
+    if knowledge_dir.is_dir():
+        shutil.rmtree(knowledge_dir)
+        deleted_paths.append(str(knowledge_dir))
+    if decisions_path.is_file():
+        decisions_path.unlink()
+        deleted_paths.append(str(decisions_path))
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "deleted": bool(deleted_paths),
+                    "paths": deleted_paths,
+                }
+            ),
+            flush=True,
+        )
+    elif deleted_paths:
+        for path in deleted_paths:
+            console.print(f"[green]Deleted {path}[/green]")
+    else:
+        console.print("[yellow]No squad knowledge found.[/yellow]")
 
 
 def _serialize_squad_file(team: Any, squad_path: Path) -> dict[str, Any]:

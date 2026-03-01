@@ -890,15 +890,15 @@ class TestSquadCoordinatorRun:
                     return_value=generated_team,
                 ) as mock_ai,
                 patch.object(Fleet, "run", new=fake_run),
-            ):
-                first = SquadCoordinator(CopexConfig())
-                await first.run("Build something")
-                assert (tmp_path / ".squad").is_file()
-                assert "Squad team auto-saved to .squad" in caplog.text
+                ):
+                    first = SquadCoordinator(CopexConfig())
+                    await first.run("Build something")
+                    assert (tmp_path / ".squad" / "team.toml").is_file()
+                    assert "Squad team auto-saved to .squad/team.toml" in caplog.text
 
-                second = SquadCoordinator(CopexConfig())
-                await second.run("Build something else")
-                assert mock_ai.await_count == 1
+                    second = SquadCoordinator(CopexConfig())
+                    await second.run("Build something else")
+                    assert mock_ai.await_count == 1
 
         run(_test())
 
@@ -1056,6 +1056,181 @@ class TestSquadCoordinatorRun:
         developer_result = next(ar for ar in result.agent_results if ar.agent.role == "developer")
         assert len(run_task_ids) == 1
         assert developer_result.success is False
+
+    def test_build_agent_prompt_includes_persisted_knowledge_and_decisions(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".squad" / "knowledge").mkdir(parents=True)
+        (tmp_path / ".squad" / "knowledge" / "developer.md").write_text(
+            "# Developer Knowledge\n\n- Keep tests fast.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / ".squad" / "decisions.md").write_text(
+            "# Shared Squad Decisions\n\n- Prefer dataclasses for value objects.\n",
+            encoding="utf-8",
+        )
+
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        agent = coord.team.get_agent(SquadRole.DEVELOPER)
+        prompt = coord._build_agent_prompt(agent, "Build X", {"lead": "lead"})
+
+        assert "## Shared Squad Decisions" in prompt
+        assert "Prefer dataclasses for value objects." in prompt
+        assert "## Your Persistent Knowledge" in prompt
+        assert "Keep tests fast." in prompt
+        assert "## Knowledge Capture" in prompt
+        assert "What I Learned About This Codebase" in prompt
+
+    def test_run_persists_knowledge_decisions_and_session_log(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+
+        async def fake_run(self, on_status=None):
+            return [
+                FleetResult(
+                    task_id="lead",
+                    success=True,
+                    response=Response(
+                        content=(
+                            "Plan\n\n"
+                            "## What I Learned About This Codebase\n"
+                            "- The project favors small, focused edits.\n"
+                            "\n"
+                            "## Key Decisions and Trade-offs\n"
+                            "- Store squad team config in .squad/team.toml for compatibility."
+                        )
+                    ),
+                    duration_ms=100,
+                ),
+                FleetResult(
+                    task_id="developer",
+                    success=True,
+                    response=Response(
+                        content=(
+                            "Code\n\n"
+                            "## What I Learned About This Codebase\n"
+                            "- Tests use pytest fixtures and monkeypatch heavily."
+                        )
+                    ),
+                    duration_ms=120,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(
+                        content=(
+                            "All tests passed. No issues found.\n\n"
+                            "## What I Learned About This Codebase\n"
+                            "- Test names are behavior-oriented."
+                        )
+                    ),
+                    duration_ms=90,
+                ),
+                FleetResult(
+                    task_id="docs",
+                    success=True,
+                    response=Response(
+                        content=(
+                            "Docs updated.\n\n"
+                            "## What I Learned About This Codebase\n"
+                            "- Keep README aligned with CLI behavior."
+                        )
+                    ),
+                    duration_ms=80,
+                ),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Implement persistence")
+
+        run(_test())
+
+        lead_knowledge = (tmp_path / ".squad" / "knowledge" / "lead.md").read_text(encoding="utf-8")
+        developer_knowledge = (tmp_path / ".squad" / "knowledge" / "developer.md").read_text(encoding="utf-8")
+        decisions = (tmp_path / ".squad" / "decisions.md").read_text(encoding="utf-8")
+        logs = sorted((tmp_path / ".squad" / "log").glob("*.md"))
+
+        assert "small, focused edits" in lead_knowledge
+        assert "pytest fixtures and monkeypatch" in developer_knowledge
+        assert "Store squad team config in .squad/team.toml" in decisions
+        assert len(logs) == 1
+        log_text = logs[0].read_text(encoding="utf-8")
+        assert "Implement persistence" in log_text
+        assert "Lead" in log_text
+        assert "Developer" in log_text
+
+    def test_run_migrates_legacy_squad_file_when_persisting(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".squad").write_text("[squad]\nlead = \"Architect\"\n", encoding="utf-8")
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+
+        async def fake_run(self, on_status=None):
+            return [
+                FleetResult(
+                    task_id="lead",
+                    success=True,
+                    response=Response(
+                        content=(
+                            "Plan\n\n"
+                            "## What I Learned About This Codebase\n"
+                            "- Keep migration backward compatible."
+                        )
+                    ),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="developer",
+                    success=True,
+                    response=Response(
+                        content=(
+                            "Code\n\n"
+                            "## What I Learned About This Codebase\n"
+                            "- Prefer existing helpers."
+                        )
+                    ),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(
+                        content=(
+                            "All tests passed.\n\n"
+                            "## What I Learned About This Codebase\n"
+                            "- Regression coverage matters."
+                        )
+                    ),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="docs",
+                    success=True,
+                    response=Response(
+                        content=(
+                            "Docs.\n\n"
+                            "## What I Learned About This Codebase\n"
+                            "- Keep docs concise."
+                        )
+                    ),
+                    duration_ms=50,
+                ),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Migrate legacy squad")
+
+        run(_test())
+        assert (tmp_path / ".squad").is_dir()
+        assert (tmp_path / ".squad" / "team.toml").is_file()
+        assert "lead = \"Architect\"" in (tmp_path / ".squad" / "team.toml").read_text(encoding="utf-8")
 
 
 # ===========================================================================
@@ -1681,7 +1856,7 @@ class TestSquadTomlSupport:
     def test_save_squad_file(self, tmp_path):
         team = SquadTeam.default()
         team.save_squad_file(tmp_path)
-        squad_path = tmp_path / ".squad"
+        squad_path = tmp_path / ".squad" / "team.toml"
         assert squad_path.is_file()
         text = squad_path.read_text(encoding="utf-8")
         assert "[squad]" in text
@@ -1756,7 +1931,7 @@ class TestSquadCLIManagement:
             result = runner.invoke(app, ["squad", "init"])
 
         assert result.exit_code == 0, result.output
-        assert (tmp_path / ".squad").is_file()
+        assert (tmp_path / ".squad" / "team.toml").is_file()
 
     def test_squad_add_updates_file(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
@@ -1804,7 +1979,7 @@ class TestSquadCLIManagement:
         assert result.exit_code == 0, result.output
         mock_update.assert_awaited_once()
         assert "add:" in mock_update.await_args.args[0]
-        assert "Security Auditor" in (tmp_path / ".squad").read_text(encoding="utf-8")
+        assert "Security Auditor" in (tmp_path / ".squad" / "team.toml").read_text(encoding="utf-8")
 
     def test_squad_remove_updates_file(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
@@ -1845,7 +2020,7 @@ class TestSquadCLIManagement:
         assert result.exit_code == 0, result.output
         mock_update.assert_awaited_once()
         assert "remove:" in mock_update.await_args.args[0]
-        assert "Docs" not in (tmp_path / ".squad").read_text(encoding="utf-8")
+        assert "Docs" not in (tmp_path / ".squad" / "team.toml").read_text(encoding="utf-8")
 
     def test_squad_reset_deletes_file(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
@@ -1860,3 +2035,58 @@ class TestSquadCLIManagement:
 
         assert result.exit_code == 0, result.output
         assert not (tmp_path / ".squad").exists()
+
+    def test_squad_knowledge_show_when_missing(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "knowledge"])
+
+        assert result.exit_code == 0, result.output
+        assert "No squad knowledge found" in result.output
+
+    def test_squad_knowledge_show(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".squad" / "knowledge").mkdir(parents=True)
+        (tmp_path / ".squad" / "knowledge" / "lead.md").write_text(
+            "# Lead Knowledge\n\n- Prefer explicit typing.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / ".squad" / "decisions.md").write_text(
+            "# Shared Squad Decisions\n\n- Keep APIs backward compatible.\n",
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "knowledge"])
+
+        assert result.exit_code == 0, result.output
+        assert "Prefer explicit typing" in result.output
+        assert "Keep APIs backward compatible" in result.output
+
+    def test_squad_knowledge_reset(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".squad" / "knowledge").mkdir(parents=True)
+        (tmp_path / ".squad" / "knowledge" / "lead.md").write_text("x", encoding="utf-8")
+        (tmp_path / ".squad" / "decisions.md").write_text("y", encoding="utf-8")
+        (tmp_path / ".squad" / "log").mkdir(parents=True)
+        (tmp_path / ".squad" / "log" / "2026-03-01-20-00.md").write_text("log", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "knowledge", "reset"])
+
+        assert result.exit_code == 0, result.output
+        assert not (tmp_path / ".squad" / "knowledge").exists()
+        assert not (tmp_path / ".squad" / "decisions.md").exists()
+        assert (tmp_path / ".squad" / "log" / "2026-03-01-20-00.md").is_file()

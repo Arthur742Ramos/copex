@@ -23,6 +23,7 @@ import logging
 import re
 import time
 from dataclasses import dataclass, field
+from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
@@ -126,6 +127,108 @@ _REASONING_TIMEOUTS: dict[str, float] = {
     "low": 300.0,
     "none": 300.0,
 }
+
+_SQUAD_DIR_NAME = ".squad"
+_SQUAD_TEAM_FILE_NAME = "team.toml"
+_SQUAD_KNOWLEDGE_DIR_NAME = "knowledge"
+_SQUAD_LOG_DIR_NAME = "log"
+_SQUAD_DECISIONS_FILE_NAME = "decisions.md"
+
+_KNOWLEDGE_SECTION_HEADING = "What I Learned About This Codebase"
+_DECISIONS_SECTION_HEADING = "Key Decisions and Trade-offs"
+_MAX_PERSISTED_CONTEXT_CHARS = 4000
+_MAX_PERSISTED_ITEM_CHARS = 280
+_MAX_PERSISTED_ITEMS = 8
+
+
+def _now_iso_utc() -> str:
+    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+
+
+def _session_log_stamp() -> str:
+    return datetime.now(timezone.utc).strftime("%Y-%m-%d-%H-%M")
+
+
+def _clip_text(text: str, limit: int) -> str:
+    if len(text) <= limit:
+        return text
+    return text[: limit - 3].rstrip() + "..."
+
+
+def _extract_markdown_section(content: str, headings: tuple[str, ...]) -> str:
+    if not content.strip():
+        return ""
+    normalized = content.replace("\r\n", "\n")
+    for heading in headings:
+        pattern = re.compile(
+            rf"(?ims)^##\s*{re.escape(heading)}\s*:?\s*$\n(?P<body>.*?)(?=^\s*##\s+|\Z)"
+        )
+        match = pattern.search(normalized)
+        if match:
+            return match.group("body").strip()
+    return ""
+
+
+def _extract_persisted_items(
+    content: str,
+    *,
+    headings: tuple[str, ...],
+) -> list[str]:
+    section = _extract_markdown_section(content, headings)
+    if not section:
+        return []
+
+    entries: list[str] = []
+    seen: set[str] = set()
+    for line in section.splitlines():
+        stripped = line.strip()
+        if not stripped:
+            continue
+        match = re.match(r"^[-*+]\s+(.+)$", stripped)
+        if match is None:
+            match = re.match(r"^\d+[.)]\s+(.+)$", stripped)
+        item = match.group(1).strip() if match else stripped
+        item = " ".join(item.split())
+        if not item:
+            continue
+        item = _clip_text(item, _MAX_PERSISTED_ITEM_CHARS)
+        key = item.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        entries.append(item)
+        if len(entries) >= _MAX_PERSISTED_ITEMS:
+            break
+
+    if entries:
+        return entries
+
+    fallback = " ".join(section.split())
+    if not fallback:
+        return []
+    return [_clip_text(fallback, _MAX_PERSISTED_ITEM_CHARS)]
+
+
+def _append_markdown_items(path: Path, *, title: str, items: list[str]) -> None:
+    if not items:
+        return
+    path.parent.mkdir(parents=True, exist_ok=True)
+    if not path.is_file():
+        path.write_text(f"# {title}\n\n", encoding="utf-8")
+    with path.open("a", encoding="utf-8") as handle:
+        handle.write(f"## {_now_iso_utc()}\n")
+        for item in items:
+            handle.write(f"- {item}\n")
+        handle.write("\n")
+
+
+def _read_text_tail(path: Path, *, max_chars: int = _MAX_PERSISTED_CONTEXT_CHARS) -> str:
+    if not path.is_file():
+        return ""
+    text = path.read_text(encoding="utf-8").strip()
+    if len(text) <= max_chars:
+        return text
+    return "[Older entries truncated]\n" + text[-max_chars:]
 
 
 def _has_source_files(root: Path) -> bool:
@@ -297,6 +400,47 @@ def _normalize_role_identifier(name: str) -> str:
     return normalized or "agent"
 
 
+def _squad_dir_path(path: Path | None = None) -> Path:
+    return (path or Path.cwd()) / _SQUAD_DIR_NAME
+
+
+def _squad_team_path(path: Path | None = None) -> Path:
+    return _squad_dir_path(path) / _SQUAD_TEAM_FILE_NAME
+
+
+def _squad_legacy_file_path(path: Path | None = None) -> Path:
+    return (path or Path.cwd()) / _SQUAD_DIR_NAME
+
+
+def _squad_knowledge_path(role: str, path: Path | None = None) -> Path:
+    safe_role = _normalize_role_identifier(role).replace("_", "-")
+    return _squad_dir_path(path) / _SQUAD_KNOWLEDGE_DIR_NAME / f"{safe_role}.md"
+
+
+def _squad_decisions_path(path: Path | None = None) -> Path:
+    return _squad_dir_path(path) / _SQUAD_DECISIONS_FILE_NAME
+
+
+def _squad_log_dir_path(path: Path | None = None) -> Path:
+    return _squad_dir_path(path) / _SQUAD_LOG_DIR_NAME
+
+
+def _ensure_squad_workspace(path: Path | None = None) -> Path:
+    root = path or Path.cwd()
+    squad_path = _squad_dir_path(root)
+    if squad_path.is_file():
+        legacy_content = squad_path.read_text(encoding="utf-8")
+        squad_path.unlink()
+        squad_path.mkdir(parents=True, exist_ok=True)
+        _squad_team_path(root).write_text(legacy_content, encoding="utf-8")
+        logger.info("Migrated legacy .squad file to %s", _squad_team_path(root))
+    else:
+        squad_path.mkdir(parents=True, exist_ok=True)
+    (squad_path / _SQUAD_KNOWLEDGE_DIR_NAME).mkdir(parents=True, exist_ok=True)
+    (squad_path / _SQUAD_LOG_DIR_NAME).mkdir(parents=True, exist_ok=True)
+    return squad_path
+
+
 def _clamp_phase(value: Any, fallback: int = 2) -> int:
     try:
         phase = int(value)
@@ -343,7 +487,8 @@ class SquadTeam:
     """A team of squad agents."""
 
     agents: list[SquadAgent] = field(default_factory=list)
-    SQUAD_FILE = Path(".squad")
+    SQUAD_FILE = Path(_SQUAD_DIR_NAME)
+    SQUAD_TEAM_FILE = Path(_SQUAD_DIR_NAME) / _SQUAD_TEAM_FILE_NAME
 
     @classmethod
     def default(cls) -> SquadTeam:
@@ -398,10 +543,26 @@ class SquadTeam:
     @classmethod
     def _resolve_squad_file_path(cls, path: Path | None = None) -> Path:
         if path is None:
-            return cls.SQUAD_FILE
-        if path.name == ".squad":
+            return cls.SQUAD_TEAM_FILE
+        if path.suffix == ".toml":
             return path
-        return path / cls.SQUAD_FILE
+        if path.name == _SQUAD_DIR_NAME:
+            if path.is_file():
+                return path
+            return path / _SQUAD_TEAM_FILE_NAME
+        return path / cls.SQUAD_TEAM_FILE
+
+    @classmethod
+    def _resolve_legacy_squad_file_path(cls, path: Path | None = None) -> Path:
+        if path is None:
+            return cls.SQUAD_FILE
+        if path.name == _SQUAD_DIR_NAME:
+            return path
+        if path.suffix == ".toml":
+            if path.parent.name == _SQUAD_DIR_NAME:
+                return path.parent.parent / _SQUAD_DIR_NAME
+            return path.with_name(_SQUAD_DIR_NAME)
+        return path / _SQUAD_DIR_NAME
 
     @staticmethod
     def _squad_role_description(agent: SquadAgent) -> str:
@@ -523,25 +684,44 @@ class SquadTeam:
     @classmethod
     def load_squad_file(cls, path: Path | None = None) -> SquadTeam | None:
         """Load team composition from .squad TOML."""
-        config_path = cls._resolve_squad_file_path(path)
-        if not config_path.is_file():
-            return None
-        try:
-            with open(config_path, "rb") as f:
-                data = tomllib.load(f)
-            if not isinstance(data, dict):
-                return None
-            team = cls._from_squad_payload(data)
-            if team and team.agents:
-                logger.info(f"Loaded squad team from {config_path}: {[a.role for a in team.agents]}")
-                return team
-        except Exception as e:
-            logger.warning(f"Failed to load .squad file from {config_path}: {e}")
+        primary = cls._resolve_squad_file_path(path)
+        legacy = cls._resolve_legacy_squad_file_path(path)
+        candidates = [primary]
+        if legacy not in candidates:
+            candidates.append(legacy)
+        for config_path in candidates:
+            if not config_path.is_file():
+                continue
+            try:
+                with open(config_path, "rb") as f:
+                    data = tomllib.load(f)
+                if not isinstance(data, dict):
+                    continue
+                team = cls._from_squad_payload(data)
+                if team and team.agents:
+                    logger.info(f"Loaded squad team from {config_path}: {[a.role for a in team.agents]}")
+                    return team
+            except Exception as e:
+                logger.warning(f"Failed to load .squad file from {config_path}: {e}")
         return None
 
     def save_squad_file(self, path: Path | None = None) -> None:
         """Save team composition to .squad TOML."""
-        config_path = self._resolve_squad_file_path(path)
+        workspace_root: Path | None = None
+        if path is None:
+            workspace_root = Path.cwd()
+        elif path.suffix == ".toml":
+            if path.parent.name == _SQUAD_DIR_NAME:
+                workspace_root = path.parent.parent
+        elif path.name == _SQUAD_DIR_NAME:
+            workspace_root = path.parent
+        else:
+            workspace_root = path
+
+        if workspace_root is not None:
+            _ensure_squad_workspace(workspace_root)
+
+        config_path = self._resolve_squad_file_path(path or workspace_root)
         config_path.parent.mkdir(parents=True, exist_ok=True)
         payload = self._to_squad_payload().get("squad", {})
         lead_name = str(payload.get("lead", "Lead"))
@@ -1113,9 +1293,10 @@ class SquadCoordinator:
         # Lazy init: prefer .squad, then AI repo analysis
         if self._team is None:
             self._team = await SquadTeam.from_repo_or_file(self._config)
-            if not SquadTeam.SQUAD_FILE.is_file():
+            team_path = SquadTeam._resolve_squad_file_path()
+            if not team_path.is_file():
                 self._team.save_squad_file()
-                logger.info("Squad team auto-saved to .squad")
+                logger.info("Squad team auto-saved to %s", team_path)
 
         if self._project_context is None:
             self._project_context = self._discover_project_context()
@@ -1176,6 +1357,10 @@ class SquadCoordinator:
 
         assert final_result is not None  # noqa: S101
         final_result.total_duration_ms = (time.monotonic() - start_time) * 1000
+        try:
+            self._persist_run_artifacts(prompt, final_result)
+        except OSError as exc:
+            logger.warning("Failed to persist squad knowledge artifacts: %s", exc)
         return final_result
 
     def _add_tasks(
@@ -1286,6 +1471,21 @@ class SquadCoordinator:
             except Exception as exc:
                 logger.debug("Failed to build repo map context for %s: %s", agent.role, exc)
 
+        shared_decisions = self._load_shared_decisions()
+        if shared_decisions:
+            parts.append("")
+            parts.append("## Shared Squad Decisions")
+            parts.append(
+                "Treat these as settled decisions unless you have concrete new evidence."
+            )
+            parts.append(shared_decisions)
+
+        role_knowledge = self._load_agent_knowledge(agent)
+        if role_knowledge:
+            parts.append("")
+            parts.append("## Your Persistent Knowledge")
+            parts.append(role_knowledge)
+
         parts.append("")
         parts.append(f"## Task\n\n{user_prompt}")
 
@@ -1317,7 +1517,127 @@ class SquadCoordinator:
                     parts.append(f"#### {label}")
                     parts.append(f"{{{{task:{ref_id}.content}}}}")
 
+        parts.append("")
+        parts.append("## Knowledge Capture")
+        parts.append(
+            f"At the end of your response, include a section titled "
+            f"'## {_KNOWLEDGE_SECTION_HEADING}' with concise bullet points "
+            "about patterns, conventions, gotchas, and decisions you learned."
+        )
+        if agent.role == SquadRole.LEAD.value:
+            parts.append(
+                f"Also include a section titled '## {_DECISIONS_SECTION_HEADING}' "
+                "with concise bullet points that capture final decisions and trade-offs."
+            )
+
         return "\n".join(parts)
+
+    def _load_agent_knowledge(self, agent: SquadAgent) -> str:
+        return _read_text_tail(_squad_knowledge_path(agent.role))
+
+    def _load_shared_decisions(self) -> str:
+        return _read_text_tail(_squad_decisions_path())
+
+    @staticmethod
+    def _extract_knowledge_items(content: str) -> list[str]:
+        return _extract_persisted_items(
+            content,
+            headings=(
+                _KNOWLEDGE_SECTION_HEADING,
+                "Learned Knowledge",
+                "What did you learn about this codebase?",
+                "What I Learned",
+            ),
+        )
+
+    @staticmethod
+    def _extract_decision_items(content: str) -> list[str]:
+        return _extract_persisted_items(
+            content,
+            headings=(
+                _DECISIONS_SECTION_HEADING,
+                "Decisions and Trade-offs",
+                "Decisions",
+            ),
+        )
+
+    @staticmethod
+    def _next_session_log_path(log_dir: Path) -> Path:
+        stamp = _session_log_stamp()
+        candidate = log_dir / f"{stamp}.md"
+        index = 2
+        while candidate.exists():
+            candidate = log_dir / f"{stamp}-{index}.md"
+            index += 1
+        return candidate
+
+    @staticmethod
+    def _summarize_output_for_log(content: str, *, limit: int = 1200) -> str:
+        text = content.strip()
+        if not text:
+            return ""
+        return _clip_text(text, limit)
+
+    def _persist_run_artifacts(self, task_prompt: str, result: SquadResult) -> None:
+        _ensure_squad_workspace()
+
+        for agent_result in result.agent_results:
+            knowledge_items = self._extract_knowledge_items(agent_result.content)
+            if knowledge_items:
+                _append_markdown_items(
+                    _squad_knowledge_path(agent_result.agent.role),
+                    title=f"{agent_result.agent.name} Knowledge",
+                    items=knowledge_items,
+                )
+
+            if agent_result.agent.role == SquadRole.LEAD.value:
+                decision_items = self._extract_decision_items(agent_result.content)
+                if decision_items:
+                    _append_markdown_items(
+                        _squad_decisions_path(),
+                        title="Shared Squad Decisions",
+                        items=decision_items,
+                    )
+
+        self._write_session_log(task_prompt, result)
+
+    def _write_session_log(self, task_prompt: str, result: SquadResult) -> None:
+        log_dir = _squad_log_dir_path()
+        log_dir.mkdir(parents=True, exist_ok=True)
+        log_path = self._next_session_log_path(log_dir)
+
+        lines = [
+            "# Squad Session Log",
+            "",
+            f"- Timestamp: {_now_iso_utc()}",
+            f"- Task: {task_prompt}",
+            f"- Success: {'yes' if result.success else 'no'}",
+            f"- Duration: {result.total_duration_ms / 1000:.1f}s",
+            "",
+            "## Agents",
+        ]
+        for agent_result in result.agent_results:
+            status = "success" if agent_result.success else "failed"
+            lines.append(
+                f"- {agent_result.agent.emoji} {agent_result.agent.name} "
+                f"({agent_result.agent.role}) — {status} ({agent_result.duration_ms / 1000:.1f}s)"
+            )
+
+        lines.append("")
+        lines.append("## Work Summary")
+        for agent_result in result.agent_results:
+            lines.append("")
+            lines.append(f"### {agent_result.agent.emoji} {agent_result.agent.name}")
+            lines.append(f"- Outcome: {'success' if agent_result.success else 'failed'}")
+            if agent_result.error:
+                lines.append(f"- Error: {agent_result.error}")
+            excerpt = self._summarize_output_for_log(agent_result.content)
+            if excerpt:
+                lines.append("- Output excerpt:")
+                lines.append("")
+                lines.append(excerpt)
+
+        log_path.write_text("\n".join(lines).strip() + "\n", encoding="utf-8")
 
     async def _retry_failed_agents(
         self,
