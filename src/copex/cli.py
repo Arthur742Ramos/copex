@@ -28,8 +28,10 @@ from rich.panel import Panel
 from copex import __version__
 from copex.client import Copex, StreamChunk
 from copex.config import CopexConfig, load_last_model, make_client, save_last_model
+from copex.edits import apply_edit_text, list_undo_history, undo_last_edit_batch
 from copex.exceptions import ValidationError as CopexValidationError
 from copex.log_render import render_jsonl
+from copex.memory import ProjectMemory
 from copex.models import (
     Model,
     ReasoningEffort,
@@ -93,6 +95,8 @@ app = typer.Typer(
     no_args_is_help=False,
     invoke_without_command=True,
 )
+memory_app = typer.Typer(help="Manage persistent project memory.")
+app.add_typer(memory_app, name="memory")
 console = Console()
 
 
@@ -103,7 +107,7 @@ _copex_completion() {
     COMPREPLY=()
     cur="${COMP_WORDS[COMP_CWORD]}"
     prev="${COMP_WORDS[COMP_CWORD-1]}"
-    opts="chat plan ralph fleet council interactive render models skills status config init login logout tui completions stats diff squad agent"
+    opts="chat plan ralph fleet council interactive map render models skills status config init login logout tui completions stats diff squad agent edit undo"
 
     case "${prev}" in
         -m|--model)
@@ -143,6 +147,7 @@ _copex() {
         'fleet:Run multiple tasks in parallel'
         'council:Run a model council with Opus as chair'
         'interactive:Start interactive chat session'
+        'map:Show repository map and relevant files'
         'render:Render JSONL session logs'
         'models:List available models'
         'skills:Manage skills'
@@ -155,6 +160,8 @@ _copex() {
         'completions:Generate shell completions'
         'stats:Show run statistics'
         'diff:Show changes since last run'
+        'edit:Apply structured edits to files'
+        'undo:Undo the latest edit batch'
     )
     models=(
         'claude-opus-4.5'
@@ -198,7 +205,7 @@ _copex "$@"
 FISH_COMPLETION = """
 # copex fish completion
 
-set -l commands chat plan ralph fleet council interactive render models skills status config init login logout tui completions
+set -l commands chat plan ralph fleet council interactive map render models skills status config init login logout tui completions stats diff squad agent edit undo
 set -l models claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini
 set -l reasoning low medium high xhigh
 
@@ -1689,6 +1696,37 @@ def config_cmd(
         console.print("\n[green]✓ Configuration is valid[/green]")
 
 
+@app.command("map")
+def map_command(
+    refresh: Annotated[
+        bool,
+        typer.Option("--refresh", help="Force a full repo map rebuild"),
+    ] = False,
+    relevant: Annotated[
+        str | None,
+        typer.Option("--relevant", help="Show files most relevant to this description"),
+    ] = None,
+    limit: Annotated[
+        int,
+        typer.Option("--limit", help="Max relevant files to show"),
+    ] = 10,
+) -> None:
+    """Display the repository map or task-relevant files."""
+    from copex.repo_map import RepoMap
+
+    repo_map = RepoMap(Path.cwd())
+    try:
+        repo_map.refresh(force=refresh)
+    except Exception as exc:
+        console.print(f"[red]Error building repo map:[/red] {exc}")
+        raise typer.Exit(1) from None
+
+    if relevant:
+        console.print(repo_map.render_relevant(relevant, limit=max(1, limit)))
+    else:
+        console.print(repo_map.render_map())
+
+
 @app.command("plan")
 def plan_command(
     task: Annotated[
@@ -1833,6 +1871,15 @@ async def _run_plan(
         ralph = RalphWiggum(client)
         executor = PlanExecutor(client, ralph=ralph)
         executor.max_iterations_per_step = max_iterations
+        repo_map = None
+        try:
+            from copex.repo_map import RepoMap
+
+            repo_map = RepoMap(Path.cwd())
+            repo_map.refresh(force=False)
+        except Exception as exc:
+            console.print(f"[dim]Repo map unavailable for plan: {exc}[/dim]")
+            repo_map = None
 
         # Check for resume from checkpoint
         if resume:
@@ -1844,6 +1891,8 @@ async def _run_plan(
 
             plan = state.plan
             from_step = state.current_step
+            if repo_map is not None:
+                executor.repo_context = repo_map.relevant_context(state.task)
             console.print(
                 Panel(
                     f"[bold]Resuming plan:[/bold] {state.task}\n"
@@ -1860,9 +1909,13 @@ async def _run_plan(
                 console.print(f"[red]Plan file not found: {load_plan}[/red]")
                 raise typer.Exit(1) from None
             plan = Plan.load(load_plan)
+            if repo_map is not None:
+                executor.repo_context = repo_map.relevant_context(plan.task)
             console.print(f"[green]✓ Loaded plan from {load_plan}[/green]\n")
         else:
             # Generate new plan
+            if repo_map is not None:
+                executor.repo_context = repo_map.relevant_context(task)
             console.print(
                 Panel(
                     f"[bold]Generating plan for:[/bold]\n{task}",
@@ -2937,6 +2990,24 @@ async def _run_fleet(
     if not tasks:
         console.print("[red]No tasks to run[/red]")
         raise typer.Exit(1) from None
+
+    try:
+        from copex.repo_map import RepoMap
+
+        repo_root = Path(config.cwd) if config.cwd else Path.cwd()
+        repo_map = RepoMap(repo_root)
+        repo_map.refresh(force=False)
+        for task in tasks:
+            base_prompt = task.prompt
+            relevant_context = repo_map.relevant_context(
+                base_prompt,
+                max_files=6,
+                max_symbols_per_file=6,
+            )
+            if relevant_context:
+                task.prompt = f"{relevant_context}\n\n{base_prompt}"
+    except Exception as exc:
+        console.print(f"[dim]Repo map unavailable for fleet: {exc}[/dim]")
 
     # Track statuses for live display
     statuses: dict[str, str] = {t.id: "pending" for t in tasks}
@@ -4112,6 +4183,95 @@ async def _run_squad(
         else:
             console.print(f"[red]Squad error: {e}[/red]")
         raise typer.Exit(1) from None
+
+
+@app.command("edit")
+def edit_command(
+    edit_file: Annotated[
+        Path | None,
+        typer.Argument(help="Optional file containing structured edit blocks"),
+    ] = None,
+    verify: Annotated[
+        bool,
+        typer.Option("--verify/--no-verify", help="Run syntax/lint/type verification"),
+    ] = True,
+) -> None:
+    """Apply structured edits (unified diff, SEARCH/REPLACE, whole-file blocks)."""
+    if edit_file is not None:
+        if not edit_file.exists():
+            console.print(f"[red]Edit file not found: {edit_file}[/red]")
+            raise typer.Exit(1) from None
+        edit_text = edit_file.read_text(encoding="utf-8")
+    elif not sys.stdin.isatty():
+        edit_text = sys.stdin.read()
+    else:
+        console.print("[red]Provide edit content via stdin or a file path.[/red]")
+        raise typer.Exit(1) from None
+
+    if not edit_text.strip():
+        console.print("[red]No edit content provided.[/red]")
+        raise typer.Exit(1) from None
+
+    try:
+        result = apply_edit_text(edit_text, root=Path.cwd(), verify=verify)
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+
+    if result.applied_files:
+        console.print(f"[green]Applied edits to {len(result.applied_files)} file(s).[/green]")
+        for file_path in result.applied_files:
+            console.print(f"  [green]✓[/green] {file_path}")
+    else:
+        console.print("[yellow]No file changes were applied.[/yellow]")
+
+    if result.undo_batch_id:
+        console.print(f"[dim]Undo batch: {result.undo_batch_id}[/dim]")
+
+    if result.verification is not None:
+        if result.verification.ok:
+            console.print("[green]Verification passed.[/green]")
+        else:
+            console.print("[red]Verification failed.[/red]")
+            for check in result.verification.checks:
+                if check.ran and not check.success:
+                    if check.output:
+                        console.print(check.output)
+
+    if result.failed_files:
+        for file_path, error in result.failed_files.items():
+            console.print(f"[red]{file_path}: {error}[/red]")
+        raise typer.Exit(1) from None
+
+    if result.verification is not None and not result.verification.ok:
+        raise typer.Exit(1) from None
+
+
+@app.command("undo")
+def undo_command(
+    list_history: Annotated[bool, typer.Option("--list", help="List undo history")] = False,
+) -> None:
+    """Undo structured edits from the latest (or listed) undo batch."""
+    if list_history:
+        history = list_undo_history(Path.cwd())
+        if not history:
+            console.print("[yellow]No undo history found.[/yellow]")
+            return
+        for item in history:
+            created = item.created_at or "unknown time"
+            console.print(f"{item.batch_id}  ({item.file_count} files)  {created}")
+        return
+
+    try:
+        result = undo_last_edit_batch(Path.cwd())
+    except ValueError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from None
+
+    console.print(f"[green]Restored {len(result.restored_files)} file(s).[/green]")
+    for file_path in result.restored_files:
+        console.print(f"  [green]↺[/green] {file_path}")
+    console.print(f"[dim]From undo batch: {result.batch_id}[/dim]")
 
 
 @app.command("completions")

@@ -139,6 +139,8 @@ class Response:
     completion_tokens: int | None = None
     cost: float | None = None
     server_model: str | None = None  # Actual model used (from assistant.usage event)
+    context_used_tokens: int | None = None
+    context_budget_tokens: int | None = None
 
     retries: int = 0
     auto_continues: int = 0
@@ -152,4 +154,14 @@ class Response:
         return {
             "prompt_tokens": int(self.prompt_tokens or 0),
             "completion_tokens": int(self.completion_tokens or 0),
+        }
+
+    @property
+    def context_usage(self) -> dict[str, int] | None:
+        """Return context usage in ``used/budget`` shape when available."""
+        if self.context_used_tokens is None or self.context_budget_tokens is None:
+            return None
+        return {
+            "used_tokens": int(self.context_used_tokens),
+            "budget_tokens": int(self.context_budget_tokens),
         }

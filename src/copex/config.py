@@ -9,6 +9,7 @@ from typing import Any
 
 from pydantic import BaseModel, Field, field_validator, model_validator
 
+from copex.memory import compose_memory_instructions
 from copex.models import (
     Model,
     ReasoningEffort,
@@ -193,6 +194,11 @@ class CopexConfig(BaseModel):
     # Session options
     timeout: float = Field(
         default=300.0, ge=10.0, description="Inactivity timeout (seconds) - resets on each event"
+    )
+    context_budget: int | None = Field(
+        default=None,
+        ge=1,
+        description="Override model context window budget in tokens",
     )
     auto_continue: bool = Field(
         default=True, description="Auto-send 'Keep going' on interruption/error"
@@ -409,15 +415,19 @@ class CopexConfig(BaseModel):
         # Working directory (defaults to cwd)
         opts["working_directory"] = self.working_directory or str(Path.cwd())
 
-        # Instructions
-        if self.instructions:
-            opts["instructions"] = self.instructions
-        elif self.instructions_file:
+        # Instructions + persistent project memory
+        instructions = self.instructions
+        if instructions is None and self.instructions_file:
             instructions_path = Path(self.instructions_file)
             if not instructions_path.exists():
                 raise FileNotFoundError(f"Instructions file not found: {instructions_path}")
             with open(instructions_path, encoding="utf-8") as f:
-                opts["instructions"] = f.read()
+                instructions = f.read()
+
+        memory_root = Path(opts["working_directory"])
+        instructions = compose_memory_instructions(instructions, root=memory_root)
+        if instructions:
+            opts["instructions"] = instructions
 
         # MCP servers
         if self.mcp_servers:

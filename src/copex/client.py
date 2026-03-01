@@ -10,6 +10,7 @@ import warnings
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
+from pathlib import Path
 from typing import Any
 
 from copilot import CopilotClient
@@ -26,9 +27,11 @@ from copex.circuit_breaker import (
     ModelAwareBreaker,
     SlidingWindowBreaker,  # noqa: F401
 )
+from copex.context import SmartContextWindow
 from copex.config import CopexConfig
 from copex.exceptions import AllModelsUnavailable, CircuitBreakerOpen
 from copex.metrics import MetricsCollector, get_collector
+from copex.memory import auto_capture_memory
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
 from copex.sdk_patch import patch_copilot_client  # noqa: F401
 from copex.session_pool import SessionPool  # noqa: F401
@@ -119,6 +122,10 @@ class Copex:
         self._fallback_chain = fallback_chain
         # Track current model (may differ from config if fallback is active)
         self._current_model: str | None = None
+        self._context_window = SmartContextWindow(
+            self.config.model.value,
+            context_budget=self.config.context_budget,
+        )
 
     async def start(self) -> None:
         """Start the Copilot client."""
@@ -649,6 +656,8 @@ class Copex:
         Returns:
             Response object with content and metadata
         """
+        original_prompt = prompt
+
         # Check model fallback (v1.9.0)
         model_breaker = self.get_model_breaker()
         original_model = self.config.model.value
@@ -688,6 +697,29 @@ class Copex:
         else:
             self._current_model = original_model
 
+        self._context_window.configure(
+            self._current_model or self.config.model.value,
+            context_budget=self.config.context_budget,
+        )
+        prepared_context = await self._context_window.prepare_prompt(
+            prompt,
+            self._summarize_for_context,
+        )
+        if prepared_context.summary_updated and on_chunk:
+            on_chunk(
+                StreamChunk(
+                    type="system",
+                    delta="\n[Context window nearing limit; compacted older turns]\n",
+                )
+            )
+        if prepared_context.reset_session and self._session:
+            try:
+                await self._session.destroy()
+            except Exception:
+                logger.debug("Failed to destroy session while reseeding context", exc_info=True)
+            self._session = None
+        prompt = prepared_context.prompt
+
         session = await self._ensure_session()
         filtered_tools = self._filter_tools(tools)
         retries = 0
@@ -697,7 +729,7 @@ class Copex:
         request = collector.start_request(
             model=self._current_model or self.config.model.value,
             reasoning_effort=self.config.reasoning_effort.value,
-            prompt=prompt,
+            prompt=original_prompt,
         )
 
         # Circuit breaker gate (legacy per-instance check)
@@ -708,6 +740,10 @@ class Copex:
                 result = await self._send_once(session, prompt, filtered_tools, on_chunk)
                 result.retries = retries
                 result.auto_continues = auto_continues
+                self._context_window.record_turn(original_prompt, result.content)
+                context_usage = self._context_window.usage()
+                result.context_used_tokens = context_usage.used_tokens
+                result.context_budget_tokens = context_usage.budget_tokens
                 tokens = None
                 if result.prompt_tokens is not None or result.completion_tokens is not None:
                     tokens = {
@@ -723,6 +759,11 @@ class Copex:
                     tokens=tokens,
                 )
                 self._cb_record_success()
+                root = Path(self.config.working_directory or self.config.cwd or Path.cwd())
+                try:
+                    auto_capture_memory(original_prompt, result.content, root=root, mode="sdk")
+                except OSError:
+                    logger.warning("Failed to persist project memory", exc_info=True)
                 return result
 
             except Exception as e:  # Catch-all: retry logic must handle any SDK error
@@ -827,6 +868,27 @@ class Copex:
                     )
                     self._cb_record_failure()
                     raise (last_error or RuntimeError("Max retries exceeded")) from e
+
+    async def _summarize_for_context(self, summary_prompt: str) -> str:
+        """Summarize history chunks with the active model."""
+        if not self._started:
+            await self.start()
+        if self._client is None:
+            return ""
+
+        session_options = self.config.to_session_options()
+        if self._current_model and self._current_model != self.config.model.value:
+            session_options["model"] = self._current_model
+
+        summary_session = await self._client.create_session(session_options)
+        try:
+            response = await self._send_once(summary_session, summary_prompt, None, None)
+            return response.content.strip()
+        finally:
+            try:
+                await summary_session.destroy()
+            except Exception:
+                logger.debug("Failed to destroy context-summary session", exc_info=True)
 
     async def _send_once(
         self,
@@ -1032,6 +1094,7 @@ class Copex:
 
     def new_session(self) -> None:
         """Start a fresh session (clears conversation history)."""
+        self._context_window.clear()
         if self._session:
             session = self._session
             self._session = None

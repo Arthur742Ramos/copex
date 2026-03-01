@@ -1076,6 +1076,7 @@ class SquadCoordinator:
             timeout=self._default_timeout_from_reasoning(config.reasoning_effort),
         )
         self._project_context: str | None = None
+        self._repo_map: Any | None = None
 
     @property
     def team(self) -> SquadTeam:
@@ -1117,6 +1118,15 @@ class SquadCoordinator:
 
         if self._project_context is None:
             self._project_context = self._discover_project_context()
+        if self._repo_map is None:
+            try:
+                from copex.repo_map import RepoMap
+
+                self._repo_map = RepoMap(Path.cwd())
+                self._repo_map.refresh(force=False)
+            except Exception as exc:
+                logger.info("Repo map unavailable for squad context: %s", exc)
+                self._repo_map = None
 
         max_feedback_iterations = 3
         feedback_iteration = 0
@@ -1261,6 +1271,19 @@ class SquadCoordinator:
         if self._project_context:
             parts.append("")
             parts.append(self._project_context)
+
+        if self._repo_map is not None:
+            try:
+                repo_context = self._repo_map.relevant_context(
+                    f"{agent.role} {user_prompt}",
+                    max_files=6,
+                    max_symbols_per_file=6,
+                )
+                if repo_context:
+                    parts.append("")
+                    parts.append(repo_context)
+            except Exception as exc:
+                logger.debug("Failed to build repo map context for %s: %s", agent.role, exc)
 
         parts.append("")
         parts.append(f"## Task\n\n{user_prompt}")

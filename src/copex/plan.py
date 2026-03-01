@@ -473,6 +473,7 @@ class PlanExecutor:
         self.max_iterations_per_step: int = 10
         self._state: PlanState | None = None
         self._state_path: Path | None = None
+        self.repo_context: str = ""
 
     def cancel(self) -> None:
         """Cancel ongoing execution."""
@@ -486,6 +487,8 @@ class PlanExecutor:
     ) -> Plan:
         """Generate a plan for a task."""
         prompt = PLAN_GENERATION_PROMPT.format(task=task)
+        if self.repo_context:
+            prompt = f"{self.repo_context}\n\n{prompt}"
         response = await self.client.send(prompt)
 
         steps = self._parse_steps(response.content)
@@ -626,6 +629,8 @@ class PlanExecutor:
                     completed_steps=completed_steps,
                     current_step=step.description,
                 )
+                if self.repo_context:
+                    prompt = f"{self.repo_context}\n\n{prompt}"
 
                 # Use Ralph loop if available, otherwise single call
                 if self.ralph:

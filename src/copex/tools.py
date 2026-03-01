@@ -10,8 +10,10 @@ Enables:
 from __future__ import annotations
 
 import asyncio
+import tempfile
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 
 
@@ -416,3 +418,33 @@ def parallel_tools(*tools: Callable) -> list[Callable]:
             response = await copex.send("...", tools=tools)
     """
     return list(tools)
+
+
+def read_text_file(path: Path, *, encoding: str = "utf-8") -> str:
+    """Read a UTF-8 text file."""
+    return path.read_text(encoding=encoding)
+
+
+def write_text_file(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    """Write a UTF-8 text file, creating parent directories as needed."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding=encoding)
+
+
+def write_text_file_atomic(path: Path, content: str, *, encoding: str = "utf-8") -> None:
+    """Write a text file atomically via a temp file + rename."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temp_path: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="w",
+            encoding=encoding,
+            dir=path.parent,
+            delete=False,
+        ) as tmp:
+            tmp.write(content)
+            temp_path = Path(tmp.name)
+        temp_path.replace(path)
+    finally:
+        if temp_path is not None and temp_path.exists():
+            temp_path.unlink()

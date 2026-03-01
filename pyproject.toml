@@ -37,6 +37,7 @@ Issues = "https://github.com/Arthur742Ramos/copex/issues"
 
 [project.optional-dependencies]
 dev = ["pytest", "pytest-asyncio", "pytest-cov", "ruff"]
+repo-map = ["tree-sitter-languages>=1.10.2"]
 
 [project.scripts]
 copex = "copex.cli:app"
@@ -64,4 +65,3 @@ dev = [
     "pytest-asyncio>=1.3.0",
     "pytest-cov>=6.0",
 ]
-

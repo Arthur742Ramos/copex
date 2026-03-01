@@ -11,6 +11,21 @@ from .cli_client import CopilotCLI
 from .client import Copex
 from .conditions import Condition, ConditionContext, all_of, any_of, when
 from .config import CopexConfig, find_copilot_cli, make_client
+from .edits import (
+    EditBatchResult,
+    EditFormat,
+    EditOperation,
+    UndoBatchInfo,
+    UndoResult,
+    VerificationCheck,
+    VerificationReport,
+    apply_edit_operations,
+    apply_edit_text,
+    list_undo_history,
+    parse_structured_edits,
+    run_verification,
+    undo_last_edit_batch,
+)
 
 # Export new modules
 from .exceptions import (
@@ -56,6 +71,7 @@ from .models import (
     resolve_model,
 )
 from .persistence import PersistentSession, SessionStore
+from .repo_map import RelevantFile, RepoMap, RepoMapFile
 from .skills import SkillDiscovery, SkillInfo, get_skill_content, list_skills
 from .squad import SquadAgent, SquadAgentResult, SquadCoordinator, SquadResult, SquadRole, SquadTeam
 from .stats import RunStats, StatsTracker, load_start_commit, load_state, save_start_commit
@@ -129,6 +145,20 @@ __all__ = [
     "when",
     "all_of",
     "any_of",
+    # Structured edits
+    "EditFormat",
+    "EditOperation",
+    "EditBatchResult",
+    "UndoBatchInfo",
+    "UndoResult",
+    "VerificationCheck",
+    "VerificationReport",
+    "parse_structured_edits",
+    "apply_edit_text",
+    "apply_edit_operations",
+    "run_verification",
+    "list_undo_history",
+    "undo_last_edit_batch",
     # Templates
     "StepTemplate",
     "StepInstance",
@@ -173,6 +203,10 @@ __all__ = [
     "SquadResult",
     "SquadRole",
     "SquadTeam",
+    # Repo map
+    "RepoMap",
+    "RepoMapFile",
+    "RelevantFile",
     # Metrics
     "MetricsCollector",
     "RequestMetrics",

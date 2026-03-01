@@ -23,6 +23,7 @@ from copex.backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory
 from copex.client import Response, StreamChunk, StreamingMetrics
 from copex.config import CopexConfig, find_copilot_cli
 from copex.exceptions import CopexError
+from copex.memory import auto_capture_memory, compose_memory_instructions
 
 logger = logging.getLogger(__name__)
 
@@ -161,13 +162,16 @@ class CopilotCLI:
         return cmd
 
     def _resolve_instructions(self) -> str | None:
+        base_instructions: str | None = None
         if self.config.instructions:
-            return self.config.instructions
-        if self.config.instructions_file:
+            base_instructions = self.config.instructions
+        elif self.config.instructions_file:
             p = Path(self.config.instructions_file)
             if p.exists():
-                return p.read_text(encoding="utf-8")
-        return None
+                base_instructions = p.read_text(encoding="utf-8")
+
+        root = Path(self.config.working_directory or self.config.cwd or Path.cwd())
+        return compose_memory_instructions(base_instructions, root=root)
 
     def _resolve_mcp_config(self) -> str | None:
         """Return path to an MCP config file for ``--additional-mcp-config``."""
@@ -282,6 +286,12 @@ class CopilotCLI:
                 raise
 
         output, streaming_metrics = await self._retry.execute(_attempt)
+
+        root = Path(self.config.working_directory or self.config.cwd or Path.cwd())
+        try:
+            auto_capture_memory(prompt, output, root=root, mode="cli")
+        except OSError:
+            logger.warning("Failed to persist project memory", exc_info=True)
 
         return Response(
             content=output,
