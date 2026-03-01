@@ -189,43 +189,61 @@ class ToolRegistry:
         max_concurrent = max_concurrent or self.config.max_concurrent
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def limited_execute(name: str, params: dict) -> ToolResult:
+        async def limited_execute(idx: int, name: str, params: dict) -> tuple[int, ToolResult]:
             async with semaphore:
                 if self.config.retry_on_error:
-                    return await self.execute_with_retry(name, params)
-                return await self.execute(name, params)
+                    return idx, await self.execute_with_retry(name, params)
+                return idx, await self.execute(name, params)
 
-        tasks: list[asyncio.Task] = []
-        task_map: dict[asyncio.Task, int] = {}
+        tasks: list[asyncio.Task[tuple[int, ToolResult]]] = []
         for idx, (name, params) in enumerate(calls):
-            task = asyncio.create_task(limited_execute(name, params))
+            task = asyncio.create_task(limited_execute(idx, name, params))
             tasks.append(task)
-            task_map[task] = idx
 
         results: list[ToolResult | None] = [None] * len(calls)
         pending = set(tasks)
 
         try:
-            for task in asyncio.as_completed(tasks):
-                idx = task_map[task]
-                try:
-                    result = await task
-                except Exception as exc:  # Catch-all: parallel task failures become ToolResult
-                    result = ToolResult(
-                        name=calls[idx][0],
-                        success=False,
-                        error=str(exc),
+            done_tasks, _ = await asyncio.wait(tasks, return_when=asyncio.ALL_COMPLETED) if not self.config.fail_fast else (set(), set())
+            if self.config.fail_fast:
+                # Process tasks as they complete to support fail_fast
+                while pending:
+                    done_set, pending = await asyncio.wait(
+                        pending, return_when=asyncio.FIRST_COMPLETED
                     )
-
-                results[idx] = result
-                pending.discard(task)
-
-                if self.config.fail_fast and not result.success:
-                    for pending_task in pending:
-                        pending_task.cancel()
-                    break
+                    for task in done_set:
+                        try:
+                            idx, result = task.result()
+                        except Exception as exc:
+                            # Find the index from any remaining approach
+                            idx = tasks.index(task)
+                            result = ToolResult(
+                                name=calls[idx][0],
+                                success=False,
+                                error=str(exc),
+                            )
+                        results[idx] = result
+                        if self.config.fail_fast and not result.success:
+                            for pending_task in pending:
+                                pending_task.cancel()
+                            pending = set()
+                            break
+            else:
+                for task in done_tasks:
+                    try:
+                        idx, result = task.result()
+                    except Exception as exc:
+                        idx = tasks.index(task)
+                        result = ToolResult(
+                            name=calls[idx][0],
+                            success=False,
+                            error=str(exc),
+                        )
+                    results[idx] = result
         finally:
             if pending:
+                for t in pending:
+                    t.cancel()
                 await asyncio.gather(*pending, return_exceptions=True)
 
         if self.config.fail_fast and any(r is None for r in results):

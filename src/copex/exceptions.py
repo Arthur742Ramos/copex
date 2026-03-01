@@ -30,8 +30,12 @@ class CopexError(Exception):
         self._log_error()
 
     def _log_error(self) -> None:
-        """Log the error with structured context."""
-        logger.error(
+        """Log the error creation at debug level.
+
+        Errors are logged at debug to avoid noise from expected/retried errors.
+        Callers should log at appropriate level when handling the exception.
+        """
+        logger.debug(
             f"{self.__class__.__name__}: {self.message}",
             extra={"error_context": self.context},
         )

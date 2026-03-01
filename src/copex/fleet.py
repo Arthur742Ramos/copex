@@ -24,6 +24,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import random
 import re
 import subprocess
 import time
@@ -697,7 +698,7 @@ async def _run_task_with_retry(
         if attempt > 0:
             # Calculate exponential backoff with jitter
             delay = retry_delay * (2 ** (attempt - 1))
-            jitter = delay * 0.2 * (asyncio.get_event_loop().time() % 1)
+            jitter = delay * 0.2 * random.random()
             await asyncio.sleep(delay + jitter)
             if on_status:
                 on_status(task.id, f"retry-{attempt}")

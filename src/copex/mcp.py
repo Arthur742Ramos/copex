@@ -14,6 +14,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
@@ -140,7 +141,7 @@ class StdioTransport(MCPTransport):
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self.config.cwd,
-            env={**dict(__import__("os").environ), **self.config.env} if self.config.env else None,
+            env={**dict(os.environ), **self.config.env} if self.config.env else None,
         )
 
         # Start reader task
