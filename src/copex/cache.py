@@ -101,7 +101,7 @@ class StepCache:
         index_file = self.cache_dir / "index.json"
         if index_file.exists():
             try:
-                with open(index_file) as f:
+                with open(index_file, encoding="utf-8") as f:
                     data = json.load(f)
                 for key, entry_data in data.items():
                     entry = CacheEntry.from_dict(entry_data)
@@ -118,7 +118,7 @@ class StepCache:
         index_file = self.cache_dir / "index.json"
         try:
             data = {key: entry.to_dict() for key, entry in self._index.items()}
-            with open(index_file, "w") as f:
+            with open(index_file, "w", encoding="utf-8") as f:
                 json.dump(data, f, indent=2)
         except OSError as e:
             logger.warning(f"Failed to save cache index: {e}")

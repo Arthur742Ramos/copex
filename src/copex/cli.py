@@ -3314,7 +3314,9 @@ async def _run_fleet(
                 if p.is_file() and ".git" not in p.parts and not p.name.startswith("."):
                     try:
                         st = p.stat()
-                        snap[p] = (st.st_mtime, sum(1 for _ in open(p, errors="replace")))
+                        with open(p, encoding="utf-8", errors="replace") as f:
+                            line_count = sum(1 for _ in f)
+                        snap[p] = (st.st_mtime, line_count)
                     except (OSError, UnicodeDecodeError):
                         pass
             return snap
