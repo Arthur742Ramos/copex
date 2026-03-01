@@ -6,7 +6,6 @@ import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
 
 MEMORY_DIR_NAME = ".copex"
 MEMORY_FILE_NAME = "memory.md"
