@@ -9,6 +9,7 @@ Reasoning effort is injected via a temporary ``--config-dir`` containing a
 
 from __future__ import annotations
 
+import atexit
 import asyncio
 import json
 import logging
@@ -33,11 +34,13 @@ class CopilotCLI:
 
     def __init__(self, config: CopexConfig | None = None) -> None:
         self.config = config or CopexConfig()
+        self._config_dir: str | None = None
+        self._atexit_cleanup: Callable[[], None] = self._cleanup
+        self._atexit_registered = False
+        self._has_session = False
         self._cli_path = self.config.cli_path or find_copilot_cli()
         if not self._cli_path:
             raise CopexError("Copilot CLI not found. Install with: npm i -g @github/copilot")
-        self._config_dir: str | None = None
-        self._has_session = False
         self._retry = AdaptiveRetry(
             strategies={
                 ErrorCategory.TRANSIENT: BackoffStrategy(
@@ -77,11 +80,22 @@ class CopilotCLI:
     async def __aexit__(self, *args: Any) -> None:
         await self.stop()
 
+    def _register_cleanup(self) -> None:
+        if not self._atexit_registered:
+            atexit.register(self._atexit_cleanup)
+            self._atexit_registered = True
+
+    def _unregister_cleanup(self) -> None:
+        if self._atexit_registered:
+            atexit.unregister(self._atexit_cleanup)
+            self._atexit_registered = False
+
     def _cleanup(self) -> None:
         config_dir = getattr(self, "_config_dir", None)
         if config_dir:
             shutil.rmtree(config_dir, ignore_errors=True)
             self._config_dir = None
+        self._unregister_cleanup()
 
     def __del__(self) -> None:
         self._cleanup()
@@ -92,21 +106,27 @@ class CopilotCLI:
 
     def _make_config_dir(self) -> str:
         config_dir = tempfile.mkdtemp(prefix="copex-cli-")
-        config: dict[str, Any] = {
-            "reasoning_effort": self.config.reasoning_effort.value,
-            "banner": "never",
-            "model": self.config.model.value,
-        }
+        try:
+            config: dict[str, Any] = {
+                "reasoning_effort": self.config.reasoning_effort.value,
+                "banner": "never",
+                "model": self.config.model.value,
+            }
 
-        # Copy MCP config if user specified one
-        if self.config.mcp_config_file:
-            src = Path(self.config.mcp_config_file)
-            if src.exists():
-                dst = Path(config_dir) / src.name
-                shutil.copy2(src, dst)
+            # Copy MCP config if user specified one
+            if self.config.mcp_config_file:
+                src = Path(self.config.mcp_config_file)
+                if src.exists():
+                    dst = Path(config_dir) / src.name
+                    shutil.copy2(src, dst)
 
-        config_path = Path(config_dir) / "config.json"
-        config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+            config_path = Path(config_dir) / "config.json"
+            config_path.write_text(json.dumps(config, indent=2), encoding="utf-8")
+        except Exception:
+            shutil.rmtree(config_dir, ignore_errors=True)
+            raise
+
+        self._register_cleanup()
         return config_dir
 
     # ------------------------------------------------------------------

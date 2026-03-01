@@ -156,6 +156,18 @@ class TestMakeConfigDir:
         assert not Path(config_dir).exists()
         assert cli._config_dir is None
 
+    def test_make_config_dir_cleans_up_when_config_write_fails(self, tmp_path: Path):
+        cli = _make_cli()
+        config_dir = tmp_path / "copex-cli-fail"
+        config_dir.mkdir()
+
+        with patch("copex.cli_client.tempfile.mkdtemp", return_value=str(config_dir)):
+            with patch("pathlib.Path.write_text", side_effect=OSError("disk full")):
+                with pytest.raises(OSError, match="disk full"):
+                    cli._make_config_dir()
+
+        assert not config_dir.exists()
+
 
 # ---------------------------------------------------------------------------
 # _build_command
@@ -411,6 +423,20 @@ class TestCleanup:
         cli = _make_cli()
         cli._cleanup()  # no config dir set — should not raise
         cli._cleanup()  # still fine
+
+    def test_cleanup_unregisters_atexit_once(self):
+        cli = _make_cli()
+        with (
+            patch("copex.cli_client.atexit.register") as register,
+            patch("copex.cli_client.atexit.unregister") as unregister,
+        ):
+            config_dir = cli._make_config_dir()
+            cli._config_dir = config_dir
+            cli._cleanup()
+            cli._cleanup()
+
+        register.assert_called_once()
+        unregister.assert_called_once()
 
 
 # ---------------------------------------------------------------------------
