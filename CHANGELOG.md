@@ -2,6 +2,12 @@
 
 ## [2.14.0] - 2026-03-01
 
+## [2.15.0] - 2026-03-01
+
+### Features
+- Added .squad file support for copex fleet mode
+- Squad orchestrator improvements
+
 ### Bug Fixes
 - Fixed race conditions in circuit breaker, client, and streaming modules
 - Fixed negative delay calculations in backoff logic
