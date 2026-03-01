@@ -261,8 +261,9 @@ class SessionPool:
         finally:
             # Return session to pool or destroy if not pooled
             if pooled is not None:
-                pooled.in_use = False
-                pooled.last_used = time.monotonic()
+                async with lock:
+                    pooled.in_use = False
+                    pooled.last_used = time.monotonic()
             if not is_pooled and session is not None:
                 try:
                     await session.destroy()

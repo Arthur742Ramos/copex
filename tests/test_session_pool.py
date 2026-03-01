@@ -315,3 +315,36 @@ class TestSessionPool:
                 # s2 reuses old session, s3 is new (evicts or unpooled)
                 assert s2.session_id == old_id
                 assert s3.session_id != old_id
+
+    @pytest.mark.asyncio
+    async def test_acquire_release_updates_pool_state_under_model_lock(self) -> None:
+        pool = SessionPool(max_sessions=1)
+        client = _FakeClient()
+        config = _FakeConfig()
+
+        # Seed pool so next acquire is a pure reuse path.
+        async with pool.acquire(client, config):
+            pass
+
+        class _CountingLock:
+            def __init__(self) -> None:
+                self._lock = asyncio.Lock()
+                self.enter_count = 0
+
+            async def __aenter__(self) -> "_CountingLock":
+                self.enter_count += 1
+                await self._lock.acquire()
+                return self
+
+            async def __aexit__(self, *_: object) -> bool:
+                self._lock.release()
+                return False
+
+        counting_lock = _CountingLock()
+        pool._model_locks[config.model.value] = counting_lock  # type: ignore[assignment]
+
+        async with pool.acquire(client, config):
+            pass
+
+        # Reuse path should lock once for checkout and once for release.
+        assert counting_lock.enter_count == 2
