@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 import time
 from collections import deque
@@ -56,7 +55,9 @@ class SlidingWindowBreaker:
         # Sliding window: True = success, False = failure
         self._window: deque[bool] = deque(maxlen=window_size)
         self._opened_at: float | None = None
-        self._lock = asyncio.Lock()
+        # Note: all state-mutating methods are synchronous (no await points),
+        # so they are inherently safe within a single asyncio event loop.
+        # No lock is needed for single-threaded async usage.
 
     @property
     def failure_rate(self) -> float:

@@ -475,8 +475,8 @@ class SquadTeam:
 
             prompt = "\n".join(prompt_parts)
 
-            # Create lightweight config for AI analysis
-            ai_config = config or CopexConfig()
+            # Create lightweight config for AI analysis (copy to avoid mutation)
+            ai_config = (config or CopexConfig()).model_copy()
             ai_config.model = Model.CLAUDE_OPUS_4_6_FAST
             ai_config.reasoning_effort = ReasoningEffort.LOW
             ai_config.streaming = False

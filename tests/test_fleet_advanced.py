@@ -506,3 +506,66 @@ class TestFleetConfigDefaults:
         config = FleetConfig()
         assert config.default_retries == 3
         assert config.default_retry_delay == 1.0
+
+
+# ---------------------------------------------------------------------------
+# TestAdaptiveConcurrencyRace - verify resize inside lock
+# ---------------------------------------------------------------------------
+
+
+class TestAdaptiveConcurrencyRace:
+    """Verify that resize() is called inside the lock, not after release."""
+
+    @pytest.mark.asyncio
+    async def test_on_rate_limit_resize_under_lock(self):
+        """Concurrent on_rate_limit calls should not race on resize."""
+        ac = AdaptiveConcurrency(initial=8, minimum=1, restore_after=2)
+        # Run multiple concurrent rate limit calls
+        results = await asyncio.gather(
+            ac.on_rate_limit(),
+            ac.on_rate_limit(),
+            ac.on_rate_limit(),
+        )
+        # All should end up at same value, and semaphore should match
+        assert ac.current == ac.semaphore.limit
+        assert ac.current >= 1
+
+    @pytest.mark.asyncio
+    async def test_on_success_no_resize_when_unchanged(self):
+        """on_success should not resize when concurrency doesn't change."""
+        ac = AdaptiveConcurrency(initial=4, minimum=1, restore_after=3)
+        # Already at initial, successes should not trigger resize
+        old_limit = ac.semaphore.limit
+        await ac.on_success()
+        assert ac.semaphore.limit == old_limit
+
+    @pytest.mark.asyncio
+    async def test_on_success_resize_only_on_restore(self):
+        """on_success should only resize when actually restoring concurrency."""
+        ac = AdaptiveConcurrency(initial=4, minimum=1, restore_after=2)
+        # First reduce
+        await ac.on_rate_limit()
+        assert ac.current < 4
+        reduced = ac.current
+        # One success - not enough to restore
+        await ac.on_success()
+        assert ac.current == reduced
+        # Second success - should restore
+        await ac.on_success()
+        assert ac.current == reduced + 1
+        assert ac.semaphore.limit == ac.current
+
+    @pytest.mark.asyncio
+    async def test_concurrent_success_and_rate_limit(self):
+        """Concurrent success and rate_limit calls should not corrupt state."""
+        ac = AdaptiveConcurrency(initial=8, minimum=1, restore_after=2)
+        await ac.on_rate_limit()  # reduce to 4
+        # Now fire concurrent calls
+        await asyncio.gather(
+            ac.on_success(),
+            ac.on_rate_limit(),
+            ac.on_success(),
+        )
+        # State must be consistent
+        assert ac.current == ac.semaphore.limit
+        assert ac.current >= 1

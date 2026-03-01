@@ -89,8 +89,8 @@ class TestStreamingMetrics:
     def test_chunks_per_second_single_chunk(self):
         now = time.monotonic()
         m = StreamingMetrics(first_chunk_time=now, last_chunk_time=now, total_chunks=1)
-        # elapsed=0 → returns float(total_chunks)
-        assert m.chunks_per_second == 1.0
+        # elapsed=0 → returns 0.0 (rate is undefined for zero elapsed time)
+        assert m.chunks_per_second == 0.0
 
     def test_chunks_per_second_multiple(self):
         now = time.monotonic()
@@ -104,7 +104,8 @@ class TestStreamingMetrics:
         m = StreamingMetrics(
             first_chunk_time=now, last_chunk_time=now, total_bytes=100
         )
-        assert m.throughput_bytes_per_second == 100.0
+        # elapsed=0 → returns 0.0 (rate is undefined for zero elapsed time)
+        assert m.throughput_bytes_per_second == 0.0
 
     def test_throughput_bytes_nonzero(self):
         now = time.monotonic()

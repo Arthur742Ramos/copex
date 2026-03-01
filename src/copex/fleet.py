@@ -35,6 +35,7 @@ from enum import Enum
 from pathlib import Path
 from typing import Any
 
+from copex.backoff import ErrorCategory, categorize_error
 from copex.client import Copex, Response, SessionPool
 from copex.config import CopexConfig, make_client
 from copex.models import Model, ReasoningEffort
@@ -47,27 +48,9 @@ except ImportError:
     CopilotClient = None  # type: ignore[misc,assignment]
 
 
-# Rate limit detection regex (matches 429, "rate limit", "too many requests")
-_RATE_LIMIT_RE = re.compile(
-    r"\brate\s*limit|(?:^|http\s*|status\s*|code\s*|error\s*)429\b|too many requests",
-    re.IGNORECASE,
-)
-
-
 def _is_rate_limit_error(exc: Exception) -> bool:
     """Check if an exception is a rate limit error."""
-    # Check exception type name
-    exc_type = type(exc).__name__.lower()
-    if "ratelimit" in exc_type or "429" in exc_type:
-        return True
-    # Check exception message
-    msg = str(exc)
-    if _RATE_LIMIT_RE.search(msg):
-        return True
-    # Check for status_code attribute
-    if hasattr(exc, "status_code") and exc.status_code == 429:
-        return True
-    return False
+    return categorize_error(exc) == ErrorCategory.RATE_LIMIT
 
 
 class DynamicSemaphore:
@@ -155,7 +138,7 @@ class AdaptiveConcurrency:
                     old,
                     self._current,
                 )
-        await self._semaphore.resize(self._current)
+                await self._semaphore.resize(self._current)
         return self._current
 
     async def on_success(self) -> int:
@@ -174,7 +157,7 @@ class AdaptiveConcurrency:
                         self._current,
                         self._restore_after,
                     )
-        await self._semaphore.resize(self._current)
+                    await self._semaphore.resize(self._current)
         return self._current
 
     async def on_failure(self) -> None:

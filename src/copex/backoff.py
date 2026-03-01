@@ -180,6 +180,18 @@ def categorize_error(error: Exception) -> ErrorCategory:
     if isinstance(error, RateLimitError):
         return ErrorCategory.RATE_LIMIT
 
+    # Check for status_code attribute (e.g., HTTP response exceptions)
+    status_code = getattr(error, "status_code", None)
+    if isinstance(status_code, int):
+        if status_code == 429:
+            return ErrorCategory.RATE_LIMIT
+        if status_code in (401, 403):
+            return ErrorCategory.AUTH
+        if 500 <= status_code < 600:
+            return ErrorCategory.SERVER
+        if 400 <= status_code < 500:
+            return ErrorCategory.CLIENT
+
     error_type = type(error).__name__.lower()
     error_msg = str(error).lower()
 

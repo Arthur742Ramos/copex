@@ -142,6 +142,31 @@ class TestCategorizeError:
         result = categorize_error(Exception("error at line 500"))
         assert result != ErrorCategory.SERVER
 
+    def test_status_code_429(self) -> None:
+        exc = RuntimeError("error")
+        exc.status_code = 429  # type: ignore[attr-defined]
+        assert categorize_error(exc) == ErrorCategory.RATE_LIMIT
+
+    def test_status_code_401(self) -> None:
+        exc = RuntimeError("error")
+        exc.status_code = 401  # type: ignore[attr-defined]
+        assert categorize_error(exc) == ErrorCategory.AUTH
+
+    def test_status_code_500(self) -> None:
+        exc = RuntimeError("error")
+        exc.status_code = 500  # type: ignore[attr-defined]
+        assert categorize_error(exc) == ErrorCategory.SERVER
+
+    def test_status_code_404(self) -> None:
+        exc = RuntimeError("error")
+        exc.status_code = 404  # type: ignore[attr-defined]
+        assert categorize_error(exc) == ErrorCategory.CLIENT
+
+    def test_status_code_non_int_ignored(self) -> None:
+        exc = RuntimeError("error")
+        exc.status_code = "429"  # type: ignore[attr-defined]
+        assert categorize_error(exc) == ErrorCategory.UNKNOWN
+
 
 # ---------------------------------------------------------------------------
 # RetryState

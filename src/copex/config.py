@@ -425,8 +425,11 @@ class CopexConfig(BaseModel):
 
             with open(config_path, encoding="utf-8") as f:
                 mcp_data = json.load(f)
-                if "servers" in mcp_data:
-                    opts["mcp_servers"] = list(mcp_data["servers"].values())
+                servers = mcp_data.get("servers")
+                if isinstance(servers, dict):
+                    opts["mcp_servers"] = list(servers.values())
+                elif isinstance(servers, list):
+                    opts["mcp_servers"] = servers
 
         # Tool filtering
         if self.available_tools is not None:

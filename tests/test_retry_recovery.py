@@ -842,3 +842,27 @@ class TestEdgeCases:
         assert "..." in prompt
         # Should not contain the full 2000 char string
         assert len(prompt) < 2000 + 500  # Some buffer for prompt structure
+
+
+class TestCalculateDelay:
+    """Tests for _calculate_delay to verify non-negative delay guarantee."""
+
+    def test_delay_never_negative(self):
+        """_calculate_delay should never return a negative value."""
+        config = CopexConfig(
+            retry=RetryConfig(base_delay=0.1, max_delay=1.0)
+        )
+        client = Copex(config)
+        # Run many times to catch stochastic negative jitter
+        for attempt in range(20):
+            delay = client._calculate_delay(attempt)
+            assert delay >= 0, f"Negative delay {delay} at attempt {attempt}"
+
+    def test_delay_with_error_never_negative(self):
+        """_calculate_delay with error arg should also never be negative."""
+        config = CopexConfig()
+        client = Copex(config)
+        err = RuntimeError("rate limit exceeded")
+        for attempt in range(10):
+            delay = client._calculate_delay(attempt, error=err)
+            assert delay >= 0

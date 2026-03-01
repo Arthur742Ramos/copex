@@ -50,7 +50,7 @@ class StreamingMetrics:
             return 0.0
         elapsed = self.last_chunk_time - self.first_chunk_time
         if elapsed <= 0:
-            return float(self.total_chunks)
+            return 0.0
         return self.total_chunks / elapsed
 
     @property
@@ -59,7 +59,7 @@ class StreamingMetrics:
             return 0.0
         elapsed = self.last_chunk_time - self.first_chunk_time
         if elapsed <= 0:
-            return float(self.total_bytes)
+            return 0.0
         return self.total_bytes / elapsed
 
     def record_chunk(self, chunk: StreamChunk) -> None:
@@ -68,7 +68,8 @@ class StreamingMetrics:
             self.first_chunk_time = now
         self.last_chunk_time = now
         self.total_chunks += 1
-        self.total_bytes += len(chunk.delta)
+        if chunk.delta:
+            self.total_bytes += len(chunk.delta)
         if chunk.type == "message":
             self.message_chunks += 1
         elif chunk.type == "reasoning":

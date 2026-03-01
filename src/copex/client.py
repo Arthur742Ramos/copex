@@ -132,7 +132,10 @@ class Copex:
         """Stop the Copilot client."""
         # Await any pending destroy tasks from new_session() before tearing down
         if self._destroy_tasks:
-            await asyncio.gather(*self._destroy_tasks, return_exceptions=True)
+            results = await asyncio.gather(*self._destroy_tasks, return_exceptions=True)
+            for result in results:
+                if isinstance(result, Exception):
+                    logger.debug("Pending session destroy failed: %s", result)
             self._destroy_tasks.clear()
         if self._session:
             try:
@@ -295,7 +298,7 @@ class Copex:
         delay = min(delay, self.config.retry.max_delay)
         # Add jitter (±25%)
         jitter = delay * 0.25 * (2 * random.random() - 1)
-        return delay + jitter
+        return max(0, delay + jitter)
 
     def _cb_check(self) -> None:
         """Check circuit breaker state; raise CircuitBreakerOpen if open."""
