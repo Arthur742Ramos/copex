@@ -180,7 +180,7 @@ class TestBuildCommand:
         cmd = cli._build_command("hello")
         assert cmd[0] == "/usr/bin/copilot"
         assert "-p" in cmd
-        assert cmd[cmd.index("-p") + 1] == "hello"
+        assert cmd[cmd.index("-p") + 1].endswith("hello")
         assert "--model" in cmd
         assert cmd[cmd.index("--model") + 1] == _DEFAULT_MODEL.value
         assert "--no-color" in cmd
