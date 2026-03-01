@@ -3905,24 +3905,17 @@ async def _run_squad(
 
     def on_status(task_id: str, status: str) -> None:
         if not json_output:
-            from copex.squad import _ROLE_EMOJIS, SquadRole
+            from copex.squad import _ROLE_EMOJIS
 
-            try:
-                role = SquadRole(task_id)
-                emoji = _ROLE_EMOJIS.get(role, "▸")
-                name = role.value.title()
-            except ValueError:
-                emoji = "▸"
-                name = task_id
+            emoji = _ROLE_EMOJIS.get(task_id, "🔹")
+            name = task_id.replace("_", " ").title()
             console.print(f"  {emoji} {name}: [dim]{status}[/dim]")
 
     try:
         if not json_output:
             console.print(
                 Panel(
-                    "[bold]🏗️ Lead[/bold] → analyzes task\n"
-                    "[bold]🔧 Developer[/bold] + [bold]🧪 Tester[/bold] → work in parallel",
-                    title="[bold cyan]Squad[/bold cyan]",
+                    "[bold cyan]Squad[/bold cyan] — AI-assembled team for your repo",
                     border_style="cyan",
                     expand=False,
                 )
@@ -3941,6 +3934,13 @@ async def _run_squad(
         coordinator = SquadCoordinator(config, team=team)
         async with coordinator:
             result = await coordinator.run(prompt, on_status=on_status)
+
+            # Show team composition after analysis
+            if not json_output and coordinator.team.agents:
+                team_desc = "  ".join(
+                    f"{a.emoji} {a.name}" for a in coordinator.team.agents
+                )
+                console.print(f"  Team: {team_desc}")
 
         if json_output:
             print(result.to_json(indent=2), flush=True)

@@ -15,6 +15,7 @@ import pytest
 from copex.config import CopexConfig
 from copex.fleet import Fleet, FleetConfig, FleetResult
 from copex.squad import (
+    _KNOWN_ROLE_PHASES,
     _ROLE_EMOJIS,
     _ROLE_PROMPTS,
     SquadAgent,
@@ -263,7 +264,7 @@ class TestSquadCoordinatorTaskBuilding:
         config = CopexConfig()
         coord = SquadCoordinator(config)
         agent = coord.team.get_agent(SquadRole.DEVELOPER)
-        task_ids = {SquadRole.LEAD: "lead"}
+        task_ids = {"lead": "lead"}
         prompt = coord._build_agent_prompt(agent, "Build X", task_ids)
         assert "Developer" in prompt
         assert "Build X" in prompt
@@ -273,7 +274,7 @@ class TestSquadCoordinatorTaskBuilding:
         config = CopexConfig()
         coord = SquadCoordinator(config)
         agent = coord.team.get_agent(SquadRole.TESTER)
-        task_ids = {SquadRole.LEAD: "lead"}
+        task_ids = {"lead": "lead"}
         prompt = coord._build_agent_prompt(agent, "Build X", task_ids)
         assert "Tester" in prompt
         assert "{{task:lead.content}}" in prompt
@@ -281,25 +282,29 @@ class TestSquadCoordinatorTaskBuilding:
     def test_get_dependencies_lead(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
-        deps = coord._get_dependencies(SquadRole.LEAD, {})
+        agent = SquadAgent.default_for_role(SquadRole.LEAD)
+        deps = coord._get_dependencies(agent, {})
         assert deps == []
 
     def test_get_dependencies_developer(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
-        deps = coord._get_dependencies(SquadRole.DEVELOPER, {SquadRole.LEAD: "lead"})
+        agent = SquadAgent.default_for_role(SquadRole.DEVELOPER)
+        deps = coord._get_dependencies(agent, {"lead": "lead"})
         assert deps == ["lead"]
 
     def test_get_dependencies_tester(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
-        deps = coord._get_dependencies(SquadRole.TESTER, {SquadRole.LEAD: "lead"})
+        agent = SquadAgent.default_for_role(SquadRole.TESTER)
+        deps = coord._get_dependencies(agent, {"lead": "lead"})
         assert deps == ["lead"]
 
     def test_get_dependencies_no_lead(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
-        deps = coord._get_dependencies(SquadRole.DEVELOPER, {})
+        agent = SquadAgent.default_for_role(SquadRole.DEVELOPER)
+        deps = coord._get_dependencies(agent, {})
         assert deps == []
 
 
@@ -314,9 +319,9 @@ class TestSquadCoordinatorResultBuilding:
         config = CopexConfig()
         coord = SquadCoordinator(config)
         task_ids = {
-            SquadRole.LEAD: "lead",
-            SquadRole.DEVELOPER: "developer",
-            SquadRole.TESTER: "tester",
+            "lead": "lead",
+            "developer": "developer",
+            "tester": "tester",
         }
         fleet_results = [
             FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
@@ -334,7 +339,7 @@ class TestSquadCoordinatorResultBuilding:
     def test_build_result_partial_failure(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
-        task_ids = {SquadRole.LEAD: "lead", SquadRole.DEVELOPER: "developer"}
+        task_ids = {"lead": "lead", "developer": "developer"}
         fleet_results = [
             FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
             FleetResult(
@@ -352,7 +357,7 @@ class TestSquadCoordinatorResultBuilding:
     def test_build_result_unknown_task_id(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
-        task_ids = {SquadRole.LEAD: "lead"}
+        task_ids = {"lead": "lead"}
         fleet_results = [
             FleetResult(task_id="lead", success=True, response=Response(content="ok"), duration_ms=100),
             FleetResult(task_id="unknown", success=True, response=Response(content="?"), duration_ms=50),
@@ -364,7 +369,7 @@ class TestSquadCoordinatorResultBuilding:
     def test_build_result_no_response(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
-        task_ids = {SquadRole.LEAD: "lead"}
+        task_ids = {"lead": "lead"}
         fleet_results = [
             FleetResult(task_id="lead", success=False, response=None, duration_ms=50),
         ]
@@ -434,10 +439,10 @@ class TestSquadCoordinatorAddTasks:
         fleet = Fleet(config)
         task_ids = coord._add_tasks(fleet, "Build an API")
 
-        assert SquadRole.LEAD in task_ids
-        assert SquadRole.DEVELOPER in task_ids
-        assert SquadRole.TESTER in task_ids
-        assert SquadRole.DOCS in task_ids
+        assert "lead" in task_ids
+        assert "developer" in task_ids
+        assert "tester" in task_ids
+        assert "docs" in task_ids
         assert len(fleet._tasks) == 4
 
     def test_add_tasks_dependencies(self):
@@ -448,13 +453,15 @@ class TestSquadCoordinatorAddTasks:
         fleet = Fleet(config)
         task_ids = coord._add_tasks(fleet, "Build an API")
 
-        lead_task = next(t for t in fleet._tasks if t.id == task_ids[SquadRole.LEAD])
-        dev_task = next(t for t in fleet._tasks if t.id == task_ids[SquadRole.DEVELOPER])
-        tester_task = next(t for t in fleet._tasks if t.id == task_ids[SquadRole.TESTER])
+        lead_task = next(t for t in fleet._tasks if t.id == task_ids["lead"])
+        dev_task = next(t for t in fleet._tasks if t.id == task_ids["developer"])
+        tester_task = next(t for t in fleet._tasks if t.id == task_ids["tester"])
 
         assert lead_task.depends_on == []
-        assert dev_task.depends_on == [task_ids[SquadRole.LEAD]]
-        assert tester_task.depends_on == [task_ids[SquadRole.DEVELOPER]]
+        assert dev_task.depends_on == [task_ids["lead"]]
+        # Tester (phase 3) depends on all phase 1+2 agents
+        assert task_ids["lead"] in tester_task.depends_on
+        assert task_ids["developer"] in tester_task.depends_on
 
     def test_add_tasks_prompts_include_role(self):
         from copex.fleet import Fleet
@@ -600,14 +607,15 @@ class TestDocsRole:
         config = CopexConfig()
         coord = SquadCoordinator(config)
         task_ids = {
-            SquadRole.LEAD: "lead",
-            SquadRole.DEVELOPER: "developer",
-            SquadRole.TESTER: "tester",
+            "lead": "lead",
+            "developer": "developer",
+            "tester": "tester",
         }
-        deps = coord._get_dependencies(SquadRole.DOCS, task_ids)
+        agent = SquadAgent.default_for_role(SquadRole.DOCS)
+        deps = coord._get_dependencies(agent, task_ids)
         assert "developer" in deps
         assert "tester" in deps
-        assert "lead" not in deps
+        assert "lead" in deps  # phase 4 depends on all lower phases
 
 
 # ===========================================================================
@@ -740,8 +748,8 @@ class TestBuildResultEdgeCases:
         coord = SquadCoordinator(config, team=team)
 
         task_ids = {
-            SquadRole.LEAD: "lead",
-            SquadRole.DEVELOPER: "developer",  # not in team
+            "lead": "lead",
+            "developer": "developer",  # not in team
         }
         fleet_results = [
             FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
@@ -764,7 +772,7 @@ class TestSquadCoordinatorRun:
     def test_run_calls_fleet(self):
         """Test that run() wires Fleet and returns a SquadResult."""
         config = CopexConfig()
-        coord = SquadCoordinator(config)
+        coord = SquadCoordinator(config, team=SquadTeam.default())
 
         mock_fleet_results = [
             FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
@@ -785,7 +793,7 @@ class TestSquadCoordinatorRun:
     def test_run_with_failure(self):
         """Test that run() reports failure when an agent fails."""
         config = CopexConfig()
-        coord = SquadCoordinator(config)
+        coord = SquadCoordinator(config, team=SquadTeam.default())
 
         mock_fleet_results = [
             FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
@@ -1002,58 +1010,73 @@ class TestNewRoleDependencies:
             SquadAgent.default_for_role(SquadRole.DEVOPS),
         ])
         coord = SquadCoordinator(config, team=team)
-        task_ids = {SquadRole.LEAD: "lead"}
-        deps = coord._get_dependencies(SquadRole.DEVOPS, task_ids)
+        agent = SquadAgent.default_for_role(SquadRole.DEVOPS)
+        deps = coord._get_dependencies(agent, {"lead": "lead"})
         assert deps == ["lead"]
 
     def test_frontend_depends_on_lead(self):
         config = CopexConfig()
         coord = SquadCoordinator(config, team=SquadTeam.default())
-        task_ids = {SquadRole.LEAD: "lead"}
-        deps = coord._get_dependencies(SquadRole.FRONTEND, task_ids)
+        agent = SquadAgent.default_for_role(SquadRole.FRONTEND)
+        deps = coord._get_dependencies(agent, {"lead": "lead"})
         assert deps == ["lead"]
 
     def test_backend_depends_on_lead(self):
         config = CopexConfig()
         coord = SquadCoordinator(config, team=SquadTeam.default())
-        task_ids = {SquadRole.LEAD: "lead"}
-        deps = coord._get_dependencies(SquadRole.BACKEND, task_ids)
+        agent = SquadAgent.default_for_role(SquadRole.BACKEND)
+        deps = coord._get_dependencies(agent, {"lead": "lead"})
         assert deps == ["lead"]
 
-    def test_tester_depends_on_implementation_agents(self):
+    def test_tester_depends_on_lower_phases(self):
         config = CopexConfig()
-        coord = SquadCoordinator(config, team=SquadTeam.default())
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role(SquadRole.LEAD),
+            SquadAgent.default_for_role(SquadRole.DEVELOPER),
+            SquadAgent.default_for_role(SquadRole.FRONTEND),
+            SquadAgent.default_for_role(SquadRole.TESTER),
+        ])
+        coord = SquadCoordinator(config, team=team)
+        agent = SquadAgent.default_for_role(SquadRole.TESTER)
         task_ids = {
-            SquadRole.LEAD: "lead",
-            SquadRole.DEVELOPER: "developer",
-            SquadRole.FRONTEND: "frontend",
+            "lead": "lead",
+            "developer": "developer",
+            "frontend": "frontend",
         }
-        deps = coord._get_dependencies(SquadRole.TESTER, task_ids)
+        deps = coord._get_dependencies(agent, task_ids)
         assert "developer" in deps
         assert "frontend" in deps
-        assert "lead" not in deps
+        assert "lead" in deps  # phase 3 depends on phase 1+2
 
-    def test_tester_falls_back_to_lead(self):
+    def test_tester_depends_on_lead_only(self):
         config = CopexConfig()
         coord = SquadCoordinator(config, team=SquadTeam.default())
-        task_ids = {SquadRole.LEAD: "lead"}
-        deps = coord._get_dependencies(SquadRole.TESTER, task_ids)
+        agent = SquadAgent.default_for_role(SquadRole.TESTER)
+        deps = coord._get_dependencies(agent, {"lead": "lead"})
         assert deps == ["lead"]
 
-    def test_docs_depends_on_all_non_lead(self):
+    def test_docs_depends_on_all_lower_phases(self):
         config = CopexConfig()
-        coord = SquadCoordinator(config, team=SquadTeam.default())
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role(SquadRole.LEAD),
+            SquadAgent.default_for_role(SquadRole.DEVELOPER),
+            SquadAgent.default_for_role(SquadRole.DEVOPS),
+            SquadAgent.default_for_role(SquadRole.TESTER),
+            SquadAgent.default_for_role(SquadRole.DOCS),
+        ])
+        coord = SquadCoordinator(config, team=team)
+        agent = SquadAgent.default_for_role(SquadRole.DOCS)
         task_ids = {
-            SquadRole.LEAD: "lead",
-            SquadRole.DEVELOPER: "developer",
-            SquadRole.TESTER: "tester",
-            SquadRole.DEVOPS: "devops",
+            "lead": "lead",
+            "developer": "developer",
+            "tester": "tester",
+            "devops": "devops",
         }
-        deps = coord._get_dependencies(SquadRole.DOCS, task_ids)
+        deps = coord._get_dependencies(agent, task_ids)
         assert "developer" in deps
         assert "tester" in deps
         assert "devops" in deps
-        assert "lead" not in deps
+        assert "lead" in deps  # phase 4 depends on all lower phases
 
 
 class TestFromRepoTestPatterns:
@@ -1078,3 +1101,110 @@ class TestFromRepoTestPatterns:
         (tmp_path / "CONTRIBUTING.md").write_text("# Contributing")
         team = SquadTeam.from_repo(tmp_path)
         assert SquadRole.DOCS in team.roles
+
+
+# ===========================================================================
+# Freeform roles, phases, save/load
+# ===========================================================================
+
+
+class TestFreeformRoles:
+
+    def test_custom_role_string(self):
+        agent = SquadAgent.default_for_role("security_engineer")
+        assert agent.role == "security_engineer"
+        assert agent.name == "Security Engineer"
+        assert agent.emoji == "🔹"  # fallback emoji
+        assert agent.phase == 2  # default phase
+        assert "Security Engineer" in agent.system_prompt
+
+    def test_custom_role_phase(self):
+        agent = SquadAgent(
+            name="Data Scientist",
+            role="data_scientist",
+            emoji="📊",
+            system_prompt="You analyze data.",
+            phase=2,
+        )
+        assert agent.phase == 2
+        assert agent.role == "data_scientist"
+
+    def test_known_role_gets_correct_phase(self):
+        assert SquadAgent.default_for_role("lead").phase == 1
+        assert SquadAgent.default_for_role("developer").phase == 2
+        assert SquadAgent.default_for_role("tester").phase == 3
+        assert SquadAgent.default_for_role("docs").phase == 4
+
+    def test_freeform_role_dependencies(self):
+        team = SquadTeam(agents=[
+            SquadAgent(name="Lead", role="lead", emoji="🏗️",
+                       system_prompt="Lead.", phase=1),
+            SquadAgent(name="ML Engineer", role="ml_engineer", emoji="🤖",
+                       system_prompt="ML.", phase=2),
+            SquadAgent(name="QA", role="qa_specialist", emoji="✅",
+                       system_prompt="QA.", phase=3),
+        ])
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=team)
+
+        # ML (phase 2) depends on Lead (phase 1)
+        ml = team.get_agent("ml_engineer")
+        deps = coord._get_dependencies(ml, {"lead": "lead"})
+        assert deps == ["lead"]
+
+        # QA (phase 3) depends on Lead (phase 1) and ML (phase 2)
+        qa = team.get_agent("qa_specialist")
+        deps = coord._get_dependencies(qa, {"lead": "lead", "ml_engineer": "ml_engineer"})
+        assert "lead" in deps
+        assert "ml_engineer" in deps
+
+    def test_mixed_known_and_custom_roles(self):
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role(SquadRole.LEAD),
+            SquadAgent.default_for_role("api_designer"),
+            SquadAgent.default_for_role(SquadRole.TESTER),
+        ])
+        assert team.roles == ["lead", "api_designer", "tester"]
+        assert team.get_agent("api_designer") is not None
+
+
+class TestSquadTeamPersistence:
+
+    def test_save_and_load(self, tmp_path):
+        team = SquadTeam(agents=[
+            SquadAgent(name="Lead", role="lead", emoji="🏗️",
+                       system_prompt="Lead.", phase=1),
+            SquadAgent(name="ML Eng", role="ml_engineer", emoji="🤖",
+                       system_prompt="Do ML.", phase=2),
+        ])
+        config_path = tmp_path / "squad.json"
+        team.save(config_path)
+
+        loaded = SquadTeam.load(config_path)
+        assert loaded is not None
+        assert len(loaded.agents) == 2
+        assert loaded.agents[0].role == "lead"
+        assert loaded.agents[1].role == "ml_engineer"
+        assert loaded.agents[1].name == "ML Eng"
+        assert loaded.agents[1].emoji == "🤖"
+        assert loaded.agents[1].system_prompt == "Do ML."
+        assert loaded.agents[1].phase == 2
+
+    def test_load_nonexistent(self, tmp_path):
+        result = SquadTeam.load(tmp_path / "nope.json")
+        assert result is None
+
+    def test_load_invalid_json(self, tmp_path):
+        config_path = tmp_path / "squad.json"
+        config_path.write_text("not json", encoding="utf-8")
+        result = SquadTeam.load(config_path)
+        assert result is None
+
+    def test_save_creates_directory(self, tmp_path):
+        team = SquadTeam.default()
+        config_path = tmp_path / "subdir" / "squad.json"
+        team.save(config_path)
+        assert config_path.is_file()
+        loaded = SquadTeam.load(config_path)
+        assert loaded is not None
+        assert len(loaded.agents) == 4

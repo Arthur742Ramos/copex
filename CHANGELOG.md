@@ -1,5 +1,18 @@
 # Changelog
 
+## v2.11.0 (2026-03-01)
+
+### Features
+- **Freeform AI roles**: Squad AI analysis now freely determines custom roles (e.g., `security_engineer`, `data_scientist`, `api_designer`) instead of being limited to 7 hardcoded roles
+- **Phase-based dependencies**: Agents use execution phases (1=analyze, 2=build, 3=verify, 4=document) for dependency ordering, supporting arbitrary role combinations
+- **Team persistence**: Squad teams are saved to `.copex/squad.json` and loaded on subsequent runs — AI sees existing teams and decides whether to keep, modify, or expand
+- **Existing team awareness**: `from_repo_ai()` shows the current team to the AI, which can add/remove roles based on the repo's needs
+- **Custom role defaults**: Unknown roles get sensible default names, emojis (🔹), and system prompts
+
+### Tests
+- 9 new tests for freeform roles, phase-based dependencies, save/load persistence
+- Updated all dependency tests to use phase-based model
+
 ## v2.10.1 (2026-03-01)
 
 ### Bug Fixes

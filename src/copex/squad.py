@@ -32,7 +32,11 @@ logger = logging.getLogger(__name__)
 
 
 class SquadRole(str, Enum):
-    """Roles available in a squad team."""
+    """Well-known roles for backward compatibility.
+
+    Squad teams can use any string role — these are just convenient constants
+    for common roles. AI analysis may return completely custom roles.
+    """
 
     LEAD = "lead"
     DEVELOPER = "developer"
@@ -43,50 +47,50 @@ class SquadRole(str, Enum):
     BACKEND = "backend"
 
 
-_ROLE_PROMPTS: dict[SquadRole, str] = {
-    SquadRole.LEAD: (
+_ROLE_PROMPTS: dict[str, str] = {
+    "lead": (
         "You are the Lead Architect. Analyze the task, break it down into "
         "a clear implementation plan, identify key files and patterns to "
         "follow, and flag any risks or decisions needed. Be specific about "
         "what needs to be built and how."
     ),
-    SquadRole.DEVELOPER: (
+    "developer": (
         "You are the Developer. Implement the task according to the plan. "
         "Write clean, well-structured code following the project's existing "
         "patterns and conventions. Make the smallest changes necessary."
     ),
-    SquadRole.TESTER: (
+    "tester": (
         "You are the Tester. Write comprehensive tests for the task. "
         "Cover happy paths, edge cases, and error handling. Follow the "
         "project's existing test patterns and conventions."
     ),
-    SquadRole.DOCS: (
+    "docs": (
         "You are the Documentation Expert. Review and update documentation, "
         "README files, docstrings, and examples. Ensure documentation stays "
         "in sync with code changes."
     ),
-    SquadRole.DEVOPS: (
+    "devops": (
         "You are the DevOps Engineer. Manage CI/CD, Docker, infrastructure, "
         "and deployment configurations."
     ),
-    SquadRole.FRONTEND: (
+    "frontend": (
         "You are the Frontend Developer. Build UI components, handle "
         "client-side logic, and ensure good UX."
     ),
-    SquadRole.BACKEND: (
+    "backend": (
         "You are the Backend Developer. Build APIs, services, database "
         "interactions, and server-side logic."
     ),
 }
 
-_ROLE_EMOJIS: dict[SquadRole, str] = {
-    SquadRole.LEAD: "🏗️",
-    SquadRole.DEVELOPER: "🔧",
-    SquadRole.TESTER: "🧪",
-    SquadRole.DOCS: "📝",
-    SquadRole.DEVOPS: "⚙️",
-    SquadRole.FRONTEND: "⚛️",
-    SquadRole.BACKEND: "🔧",
+_ROLE_EMOJIS: dict[str, str] = {
+    "lead": "🏗️",
+    "developer": "🔧",
+    "tester": "🧪",
+    "docs": "📝",
+    "devops": "⚙️",
+    "frontend": "⚛️",
+    "backend": "🔧",
 }
 
 _SOURCE_EXTENSIONS = frozenset({
@@ -245,23 +249,46 @@ def _gather_repo_context(path: Path | None = None) -> dict[str, Any]:
     return context
 
 
+_KNOWN_ROLE_PHASES: dict[str, int] = {
+    "lead": 1,
+    "developer": 2,
+    "frontend": 2,
+    "backend": 2,
+    "devops": 2,
+    "tester": 3,
+    "docs": 4,
+}
+
+
 @dataclass
 class SquadAgent:
     """An agent in the squad team."""
 
     name: str
-    role: SquadRole
+    role: str
     emoji: str
     system_prompt: str
+    phase: int = 2
 
     @classmethod
-    def default_for_role(cls, role: SquadRole) -> SquadAgent:
-        """Create a default agent for a role."""
+    def default_for_role(cls, role: SquadRole | str) -> SquadAgent:
+        """Create a default agent for a role.
+
+        Accepts SquadRole enum values or arbitrary role strings.
+        Known roles get predefined prompts and emojis; custom roles
+        get sensible defaults.
+        """
+        role_str = role.value if isinstance(role, SquadRole) else role.lower()
         return cls(
-            name=role.value.title(),
-            role=role,
-            emoji=_ROLE_EMOJIS[role],
-            system_prompt=_ROLE_PROMPTS[role],
+            name=role_str.replace("_", " ").title(),
+            role=role_str,
+            emoji=_ROLE_EMOJIS.get(role_str, "🔹"),
+            system_prompt=_ROLE_PROMPTS.get(
+                role_str,
+                f"You are the {role_str.replace('_', ' ').title()}. "
+                f"Focus on your area of expertise for this task.",
+            ),
+            phase=_KNOWN_ROLE_PHASES.get(role_str, 2),
         )
 
 
@@ -326,6 +353,7 @@ class SquadTeam:
         cls,
         config: CopexConfig | None = None,
         path: Path | None = None,
+        existing_team: SquadTeam | None = None,
     ) -> SquadTeam:
         """Create a team by using AI to analyze the repository.
 
@@ -333,9 +361,13 @@ class SquadTeam:
         the repo structure, README, and config files. Falls back to from_repo()
         (pattern matching) on any failure.
 
+        If an existing_team is provided (e.g., from .copex/squad.json), the AI
+        sees the current team and can keep, modify, or expand it.
+
         Args:
             config: Optional CopexConfig (creates lightweight config if None).
             path: Optional path to repository (defaults to cwd).
+            existing_team: Optional existing team for the AI to consider.
 
         Returns:
             SquadTeam with AI-determined roles, or fallback to from_repo().
@@ -350,6 +382,12 @@ class SquadTeam:
             if not context:
                 logger.warning("No repo context found, falling back to pattern matching")
                 return cls.from_repo(path)
+
+            # Check for existing team (from config or .copex/squad.json)
+            if existing_team is None:
+                existing_team = cls.load(
+                    (path or Path.cwd()) / ".copex" / "squad.json"
+                )
 
             # Build prompt for AI
             prompt_parts = [
@@ -374,25 +412,56 @@ class SquadTeam:
                 excerpt = context["readme_excerpt"][:1000]
                 prompt_parts.append(f"\nREADME excerpt:\n{excerpt}")
 
+            # Include existing team context if available
+            if existing_team and existing_team.agents:
+                prompt_parts.append("")
+                prompt_parts.append("# Current Team Configuration")
+                prompt_parts.append("")
+                prompt_parts.append(
+                    "This repository already has a team configured. "
+                    "Review it and decide whether to keep it as-is, "
+                    "modify roles, or add/remove agents:"
+                )
+                for agent in existing_team.agents:
+                    prompt_parts.append(
+                        f"- {agent.emoji} {agent.name} (role: {agent.role}, "
+                        f"phase: {agent.phase})"
+                    )
+
             prompt_parts.extend([
                 "",
                 "# Instructions",
                 "",
-                "Respond ONLY with a JSON array of role strings. Valid roles:",
-                "- lead (always required)",
-                "- developer (always required)",
-                "- tester (if has tests or should have tests)",
-                "- docs (if has documentation to maintain)",
-                "- devops (if has CI/CD, Docker, or infrastructure)",
-                "- frontend (if has UI components)",
-                "- backend (if has API/server components)",
+                "Determine the ideal team composition for this repository.",
+                "You may create ANY roles that make sense — you are NOT limited to a predefined list.",
+                "Common roles include lead, developer, tester, docs, devops, frontend, backend,",
+                "but you can invent specialized roles like security_engineer, data_scientist,",
+                "api_designer, performance_engineer, etc.",
+                "",
+                "Respond ONLY with a JSON array of objects, each with:",
+                '- "role": short snake_case identifier (e.g. "security_engineer")',
+                '- "name": human-readable name (e.g. "Security Engineer")',
+                '- "emoji": single emoji for display',
+                '- "prompt": system prompt describing the agent\'s expertise and focus',
+                '- "phase": execution order (1=analyze first, 2=build, 3=verify, 4=document)',
                 "",
                 "Rules:",
-                "- Always include 'lead' and 'developer'",
-                "- Only include roles that are clearly needed",
+                "- Always include a 'lead' role with phase 1",
                 "- Keep the team small (3-5 roles typical)",
+                "- Only include roles clearly needed for THIS specific repository",
+                "- Phase ordering determines dependencies (phase 2 waits for phase 1, etc.)",
+                "- If a current team is shown above, use it as a starting point —"
+                " keep roles that still make sense, remove unnecessary ones, and add new ones if needed",
                 "",
-                'Example response: ["lead", "developer", "tester", "docs"]',
+                "Example response:",
+                '[',
+                '  {"role": "lead", "name": "Lead Architect", "emoji": "🏗️", '
+                '"prompt": "You are the Lead Architect. Analyze the task...", "phase": 1},',
+                '  {"role": "developer", "name": "Developer", "emoji": "🔧", '
+                '"prompt": "You are the Developer. Implement the task...", "phase": 2},',
+                '  {"role": "tester", "name": "Tester", "emoji": "🧪", '
+                '"prompt": "You are the Tester. Write comprehensive tests...", "phase": 3}',
+                ']',
             ])
 
             prompt = "\n".join(prompt_parts)
@@ -420,38 +489,129 @@ class SquadTeam:
                 if not isinstance(roles_list, list):
                     raise ValueError("AI response is not a list")
 
-                # Validate and convert to SquadRole
-                roles: list[SquadRole] = []
-                for role_str in roles_list:
-                    try:
-                        role = SquadRole(role_str.lower())
-                        if role not in roles:
-                            roles.append(role)
-                    except ValueError:
-                        logger.warning(f"Unknown role from AI: {role_str}")
+                # Build agents from AI response
+                agents: list[SquadAgent] = []
+                seen_roles: set[str] = set()
+                for item in roles_list:
+                    if isinstance(item, str):
+                        # Legacy format: plain role string
+                        role_str = item.lower()
+                        if role_str not in seen_roles:
+                            seen_roles.add(role_str)
+                            agents.append(SquadAgent.default_for_role(role_str))
+                    elif isinstance(item, dict):
+                        role_str = item.get("role", "").lower()
+                        if not role_str or role_str in seen_roles:
+                            continue
+                        seen_roles.add(role_str)
+                        phase = item.get("phase", _KNOWN_ROLE_PHASES.get(role_str, 2))
+                        try:
+                            phase = int(phase)
+                        except (TypeError, ValueError):
+                            phase = 2
+                        agents.append(SquadAgent(
+                            name=item.get("name", role_str.replace("_", " ").title()),
+                            role=role_str,
+                            emoji=item.get("emoji", _ROLE_EMOJIS.get(role_str, "🔹")),
+                            system_prompt=item.get("prompt", _ROLE_PROMPTS.get(
+                                role_str,
+                                f"You are the {role_str.replace('_', ' ').title()}. "
+                                f"Focus on your area of expertise for this task.",
+                            )),
+                            phase=max(1, min(4, phase)),
+                        ))
 
-                # Ensure minimum viable team
-                if SquadRole.LEAD not in roles:
-                    roles.insert(0, SquadRole.LEAD)
-                if SquadRole.DEVELOPER not in roles:
-                    roles.append(SquadRole.DEVELOPER)
+                # Ensure lead exists
+                if "lead" not in seen_roles:
+                    agents.insert(0, SquadAgent.default_for_role("lead"))
 
-                logger.info(f"AI analysis completed: {[r.value for r in roles]}")
-                return cls(agents=[SquadAgent.default_for_role(r) for r in roles])
+                logger.info(f"AI analysis completed: {[a.role for a in agents]}")
+                team = cls(agents=agents)
+                # Persist for future runs
+                try:
+                    team.save(
+                        (path or Path.cwd()) / ".copex" / "squad.json"
+                    )
+                except Exception:
+                    pass  # Non-critical
+                return team
 
         except Exception as e:
             logger.warning(f"AI repo analysis failed ({e}), falling back to pattern matching")
             return cls.from_repo(path)
 
-    def get_agent(self, role: SquadRole) -> SquadAgent | None:
+    SQUAD_CONFIG = Path(".copex") / "squad.json"
+
+    def save(self, path: Path | None = None) -> None:
+        """Save team configuration to .copex/squad.json."""
+        config_path = path or self.SQUAD_CONFIG
+        config_path.parent.mkdir(parents=True, exist_ok=True)
+        data = [
+            {
+                "role": a.role,
+                "name": a.name,
+                "emoji": a.emoji,
+                "prompt": a.system_prompt,
+                "phase": a.phase,
+            }
+            for a in self.agents
+        ]
+        config_path.write_text(
+            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
+        )
+        logger.info(f"Squad team saved to {config_path}")
+
+    @classmethod
+    def load(cls, path: Path | None = None) -> SquadTeam | None:
+        """Load team configuration from .copex/squad.json.
+
+        Returns None if file doesn't exist.
+        """
+        config_path = path or cls.SQUAD_CONFIG
+        if not config_path.is_file():
+            return None
+        try:
+            data = json.loads(config_path.read_text(encoding="utf-8"))
+            if not isinstance(data, list):
+                return None
+            agents = []
+            for item in data:
+                if not isinstance(item, dict) or not item.get("role"):
+                    continue
+                role_str = item["role"].lower()
+                phase = item.get("phase", _KNOWN_ROLE_PHASES.get(role_str, 2))
+                try:
+                    phase = int(phase)
+                except (TypeError, ValueError):
+                    phase = 2
+                agents.append(SquadAgent(
+                    name=item.get("name", role_str.replace("_", " ").title()),
+                    role=role_str,
+                    emoji=item.get("emoji", _ROLE_EMOJIS.get(role_str, "🔹")),
+                    system_prompt=item.get("prompt", _ROLE_PROMPTS.get(
+                        role_str,
+                        f"You are the {role_str.replace('_', ' ').title()}. "
+                        f"Focus on your area of expertise for this task.",
+                    )),
+                    phase=max(1, min(4, phase)),
+                ))
+            if agents:
+                logger.info(f"Loaded squad team from {config_path}: {[a.role for a in agents]}")
+                return cls(agents=agents)
+        except Exception as e:
+            logger.warning(f"Failed to load squad config from {config_path}: {e}")
+        return None
+
+    def get_agent(self, role: SquadRole | str) -> SquadAgent | None:
         """Get agent by role."""
+        role_str = role.value if isinstance(role, SquadRole) else role.lower()
         for a in self.agents:
-            if a.role == role:
+            if a.role == role_str:
                 return a
         return None
 
     @property
-    def roles(self) -> list[SquadRole]:
+    def roles(self) -> list[str]:
         """List roles present in the team."""
         return [a.role for a in self.agents]
 
@@ -494,7 +654,7 @@ class SquadResult:
             "agents": [
                 {
                     "name": ar.agent.name,
-                    "role": ar.agent.role.value,
+                    "role": ar.agent.role,
                     "success": ar.success,
                     "content": ar.content,
                     "duration_ms": round(ar.duration_ms, 1),
@@ -596,17 +756,17 @@ class SquadCoordinator:
         result.total_duration_ms = (time.monotonic() - start_time) * 1000
         return result
 
-    def _add_tasks(self, fleet: Fleet, prompt: str) -> dict[SquadRole, str]:
+    def _add_tasks(self, fleet: Fleet, prompt: str) -> dict[str, str]:
         """Add fleet tasks for each agent."""
-        task_ids: dict[SquadRole, str] = {}
+        task_ids: dict[str, str] = {}
 
         for agent in self.team.agents:  # Use property for lazy init
-            deps = self._get_dependencies(agent.role, task_ids)
+            deps = self._get_dependencies(agent, task_ids)
             agent_prompt = self._build_agent_prompt(agent, prompt, task_ids)
 
             tid = fleet.add(
                 agent_prompt,
-                task_id=agent.role.value,
+                task_id=agent.role,
                 depends_on=deps,
                 model=self._config.model,
             )
@@ -615,41 +775,31 @@ class SquadCoordinator:
         return task_ids
 
     def _get_dependencies(
-        self, role: SquadRole, task_ids: dict[SquadRole, str]
+        self, agent: SquadAgent, task_ids: dict[str, str]
     ) -> list[str]:
-        """Get dependency task IDs for a role."""
-        if role == SquadRole.LEAD:
+        """Get dependency task IDs for an agent based on phase ordering.
+
+        Phase 1 (analyze): no dependencies
+        Phase 2 (build): depends on all phase 1 agents
+        Phase 3 (verify): depends on all phase 2 agents
+        Phase 4 (document): depends on all phase 2 and 3 agents
+        """
+        if agent.phase <= 1:
             return []
-        if role == SquadRole.DOCS:
-            # Docs runs last — depends on all other non-lead roles
-            deps = []
-            for r, tid in task_ids.items():
-                if r != SquadRole.LEAD and r != SquadRole.DOCS:
-                    deps.append(tid)
-            return deps
-        if role == SquadRole.TESTER:
-            # Tester depends on implementation agents
-            deps = []
-            for dep_role in (
-                SquadRole.DEVELOPER, SquadRole.FRONTEND, SquadRole.BACKEND,
-            ):
-                dep_id = task_ids.get(dep_role)
-                if dep_id:
-                    deps.append(dep_id)
-            if not deps:
-                lead_id = task_ids.get(SquadRole.LEAD)
-                if lead_id:
-                    deps.append(lead_id)
-            return deps
-        # DEVELOPER, FRONTEND, BACKEND, DEVOPS all depend on Lead
-        lead_id = task_ids.get(SquadRole.LEAD)
-        return [lead_id] if lead_id else []
+        deps = []
+        for other in self.team.agents:
+            if other.role == agent.role:
+                continue
+            tid = task_ids.get(other.role)
+            if tid and other.phase < agent.phase:
+                deps.append(tid)
+        return deps
 
     def _build_agent_prompt(
         self,
         agent: SquadAgent,
         user_prompt: str,
-        task_ids: dict[SquadRole, str],
+        task_ids: dict[str, str],
     ) -> str:
         """Build the full prompt for an agent including role context."""
         parts = [agent.system_prompt]
@@ -663,8 +813,8 @@ class SquadCoordinator:
         parts.append(f"## Task\n\n{user_prompt}")
 
         # Add reference to Lead's output for dependent agents
-        lead_id = task_ids.get(SquadRole.LEAD)
-        if lead_id and agent.role != SquadRole.LEAD:
+        lead_id = task_ids.get("lead")
+        if lead_id and agent.role != "lead":
             parts.append(
                 f"\n## Lead's Analysis\n\n"
                 f"{{{{task:{lead_id}.content}}}}"
@@ -704,7 +854,7 @@ class SquadCoordinator:
     def _build_result(
         self,
         fleet_results: list[FleetResult],
-        task_ids: dict[SquadRole, str],
+        task_ids: dict[str, str],
     ) -> SquadResult:
         """Convert fleet results to SquadResult."""
         id_to_role = {tid: role for role, tid in task_ids.items()}
