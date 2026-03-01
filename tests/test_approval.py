@@ -6,10 +6,18 @@ from pathlib import Path
 from rich.console import Console
 
 from copex.approval import (
+    ApprovalAction,
+    ApprovalGate,
+    ApprovalMode,
     ApprovalWorkflow,
     AuditLogger,
+    ChangeStats,
+    DiffPreview,
+    ProposedFileChange,
+    RiskAssessor,
     build_preview,
     extract_proposed_changes,
+    normalize_approval_mode,
     summarize_changes,
 )
 
@@ -41,6 +49,20 @@ def test_diff_preview_generation(tmp_path: Path) -> None:
     assert stats.files_changed == 1
     assert stats.lines_added == 1
     assert stats.lines_removed == 1
+
+
+def test_diff_preview_colorize_marks_added_and_removed_lines() -> None:
+    renderer = DiffPreview()
+    colored = renderer.colorize("--- a/foo.py\n+++ b/foo.py\n@@\n-old\n+new\n")
+    assert colored.plain.endswith("+new\n")
+    assert any(
+        colored.plain[span.start : span.end] == "+new\n" and "green" in str(span.style)
+        for span in colored.spans
+    )
+    assert any(
+        colored.plain[span.start : span.end] == "-old\n" and "red" in str(span.style)
+        for span in colored.spans
+    )
 
 
 def test_approval_flow_supports_cherry_pick(tmp_path: Path) -> None:
@@ -109,12 +131,183 @@ def test_audit_logging_and_query(tmp_path: Path) -> None:
         cwd=tmp_path,
     )
     assert reviewed
+    workflow.log_execution_event(reviewed, success=True, result="ok")
 
     all_entries = logger.query(last=10)
-    assert len(all_entries) == 1
+    assert len(all_entries) == 2
     assert all_entries[0].mode == "auto-approve"
     assert all_entries[0].file == "src/foo.py"
+    assert all_entries[0].event == "decision"
+    assert all_entries[1].event == "execution"
+    assert all_entries[1].result
 
     file_entries = logger.query(last=10, file="src/foo.py")
-    assert len(file_entries) == 1
+    assert len(file_entries) == 2
     assert file_entries[0].diff_summary
+
+
+def test_approval_gate_enables_audit_alias(tmp_path: Path) -> None:
+    logger = AuditLogger(tmp_path / ".copex" / "audit.log")
+    gate = ApprovalGate(
+        mode="approve",
+        audit=True,
+        input_func=lambda _prompt: "y",
+        audit_logger=logger,
+        console=_quiet_console(),
+    )
+    reviewed = gate.review(
+        "write_file", {"path": "src/ok.py", "content": "print('ok')\n"}, cwd=tmp_path
+    )
+    assert reviewed and reviewed[0].apply_change is True
+    gate.log_execution_event(reviewed, success=True, result="ok")
+    entries = logger.query(last=10)
+    assert len(entries) == 2
+    assert entries[0].mode == "approve"
+
+
+def test_audit_schema_includes_decision_risk_fingerprint_result_and_error(tmp_path: Path) -> None:
+    audit_path = tmp_path / ".copex" / "audit.log"
+    logger = AuditLogger(audit_path)
+    workflow = ApprovalWorkflow(
+        mode="auto-approve",
+        audit_enabled=True,
+        audit_logger=logger,
+        console=_quiet_console(),
+    )
+
+    reviewed = workflow.review_tool_call(
+        "write_file",
+        {"path": "secrets.txt", "content": "api_key = 'x'\n"},
+        cwd=tmp_path,
+    )
+    workflow.log_execution_event(reviewed, success=False, error="tool failed")
+
+    entries = logger.query(last=10)
+    assert len(entries) == 2
+    for entry in entries:
+        payload = entry.to_dict()
+        required = {
+            "timestamp",
+            "mode",
+            "event",
+            "decision",
+            "risk",
+            "change_fingerprint",
+            "dry_run",
+            "result",
+            "error",
+        }
+        assert required.issubset(payload.keys())
+        assert payload["decision"] == "approve"
+        assert isinstance(payload["risk"], dict)
+        assert payload["change_fingerprint"]
+
+    assert entries[0].event == "decision"
+    assert entries[0].error is None
+    assert entries[1].event == "execution"
+    assert entries[1].error == "tool failed"
+
+
+def test_audit_logs_reject_and_execution_skip_path(tmp_path: Path) -> None:
+    audit_path = tmp_path / ".copex" / "audit.log"
+    logger = AuditLogger(audit_path)
+    workflow = ApprovalWorkflow(
+        mode="deny-all",
+        audit_enabled=True,
+        audit_logger=logger,
+        console=_quiet_console(),
+    )
+
+    reviewed = workflow.review_tool_call(
+        "write_file",
+        {"path": "blocked.txt", "content": "nope\n"},
+        cwd=tmp_path,
+    )
+    assert reviewed and reviewed[0].apply_change is False
+    workflow.log_execution_event(reviewed, success=True, result="skipped")
+
+    entries = logger.query(last=10)
+    assert len(entries) == 2
+    assert entries[0].decision == "reject"
+    assert entries[1].decision == "reject"
+    assert entries[1].event == "execution"
+    assert entries[1].result and "skipped" in entries[1].result
+
+
+def test_normalize_approval_mode_aliases() -> None:
+    assert normalize_approval_mode("auto") == ApprovalMode.AUTO_APPROVE
+    assert normalize_approval_mode("approve") == ApprovalMode.MANUAL
+    assert normalize_approval_mode("deny") == ApprovalMode.DENY_ALL
+    assert normalize_approval_mode("policy") == ApprovalMode.POLICY_BASED
+    assert normalize_approval_mode("dry") == ApprovalMode.DRY_RUN
+
+
+def test_risk_escalation_for_large_config_delete(tmp_path: Path) -> None:
+    before = "".join(f"line-{idx}\n" for idx in range(150))
+    preview = build_preview(
+        ProposedFileChange(
+            path=tmp_path / "pyproject.toml",
+            display_path="pyproject.toml",
+            existed_before=True,
+            before_content=before,
+            after_content="",
+        )
+    )
+
+    assert preview.operation == "delete"
+    assert preview.risk.severity == "high"
+    assert "delete-operation" in preview.risk.reasons
+    assert "large-deletion" in preview.risk.reasons
+    assert "config-file-change" in preview.risk.reasons
+
+
+def test_risk_assessor_flags_security_content() -> None:
+    risk = RiskAssessor().assess(
+        path="auth/config.py",
+        lines_removed=0,
+        operation="edit",
+        after_content="token = 'x'\n",
+    )
+    assert risk.severity == "high"
+    assert "security-sensitive-file" in risk.reasons
+    assert "secret-like-content" in risk.reasons
+
+
+def test_change_stats_helper_matches_summary(tmp_path: Path) -> None:
+    preview = build_preview(
+        ProposedFileChange(
+            path=tmp_path / "a.py",
+            display_path="a.py",
+            existed_before=True,
+            before_content="x = 1\n",
+            after_content="x = 2\n",
+        )
+    )
+    stats = ChangeStats.from_previews([preview])
+    assert stats.files_changed == 1
+    assert stats.lines_added == 1
+    assert stats.lines_removed == 1
+
+
+def test_policy_based_mode_uses_risk_to_require_input(tmp_path: Path) -> None:
+    secure_file = tmp_path / "auth" / "token.txt"
+    secure_file.parent.mkdir(parents=True, exist_ok=True)
+    secure_file.write_text("token = 'old'\n", encoding="utf-8")
+    answers = iter(["n"])
+    workflow = ApprovalWorkflow(
+        mode="policy-based",
+        policy_func=lambda preview: "manual" if preview.risk.severity == "high" else "approve",
+        input_func=lambda _prompt: next(answers),
+        console=_quiet_console(),
+    )
+
+    reviewed = workflow.review_tool_call(
+        "write_file",
+        {"path": "auth/token.txt", "content": "api_key = 'new'\n"},
+        cwd=tmp_path,
+    )
+
+    assert len(reviewed) == 1
+    assert reviewed[0].preview.risk.severity == "high"
+    assert reviewed[0].action == ApprovalAction.REJECT
+    assert reviewed[0].apply_change is False

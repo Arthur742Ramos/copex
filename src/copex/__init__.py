@@ -6,13 +6,17 @@ __version__ = "2.15.0"
 from .agent import AgentResult, AgentSession, AgentTurn
 from .approval import (
     ApprovalAction,
+    ApprovalGate,
     ApprovalMode,
     ApprovalWorkflow,
     AuditEntry,
     AuditLogger,
     ChangePreview,
     ChangeStatistics,
+    ChangeStats,
+    DiffPreview,
     RiskAssessment,
+    RiskAssessor,
 )
 from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
 from .cache import StepCache, clear_global_cache, get_cache
@@ -104,13 +108,17 @@ __all__ = [
     "AgentResult",
     # Approval
     "ApprovalAction",
+    "ApprovalGate",
     "ApprovalMode",
     "ApprovalWorkflow",
     "AuditEntry",
     "AuditLogger",
+    "ChangeStats",
     "ChangePreview",
     "ChangeStatistics",
+    "DiffPreview",
     "RiskAssessment",
+    "RiskAssessor",
     # Core
     "Copex",
     "CopilotCLI",

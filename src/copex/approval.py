@@ -9,6 +9,7 @@ from collections.abc import Callable, Iterable, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from hashlib import sha256
 from pathlib import Path
 from typing import Any
 
@@ -21,7 +22,8 @@ class ApprovalMode(str, Enum):
     """Modes controlling how file changes are handled."""
 
     AUTO_APPROVE = "auto-approve"
-    MANUAL = "manual"
+    APPROVE = "approve"
+    MANUAL = "approve"  # Backward-compatible alias.
     DENY_ALL = "deny-all"
     POLICY_BASED = "policy-based"
     DRY_RUN = "dry-run"
@@ -129,23 +131,46 @@ class AuditEntry:
     risk_flags: list[str]
     action: str
     dry_run: bool
+    event: str = "decision"
+    decision: str = ""
+    risk: dict[str, Any] = field(default_factory=dict)
+    change_fingerprint: str = ""
+    result: str | None = None
+    error: str | None = None
 
     def to_dict(self) -> dict[str, Any]:
+        decision = self.decision or self.action
+        risk_payload = self.risk or {"severity": "low", "reasons": list(self.risk_flags)}
         return {
             "timestamp": self.timestamp,
             "mode": self.mode,
             "model": self.model,
+            "event": self.event,
+            "decision": decision,
             "file": self.file,
             "diff_summary": self.diff_summary,
             "lines_added": self.lines_added,
             "lines_removed": self.lines_removed,
             "risk_flags": self.risk_flags,
+            "risk": risk_payload,
+            "change_fingerprint": self.change_fingerprint,
             "action": self.action,
             "dry_run": self.dry_run,
+            "result": self.result,
+            "error": self.error,
         }
 
     @classmethod
     def from_dict(cls, payload: dict[str, Any]) -> AuditEntry:
+        risk_payload = payload.get("risk")
+        if isinstance(risk_payload, dict):
+            severity = str(risk_payload.get("severity", "low"))
+            reasons = [str(item) for item in risk_payload.get("reasons", []) if str(item)]
+            normalized_risk = {"severity": severity, "reasons": reasons}
+            risk_flags = reasons
+        else:
+            risk_flags = [str(item) for item in payload.get("risk_flags", []) if str(item)]
+            normalized_risk = {"severity": "low", "reasons": risk_flags}
         return cls(
             timestamp=str(payload.get("timestamp", "")),
             mode=str(payload.get("mode", "")),
@@ -154,9 +179,15 @@ class AuditEntry:
             diff_summary=str(payload.get("diff_summary", "")),
             lines_added=int(payload.get("lines_added", 0)),
             lines_removed=int(payload.get("lines_removed", 0)),
-            risk_flags=[str(item) for item in payload.get("risk_flags", []) if str(item)],
+            risk_flags=risk_flags,
             action=str(payload.get("action", "")),
             dry_run=bool(payload.get("dry_run", False)),
+            event=str(payload.get("event", "decision")),
+            decision=str(payload.get("decision", payload.get("action", ""))),
+            risk=normalized_risk,
+            change_fingerprint=str(payload.get("change_fingerprint", "")),
+            result=None if payload.get("result", None) is None else str(payload.get("result")),
+            error=None if payload.get("error", None) is None else str(payload.get("error")),
         )
 
 
@@ -260,6 +291,38 @@ def normalize_approval_mode(value: ApprovalMode | str | None) -> ApprovalMode:
 
 def _now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+
+def _stable_json(payload: Any) -> str:
+    return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+
+def _short_text(value: Any, *, limit: int = 300) -> str | None:
+    if value is None:
+        return None
+    if isinstance(value, str):
+        text = value.strip()
+    else:
+        text = _stable_json(value)
+    if len(text) > limit:
+        return text[: limit - 3] + "..."
+    return text
+
+
+def _change_fingerprint(preview: ChangePreview) -> str:
+    payload = {
+        "file": preview.file_path,
+        "operation": preview.operation,
+        "summary": preview.summary,
+        "lines_added": preview.lines_added,
+        "lines_removed": preview.lines_removed,
+        "risk": {
+            "severity": preview.risk.severity,
+            "reasons": list(preview.risk.reasons),
+        },
+    }
+    digest = sha256(_stable_json(payload).encode("utf-8")).hexdigest()
+    return digest[:16]
 
 
 def _resolve_path(raw_path: str, cwd: Path) -> tuple[Path, str] | None:
@@ -368,6 +431,48 @@ def _assess_risk(
     if _contains_secret_like_content(after_content):
         flags.append("secret-like-content")
     return flags
+
+
+class RiskAssessor:
+    """Assess risk for proposed file changes."""
+
+    def flags(
+        self,
+        *,
+        path: str,
+        lines_removed: int,
+        operation: str,
+        after_content: str | None = None,
+    ) -> list[str]:
+        return _assess_risk(
+            path,
+            lines_removed,
+            operation=operation,
+            after_content=after_content,
+        )
+
+    def assess(
+        self,
+        *,
+        path: str,
+        lines_removed: int,
+        operation: str,
+        after_content: str | None = None,
+    ) -> RiskAssessment:
+        flags = self.flags(
+            path=path,
+            lines_removed=lines_removed,
+            operation=operation,
+            after_content=after_content,
+        )
+        return _build_risk_assessment(flags)
+
+    def assess_preview(self, preview: ChangePreview) -> RiskAssessment:
+        return self.assess(
+            path=preview.file_path,
+            lines_removed=preview.lines_removed,
+            operation=preview.operation,
+        )
 
 
 def _build_summary(
@@ -612,13 +717,12 @@ def build_preview(
         operation=operation,
         after_content=after_for_metadata,
     )
-    risk_flags = _assess_risk(
-        change.display_path,
-        lines_removed,
+    risk = RiskAssessor().assess(
+        path=change.display_path,
+        lines_removed=lines_removed,
         operation=operation,
         after_content=after_for_metadata,
     )
-    risk = _build_risk_assessment(risk_flags)
     return ChangePreview(
         file_path=change.display_path,
         operation=operation,
@@ -630,7 +734,7 @@ def build_preview(
         diff_truncated=diff_truncated,
         diff_lines_total=diff_lines_total,
         risk=risk,
-        risk_flags=risk.reasons,
+        risk_flags=list(risk.reasons),
     )
 
 
@@ -657,6 +761,119 @@ def summarize_changes(previews: Iterable[ChangePreview]) -> ChangeStatistics:
     )
 
 
+class ChangeStats:
+    """Helpers for computing file-change summaries."""
+
+    @staticmethod
+    def summarize(previews: Iterable[ChangePreview]) -> ChangeStatistics:
+        return summarize_changes(previews)
+
+    @staticmethod
+    def from_previews(previews: Iterable[ChangePreview]) -> ChangeStatistics:
+        return summarize_changes(previews)
+
+
+class DiffPreview:
+    """Generate and render colored unified diff previews."""
+
+    def __init__(
+        self,
+        *,
+        max_diff_lines: int = DEFAULT_MAX_DIFF_LINES,
+        max_diff_chars: int = DEFAULT_MAX_DIFF_CHARS,
+    ):
+        self.max_diff_lines = max_diff_lines
+        self.max_diff_chars = max_diff_chars
+
+    def build(self, change: ProposedFileChange) -> ChangePreview:
+        return build_preview(
+            change,
+            max_diff_lines=self.max_diff_lines,
+            max_diff_chars=self.max_diff_chars,
+        )
+
+    def from_tool_call(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        *,
+        cwd: Path | None = None,
+    ) -> list[ChangePreview]:
+        proposals = extract_proposed_changes(tool_name, tool_args, cwd=cwd)
+        return [self.build(proposal) for proposal in proposals]
+
+    @staticmethod
+    def colorize(unified_diff: str) -> Text:
+        text = Text()
+        for line in unified_diff.splitlines():
+            style = ""
+            if line.startswith("+++") or line.startswith("---"):
+                style = "bold cyan"
+            elif line.startswith("@@"):
+                style = "cyan"
+            elif line.startswith("+"):
+                style = "green"
+            elif line.startswith("-"):
+                style = "red"
+            text.append(line + "\n", style=style)
+        return text
+
+    def render_panel(
+        self,
+        preview: ChangePreview,
+        stats: ChangeStatistics | None = None,
+    ) -> Panel:
+        metadata = preview.metadata
+        header = Text()
+        header.append(f"File: {preview.file_path}\n", style="bold")
+        header.append(f"Operation: {preview.operation}\n")
+        header.append(
+            "Metadata: "
+            f"lines={metadata.get('before_lines', '?')}→{metadata.get('after_lines', '?')} "
+            f"bytes={metadata.get('before_bytes', '?')}→{metadata.get('after_bytes', '?')}\n",
+            style="dim",
+        )
+        header.append(f"Summary: {preview.summary}\n")
+
+        files_changed = stats.files_changed if stats is not None else 1
+        lines_added = stats.lines_added if stats is not None else preview.lines_added
+        lines_removed = stats.lines_removed if stats is not None else preview.lines_removed
+        header.append(
+            f"Stats: files={files_changed} +{lines_added} -{lines_removed}\n",
+            style="dim",
+        )
+
+        if preview.diff_truncated:
+            header.append(
+                f"Preview: truncated ({preview.diff_lines_total} total diff lines)\n",
+                style="yellow",
+            )
+        if preview.risk.reasons:
+            style = "red" if preview.risk.severity == "high" else "yellow"
+            header.append(
+                f"Risk: {preview.risk.severity} ({', '.join(preview.risk.reasons)})\n",
+                style=style,
+            )
+        else:
+            header.append("Risk: low\n", style="green")
+
+        content = Group(header, Text(), self.colorize(preview.unified_diff))
+        return Panel(
+            content,
+            title="Change Preview",
+            border_style="yellow",
+            expand=True,
+        )
+
+    def render(
+        self,
+        console: Console,
+        preview: ChangePreview,
+        stats: ChangeStatistics | None = None,
+    ) -> None:
+        console.print(self.render_panel(preview, stats))
+
+
 class AuditLogger:
     """Append/query audit entries stored as JSONL."""
 
@@ -676,7 +893,10 @@ class AuditLogger:
             stripped = line.strip()
             if not stripped:
                 continue
-            payload = json.loads(stripped)
+            try:
+                payload = json.loads(stripped)
+            except json.JSONDecodeError:
+                continue
             if isinstance(payload, dict):
                 entries.append(AuditEntry.from_dict(payload))
         return entries
@@ -727,6 +947,7 @@ class ApprovalWorkflow:
         self._input = input_func or input
         self._edit = edit_func
         self._policy = policy_func
+        self._diff_preview = DiffPreview()
         self._decision_prompt = decision_prompt_func
 
     @property
@@ -734,58 +955,10 @@ class ApprovalWorkflow:
         return self.state.mode
 
     def _colorize_diff(self, unified_diff: str) -> Text:
-        text = Text()
-        for line in unified_diff.splitlines():
-            style = ""
-            if line.startswith("+++") or line.startswith("---"):
-                style = "bold cyan"
-            elif line.startswith("@@"):
-                style = "cyan"
-            elif line.startswith("+"):
-                style = "green"
-            elif line.startswith("-"):
-                style = "red"
-            text.append(line + "\n", style=style)
-        return text
+        return self._diff_preview.colorize(unified_diff)
 
     def _render_preview(self, preview: ChangePreview, stats: ChangeStatistics) -> None:
-        metadata = preview.metadata
-        header = Text()
-        header.append(f"File: {preview.file_path}\n", style="bold")
-        header.append(f"Operation: {preview.operation}\n")
-        header.append(
-            "Metadata: "
-            f"lines={metadata.get('before_lines', '?')}→{metadata.get('after_lines', '?')} "
-            f"bytes={metadata.get('before_bytes', '?')}→{metadata.get('after_bytes', '?')}\n",
-            style="dim",
-        )
-        header.append(f"Summary: {preview.summary}\n")
-        header.append(
-            f"Stats: files={stats.files_changed} +{stats.lines_added} -{stats.lines_removed}\n",
-            style="dim",
-        )
-        if preview.diff_truncated:
-            header.append(
-                f"Preview: truncated ({preview.diff_lines_total} total diff lines)\n",
-                style="yellow",
-            )
-        if preview.risk.reasons:
-            style = "red" if preview.risk.severity == "high" else "yellow"
-            header.append(
-                f"Risk: {preview.risk.severity} ({', '.join(preview.risk.reasons)})\n",
-                style=style,
-            )
-        else:
-            header.append("Risk: low\n", style="green")
-        content = Group(header, Text(), self._colorize_diff(preview.unified_diff))
-        self._console.print(
-            Panel(
-                content,
-                title="Change Preview",
-                border_style="yellow",
-                expand=True,
-            )
-        )
+        self._diff_preview.render(self._console, preview, stats)
 
     def _normalize_prompt_choice(self, choice: ApprovalAction | str) -> ApprovalAction:
         if isinstance(choice, ApprovalAction):
@@ -888,6 +1061,73 @@ class ApprovalWorkflow:
     def _should_log(self) -> bool:
         return self.audit_enabled or self.mode != ApprovalMode.AUTO_APPROVE
 
+    def _audit_entry_for(
+        self,
+        *,
+        preview: ChangePreview,
+        action: ApprovalAction,
+        dry_run: bool,
+        event: str,
+        result: Any = None,
+        error: str | None = None,
+    ) -> AuditEntry:
+        decision = action.value
+        risk = {
+            "severity": preview.risk.severity,
+            "reasons": list(preview.risk.reasons),
+        }
+        return AuditEntry(
+            timestamp=_now_iso(),
+            mode=self.mode.value,
+            model=self.model,
+            event=event,
+            decision=decision,
+            file=preview.file_path,
+            diff_summary=preview.summary,
+            lines_added=preview.lines_added,
+            lines_removed=preview.lines_removed,
+            risk_flags=preview.risk_flags,
+            risk=risk,
+            change_fingerprint=_change_fingerprint(preview),
+            action=decision,
+            dry_run=dry_run,
+            result=_short_text(result),
+            error=_short_text(error),
+        )
+
+    def log_execution_event(
+        self,
+        reviewed: Sequence[ReviewedChange],
+        *,
+        success: bool,
+        result: Any = None,
+        error: str | None = None,
+    ) -> None:
+        """Write execution audit entries for reviewed changes."""
+        if not reviewed or not self._should_log():
+            return
+        for item in reviewed:
+            if item.apply_change:
+                status = "applied" if success else "failed"
+                event_error = error if not success else None
+            else:
+                status = "skipped"
+                event_error = None
+            result_payload = {
+                "status": status,
+                "tool_result": _short_text(result),
+            }
+            self._audit.write(
+                self._audit_entry_for(
+                    preview=item.preview,
+                    action=item.action,
+                    dry_run=item.dry_run,
+                    event="execution",
+                    result=result_payload,
+                    error=event_error,
+                )
+            )
+
     def review_tool_call(
         self,
         tool_name: str,
@@ -912,7 +1152,11 @@ class ApprovalWorkflow:
             apply_change = action in {ApprovalAction.APPROVE, ApprovalAction.EDIT} and not dry_run
             edited_content = None
             if action == ApprovalAction.EDIT:
-                base = proposal.after_content if proposal.after_content is not None else proposal.before_content
+                base = (
+                    proposal.after_content
+                    if proposal.after_content is not None
+                    else proposal.before_content
+                )
                 edited_content = self._edited_content(proposal, base)
             decision = ReviewedChange(
                 proposal=proposal,
@@ -926,17 +1170,12 @@ class ApprovalWorkflow:
 
             if self._should_log():
                 self._audit.write(
-                    AuditEntry(
-                        timestamp=_now_iso(),
-                        mode=self.mode.value,
-                        model=self.model,
-                        file=preview.file_path,
-                        diff_summary=preview.summary,
-                        lines_added=preview.lines_added,
-                        lines_removed=preview.lines_removed,
-                        risk_flags=preview.risk_flags,
-                        action=action.value,
+                    self._audit_entry_for(
+                        preview=preview,
+                        action=action,
                         dry_run=dry_run,
+                        event="decision",
+                        result={"status": "approved" if apply_change else "blocked"},
                     )
                 )
 
@@ -970,3 +1209,33 @@ class ApprovalWorkflow:
                 messages.append(f"approved: {proposal.display_path}")
 
         return messages
+
+
+class ApprovalGate(ApprovalWorkflow):
+    """Compatibility wrapper exposing approval-gate naming."""
+
+    def __init__(
+        self,
+        mode: ApprovalMode | str = ApprovalMode.AUTO_APPROVE,
+        *,
+        audit: bool = False,
+        **kwargs: Any,
+    ):
+        current = bool(kwargs.pop("audit_enabled", False))
+        super().__init__(
+            mode=mode,
+            audit_enabled=current or audit,
+            **kwargs,
+        )
+
+    def review(
+        self,
+        tool_name: str,
+        tool_args: dict[str, Any],
+        *,
+        cwd: Path | None = None,
+    ) -> list[ReviewedChange]:
+        return self.review_tool_call(tool_name, tool_args, cwd=cwd)
+
+    def enforce(self, reviewed: Sequence[ReviewedChange]) -> list[str]:
+        return self.apply_post_tool_decisions(reviewed)

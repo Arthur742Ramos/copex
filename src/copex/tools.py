@@ -92,6 +92,30 @@ def _review_target(review: Any) -> str:
     return _review_path(review) or "change"
 
 
+def _enum_or_raw(value: Any) -> Any:
+    return getattr(value, "value", value)
+
+
+def _review_summary(review: Any) -> dict[str, Any]:
+    preview = getattr(review, "preview", None)
+    risk = getattr(preview, "risk", None)
+    risk_reasons = list(
+        getattr(risk, "reasons", []) or getattr(preview, "risk_flags", []) or []
+    )
+    risk_severity = str(getattr(risk, "severity", "low"))
+    return {
+        "file": _review_target(review),
+        "operation": str(getattr(preview, "operation", "edit")),
+        "summary": str(getattr(preview, "summary", "")),
+        "risk": {
+            "severity": risk_severity,
+            "reasons": [str(reason) for reason in risk_reasons],
+        },
+        "action": str(_enum_or_raw(getattr(review, "action", "reject"))),
+        "dry_run": bool(getattr(review, "dry_run", False)),
+    }
+
+
 def _prepare_approved_execution(
     *,
     params: dict[str, Any],
@@ -275,39 +299,83 @@ class ToolRegistry:
         start = time.time()
         timeout = timeout or self.config.timeout
         approval_reviews: list[Any] = []
+        executable_reviews: list[Any] = []
+        skipped_reviews: list[Any] = []
+        execution_params = params
 
-        review_tool_call = getattr(self.config.approval_workflow, "review_tool_call", None)
+        approval_workflow = self.config.approval_workflow
+        review_tool_call = getattr(approval_workflow, "review_tool_call", None)
+        log_execution_event = getattr(approval_workflow, "log_execution_event", None)
         if callable(review_tool_call):
-            approval_reviews = list(review_tool_call(name, params))
-            if approval_reviews and all(
-                not bool(getattr(review, "apply_change", True)) for review in approval_reviews
-            ):
-                skipped = [
-                    str(getattr(review.preview, "file_path", "change"))
-                    for review in approval_reviews
-                    if getattr(review, "preview", None) is not None
-                ]
-                target = ", ".join(skipped) if skipped else "tool call"
+            try:
+                approval_reviews = list(review_tool_call(name, params, cwd=Path.cwd()))
+            except TypeError:
+                approval_reviews = list(review_tool_call(name, params))
+
+            execution_params, executable_reviews, skipped_reviews, skip_execution = (
+                _prepare_approved_execution(
+                    params=params,
+                    reviews=approval_reviews,
+                    cwd=Path.cwd(),
+                )
+            )
+
+            if skip_execution:
+                target = ", ".join(_review_target(review) for review in skipped_reviews) or "tool call"
+                summaries = [_review_summary(review) for review in approval_reviews]
+                dry_run = any(bool(summary["dry_run"]) for summary in summaries)
+                if not dry_run:
+                    if callable(log_execution_event) and approval_reviews:
+                        log_execution_event(
+                            approval_reviews,
+                            success=True,
+                            result=f"skipped by approval workflow: {target}",
+                        )
+                    return ToolResult(
+                        name=name,
+                        success=True,
+                        result=f"Skipped by approval workflow: {target}",
+                    )
+                dry_run_payload = {
+                    "message": f"Dry-run preview (no side effects): {target}",
+                    "dry_run": dry_run,
+                    "changes": summaries,
+                }
+                if callable(log_execution_event) and approval_reviews:
+                    log_execution_event(
+                        approval_reviews,
+                        success=True,
+                        result=dry_run_payload,
+                    )
                 return ToolResult(
                     name=name,
                     success=True,
-                    result=f"Skipped by approval workflow: {target}",
+                    result=dry_run_payload,
                 )
+        else:
+            execution_params = params
 
         try:
             result = await asyncio.wait_for(
-                tool(**params),
+                tool(**execution_params),
                 timeout=timeout,
             )
             apply_post = getattr(self.config.approval_workflow, "apply_post_tool_decisions", None)
-            if callable(apply_post) and approval_reviews:
-                post_messages = list(apply_post(approval_reviews))
-                if post_messages:
-                    suffix = "; ".join(post_messages)
-                    if isinstance(result, str):
-                        result = f"{result}\n{suffix}"
-                    else:
-                        result = {"result": result, "approval": post_messages}
+            approval_messages: list[str] = []
+            if callable(apply_post) and executable_reviews:
+                approval_messages.extend(str(msg) for msg in apply_post(executable_reviews))
+            if skipped_reviews:
+                skipped_paths = ", ".join(_review_target(review) for review in skipped_reviews)
+                if skipped_paths:
+                    approval_messages.append(f"skipped by approval: {skipped_paths}")
+            if approval_messages:
+                suffix = "; ".join(approval_messages)
+                if isinstance(result, str):
+                    result = f"{result}\n{suffix}"
+                else:
+                    result = {"result": result, "approval": approval_messages}
+            if callable(log_execution_event) and approval_reviews:
+                log_execution_event(approval_reviews, success=True, result=result)
             duration = (time.time() - start) * 1000
 
             return ToolResult(
@@ -319,6 +387,12 @@ class ToolRegistry:
 
         except asyncio.TimeoutError:
             duration = (time.time() - start) * 1000
+            if callable(log_execution_event) and approval_reviews:
+                log_execution_event(
+                    approval_reviews,
+                    success=False,
+                    error=f"Timeout after {timeout}s",
+                )
             return ToolResult(
                 name=name,
                 success=False,
@@ -328,6 +402,12 @@ class ToolRegistry:
 
         except Exception as e:  # Catch-all: tool execution failures become ToolResult
             duration = (time.time() - start) * 1000
+            if callable(log_execution_event) and approval_reviews:
+                log_execution_event(
+                    approval_reviews,
+                    success=False,
+                    error=str(e),
+                )
             return ToolResult(
                 name=name,
                 success=False,

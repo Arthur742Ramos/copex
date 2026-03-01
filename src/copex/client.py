@@ -986,6 +986,21 @@ class Copex:
             )
             if reviewed:
                 approval_workflow.apply_post_tool_decisions(reviewed)
+                log_execution_event = getattr(approval_workflow, "log_execution_event", None)
+                if callable(log_execution_event):
+                    result_obj = getattr(event.data, "result", None)
+                    result_text = ""
+                    if result_obj is not None:
+                        result_text = getattr(result_obj, "content", "") or str(result_obj)
+                    success_raw = getattr(event.data, "success", None)
+                    success = success_raw is not False
+                    event_error = None if success else (result_text or "Tool execution failed")
+                    log_execution_event(
+                        reviewed,
+                        success=success,
+                        result=result_text if success else None,
+                        error=event_error,
+                    )
 
         def _handle_usage(event: Any, st: _SendState, _oc: Any) -> None:
             data = event.data
