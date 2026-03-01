@@ -1111,6 +1111,9 @@ class SquadCoordinator:
         # Lazy init: prefer .squad, then AI repo analysis
         if self._team is None:
             self._team = await SquadTeam.from_repo_or_file(self._config)
+            if not SquadTeam.SQUAD_FILE.is_file():
+                self._team.save_squad_file()
+                logger.info("Squad team auto-saved to .squad")
 
         if self._project_context is None:
             self._project_context = self._discover_project_context()

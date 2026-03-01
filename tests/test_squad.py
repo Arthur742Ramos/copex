@@ -852,6 +852,56 @@ class TestSquadCoordinatorRun:
         assert result.success is False
         assert result.agent_results[1].error == "compile error"
 
+    def test_run_auto_saves_generated_team_and_reuses_squad_file(
+        self,
+        tmp_path,
+        monkeypatch,
+        caplog,
+    ):
+        monkeypatch.chdir(tmp_path)
+        caplog.set_level("INFO", logger="copex.squad")
+
+        generated_team = SquadTeam.default()
+
+        async def fake_run(self, on_status=None):
+            results: list[FleetResult] = []
+            for task in self._tasks:
+                content = (
+                    "All tests passed. No issues found."
+                    if task.id == "tester"
+                    else "ok"
+                )
+                results.append(
+                    FleetResult(
+                        task_id=task.id,
+                        success=True,
+                        response=Response(content=content),
+                        duration_ms=1,
+                    )
+                )
+            return results
+
+        async def _test():
+            with (
+                patch.object(
+                    SquadTeam,
+                    "from_repo_ai",
+                    new_callable=AsyncMock,
+                    return_value=generated_team,
+                ) as mock_ai,
+                patch.object(Fleet, "run", new=fake_run),
+            ):
+                first = SquadCoordinator(CopexConfig())
+                await first.run("Build something")
+                assert (tmp_path / ".squad").is_file()
+                assert "Squad team auto-saved to .squad" in caplog.text
+
+                second = SquadCoordinator(CopexConfig())
+                await second.run("Build something else")
+                assert mock_ai.await_count == 1
+
+        run(_test())
+
     def test_run_feedback_loop_retries_until_tester_passes(self):
         config = CopexConfig()
         coord = SquadCoordinator(config, team=SquadTeam.default())
