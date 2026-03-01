@@ -9,8 +9,8 @@ Reasoning effort is injected via a temporary ``--config-dir`` containing a
 
 from __future__ import annotations
 
-import atexit
 import asyncio
+import atexit
 import json
 import logging
 import shutil
