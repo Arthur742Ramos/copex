@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import math
 import random
 import re
 import time
@@ -322,7 +323,7 @@ class AdaptiveRetry:
 
                 # Check max retries for this category
                 category_attempts = state.category_counts[category]
-                if category_attempts > strategy.max_retries:
+                if category_attempts >= strategy.max_retries:
                     logger.debug(f"Max retries exceeded for {category}")
                     raise RetryError(
                         f"Max retries ({strategy.max_retries}) exceeded for {category}",
@@ -342,13 +343,19 @@ class AdaptiveRetry:
                 delay = strategy.compute_delay(category_attempts)
 
                 # Special handling for rate limits with retry-after header
-                if isinstance(e, RateLimitError) and e.retry_after:
-                    # Cap retry_after to max_delay to prevent unbounded waits
-                    capped_retry_after = min(
-                        max(0, e.retry_after), strategy.max_delay
-                    )
-                    delay = max(delay, capped_retry_after)
-                    logger.info(f"Rate limit: waiting {capped_retry_after}s (retry-after header)")
+                if isinstance(e, RateLimitError) and e.retry_after is not None:
+                    retry_after = e.retry_after
+                    if isinstance(retry_after, (int, float)) and math.isfinite(retry_after):
+                        # Cap retry_after to max_delay to prevent unbounded waits
+                        capped_retry_after = min(
+                            max(0, retry_after), strategy.max_delay
+                        )
+                        delay = max(delay, capped_retry_after)
+                        logger.info(f"Rate limit: waiting {capped_retry_after}s (retry-after header)")
+                    else:
+                        logger.warning(
+                            f"Ignoring invalid retry_after value: {retry_after!r}"
+                        )
 
                 logger.info(
                     f"Retry {state.attempt}: {category.value} error, waiting {delay:.1f}s ({e})"

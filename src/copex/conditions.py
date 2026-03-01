@@ -153,16 +153,17 @@ class ConditionContext:
 # Reference pattern: ${step.N.field} or ${env.VAR} or ${var.NAME}
 _REF_PATTERN = re.compile(r"\$\{(step|env|var)\.([^}]+)\}")
 
-# Comparison operators
+# Comparison operators (order matters: longer operators must come first
+# to avoid partial matches, e.g. " not in " before " in ")
 _OPERATORS = {
-    "==": operator.eq,
     "!=": operator.ne,
-    "<": operator.lt,
+    "==": operator.eq,
     "<=": operator.le,
-    ">": operator.gt,
     ">=": operator.ge,
-    " in ": lambda a, b: a in b,
+    "<": operator.lt,
+    ">": operator.gt,
     " not in ": lambda a, b: a not in b,
+    " in ": lambda a, b: a in b,
 }
 
 

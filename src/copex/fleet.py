@@ -823,8 +823,8 @@ class FleetConfig:
     # Global retry configuration (can be overridden per-task)
     default_retries: int = 3
     default_retry_delay: float = 1.0  # Base delay in seconds
-    # Dependency wait timeout (0 = use task timeout / fleet timeout)
-    dep_timeout: float = 0.0
+    # Dependency wait timeout (None = use task timeout / fleet timeout)
+    dep_timeout: float | None = None
     # Adaptive concurrency settings
     adaptive_concurrency: bool = True  # Auto-reduce on rate limits
     min_concurrent: int = 1  # Minimum concurrency when adapting
@@ -1024,17 +1024,25 @@ class FleetCoordinator:
                 dep_policy = _normalize_dep_failure_policy(task.on_dependency_failure)
                 dep_wait_timeout = (
                     config.dep_timeout
-                    or (task.timeout_sec if task.timeout_sec is not None else config.timeout)
+                    if config.dep_timeout is not None
+                    else (task.timeout_sec if task.timeout_sec is not None else config.timeout)
                 )
-                for dep in task.depends_on:
-                    try:
-                        await asyncio.wait_for(
-                            done_events[dep].wait(), timeout=dep_wait_timeout
-                        )
-                    except asyncio.TimeoutError:
+                if task.depends_on:
+                    # Wait for all dependencies concurrently
+                    dep_waiters = [
+                        asyncio.wait_for(done_events[dep].wait(), timeout=dep_wait_timeout)
+                        for dep in task.depends_on
+                    ]
+                    dep_results = await asyncio.gather(*dep_waiters, return_exceptions=True)
+                    timed_out = [
+                        dep for dep, res in zip(task.depends_on, dep_results)
+                        if isinstance(res, asyncio.TimeoutError)
+                    ]
+                    if timed_out:
                         error = RuntimeError(
-                            f"Task '{task.id}' timed out waiting for dependency '{dep}' "
-                            f"after {dep_wait_timeout}s"
+                            f"Task '{task.id}' timed out waiting for "
+                            f"{'dependency' if len(timed_out) == 1 else 'dependencies'} "
+                            f"{timed_out!r} after {dep_wait_timeout}s"
                         )
                         result = FleetResult(
                             task_id=task.id,
@@ -1888,21 +1896,29 @@ class Fleet:
             dep_policy = _normalize_dep_failure_policy(task.on_dependency_failure)
             dep_wait_timeout = (
                 self._fleet_config.dep_timeout
-                or (
+                if self._fleet_config.dep_timeout is not None
+                else (
                     task.timeout_sec
                     if task.timeout_sec is not None
                     else self._fleet_config.timeout
                 )
             )
-            for dep in task.depends_on:
-                try:
-                    await asyncio.wait_for(
-                        done_events[dep].wait(), timeout=dep_wait_timeout
-                    )
-                except asyncio.TimeoutError:
+            if task.depends_on:
+                # Wait for all dependencies concurrently
+                dep_waiters = [
+                    asyncio.wait_for(done_events[dep].wait(), timeout=dep_wait_timeout)
+                    for dep in task.depends_on
+                ]
+                dep_results = await asyncio.gather(*dep_waiters, return_exceptions=True)
+                timed_out = [
+                    dep for dep, res in zip(task.depends_on, dep_results)
+                    if isinstance(res, asyncio.TimeoutError)
+                ]
+                if timed_out:
                     error_msg = (
-                        f"Task '{task.id}' timed out waiting for dependency '{dep}' "
-                        f"after {dep_wait_timeout}s"
+                        f"Task '{task.id}' timed out waiting for "
+                        f"{'dependency' if len(timed_out) == 1 else 'dependencies'} "
+                        f"{timed_out!r} after {dep_wait_timeout}s"
                     )
                     result = FleetResult(
                         task_id=task.id,
@@ -2063,8 +2079,9 @@ class Fleet:
             for fut in task_futures:
                 fut.cancel()
             collector.cancel()
+            # Await all futures to ensure clean shutdown (no dangling coroutines)
             try:
-                await collector
+                await asyncio.gather(*task_futures, collector, return_exceptions=True)
             except asyncio.CancelledError:
                 pass
 

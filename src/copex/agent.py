@@ -247,7 +247,7 @@ class AgentSession:
             )
         except Exception as exc:
             duration_ms = (time.monotonic() - turn_start) * 1000
-            logger.error("Agent turn %d failed: %s", turn_num, exc)
+            logger.error("Agent turn %d failed: %s", turn_num, exc, exc_info=True)
             return AgentTurn(
                 turn=turn_num,
                 content="",

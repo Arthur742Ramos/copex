@@ -200,7 +200,8 @@ class SessionPool:
         async with lock:
             pool = self._pools.setdefault(model, [])
 
-            # LRU: pick the most-recently-used idle session for best reuse
+            # MRU: pick the most-recently-used idle session for best reuse
+            # (warm sessions are more likely to be healthy)
             best: SessionPool._PooledSession | None = None
             for ps in pool:
                 if not ps.in_use:
@@ -216,7 +217,6 @@ class SessionPool:
         # No available session - create new one
         is_pooled = False
         if session is None:
-            self._misses += 1
             session = await client.create_session(config.to_session_options())
             pooled = SessionPool._PooledSession(
                 session=session,
@@ -226,6 +226,7 @@ class SessionPool:
                 in_use=True,
             )
             async with lock:
+                self._misses += 1
                 pool = self._pools.setdefault(model, [])
                 if len(pool) < self.max_sessions:
                     pool.append(pooled)

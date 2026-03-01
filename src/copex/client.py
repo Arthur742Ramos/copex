@@ -27,7 +27,7 @@ from copex.circuit_breaker import (
     SlidingWindowBreaker,  # noqa: F401
 )
 from copex.config import CopexConfig
-from copex.exceptions import CircuitBreakerOpen
+from copex.exceptions import AllModelsUnavailable, CircuitBreakerOpen
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
 from copex.sdk_patch import patch_copilot_client  # noqa: F401
@@ -653,9 +653,16 @@ class Copex:
 
         available_model = model_breaker.get_available_model(original_model, fallback_chain)
         if available_model is None:
-            raise RuntimeError(
-                f"All models in fallback chain are unavailable. "
-                f"Primary: {original_model}, Fallback: {fallback_chain}"
+            chain_desc = ", ".join(fallback_chain) if fallback_chain else "none"
+            raise AllModelsUnavailable(
+                f"All models unavailable (primary: {original_model}, "
+                f"fallbacks: [{chain_desc}]). Check circuit breaker status "
+                f"or wait for cooldown.",
+                context={
+                    "primary_model": original_model,
+                    "fallback_chain": fallback_chain,
+                    "breaker_status": model_breaker.get_status(),
+                },
             )
 
         # Switch to fallback model if needed

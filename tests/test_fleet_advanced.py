@@ -368,10 +368,10 @@ class TestDependencyTimeout:
 
     @pytest.mark.asyncio
     async def test_dep_timeout_zero_falls_back_to_task_timeout(self):
-        """dep_timeout=0 should use the task or fleet timeout instead."""
-        config = FleetConfig(dep_timeout=0.0, timeout=30.0)
-        # dep_timeout=0 is falsy, so fallback is task timeout or fleet timeout
-        effective = config.dep_timeout or config.timeout
+        """dep_timeout=None should use the task or fleet timeout instead."""
+        config = FleetConfig(dep_timeout=None, timeout=30.0)
+        # dep_timeout=None means fallback to task timeout or fleet timeout
+        effective = config.dep_timeout if config.dep_timeout is not None else config.timeout
         assert effective == 30.0
 
     @pytest.mark.asyncio
@@ -492,9 +492,9 @@ class TestNormalizeMcpServers:
 
 
 class TestFleetConfigDefaults:
-    def test_dep_timeout_default_zero(self):
+    def test_dep_timeout_default_none(self):
         config = FleetConfig()
-        assert config.dep_timeout == 0.0
+        assert config.dep_timeout is None
 
     def test_adaptive_concurrency_defaults(self):
         config = FleetConfig()
