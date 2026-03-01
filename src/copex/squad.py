@@ -26,6 +26,7 @@ from pathlib import Path
 from typing import Any
 
 from copex.config import CopexConfig
+from copex.json_utils import extract_json_array
 from copex.fleet import Fleet, FleetConfig, FleetResult
 
 logger = logging.getLogger(__name__)
@@ -486,16 +487,8 @@ class SquadTeam:
                 response = await cli.send(prompt)
                 content = response.content.strip()
 
-                # Parse JSON (handle markdown code fences)
-                if "```json" in content:
-                    content = content.split("```json")[1].split("```")[0].strip()
-                elif "```" in content:
-                    content = content.split("```")[1].split("```")[0].strip()
-
-                # Extract JSON array
-                roles_list = json.loads(content)
-                if not isinstance(roles_list, list):
-                    raise ValueError("AI response is not a list")
+                # Robustly extract JSON array from LLM response
+                roles_list = extract_json_array(content)
 
                 # Build agents from AI response
                 agents: list[SquadAgent] = []
