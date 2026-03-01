@@ -38,6 +38,10 @@ class StreamingMetrics:
     tool_chunks: int = 0
     _start_time: float = 0.0
 
+    def start(self) -> None:
+        """Record the stream start time."""
+        self._start_time = time.monotonic()
+
     @property
     def time_to_first_chunk_ms(self) -> float | None:
         if self._start_time and self.first_chunk_time is not None:

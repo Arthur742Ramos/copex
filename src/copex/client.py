@@ -901,7 +901,7 @@ class Copex:
         state = _SendState(done=asyncio.Event())
         loop = asyncio.get_running_loop()
         state.last_activity = loop.time()
-        state.streaming_metrics._start_time = time.monotonic()
+        state.streaming_metrics.start()
         approval_workflow = None
         pending_approvals: dict[str, list[Any]] = {}
         pending_counter = 0
