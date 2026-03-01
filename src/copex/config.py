@@ -477,7 +477,7 @@ class CopexConfig(BaseModel):
         # Copex handles user-facing approval/deny at the tool-call level via
         # its own ApprovalWorkflow, so the SDK-level handler just needs to
         # reflect the configured approval_mode as a transport-level gate.
-        from copex.approval import normalize_approval_mode, ApprovalMode
+        from copex.approval import ApprovalMode, normalize_approval_mode
 
         mode = normalize_approval_mode(self.approval_mode)
         if mode in (ApprovalMode.DENY_ALL, ApprovalMode.DRY_RUN):
