@@ -2071,6 +2071,47 @@ class TestSquadCLIManagement:
         assert "Prefer explicit typing" in result.output
         assert "Keep APIs backward compatible" in result.output
 
+    def test_squad_knowledge_show_json(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".squad" / "knowledge").mkdir(parents=True)
+        (tmp_path / ".squad" / "knowledge" / "lead.md").write_text(
+            "# Lead Knowledge\n\n- Prefer explicit typing.\n",
+            encoding="utf-8",
+        )
+        (tmp_path / ".squad" / "decisions.md").write_text(
+            "# Shared Squad Decisions\n\n- Keep APIs backward compatible.\n",
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "knowledge", "--json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["path"].endswith(".squad")
+        assert "lead" in payload["knowledge"]
+        assert "Prefer explicit typing" in payload["knowledge"]["lead"]
+        assert "Keep APIs backward compatible" in payload["decisions"]
+
+    def test_squad_knowledge_show_subcommand_alias(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".squad" / "knowledge").mkdir(parents=True)
+        (tmp_path / ".squad" / "knowledge" / "lead.md").write_text("x", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "knowledge", "show"])
+
+        assert result.exit_code == 0, result.output
+        assert "lead knowledge" in result.output.lower()
+
     def test_squad_knowledge_reset(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
 
@@ -2090,3 +2131,22 @@ class TestSquadCLIManagement:
         assert not (tmp_path / ".squad" / "knowledge").exists()
         assert not (tmp_path / ".squad" / "decisions.md").exists()
         assert (tmp_path / ".squad" / "log" / "2026-03-01-20-00.md").is_file()
+
+    def test_squad_knowledge_reset_json(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        (tmp_path / ".squad" / "knowledge").mkdir(parents=True)
+        (tmp_path / ".squad" / "knowledge" / "lead.md").write_text("x", encoding="utf-8")
+        (tmp_path / ".squad" / "decisions.md").write_text("y", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "knowledge", "reset", "--json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["deleted"] is True
+        assert any(path.endswith("/.squad/knowledge") for path in payload["paths"])
+        assert any(path.endswith("/.squad/decisions.md") for path in payload["paths"])
