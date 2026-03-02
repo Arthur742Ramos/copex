@@ -1,5 +1,18 @@
 # Changelog
 
+## [2.18.0] - 2026-03-02
+
+### Features
+- Event-driven fleet scheduler with mailbox coordination and budget-aware task execution.
+- New `squad_team` module with expanded squad composition/configuration behavior.
+- CLI improvements across squad and planning workflows.
+
+### CI
+- Wired `squad-release` automation to create GitHub releases that trigger PyPI publishing.
+
+### Tests
+- Added substantial new fleet/squad coverage, including large new regression test surfaces.
+
 ## [2.16.0] - 2026-03-01
 
 ### Features
