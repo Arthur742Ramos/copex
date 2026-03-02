@@ -17,7 +17,7 @@ from rich.console import Console
 from rich.live import Live
 from rich.panel import Panel
 
-from copex.cli import _apply_approval_flags
+from copex.cli_utils import apply_approval_flags as _apply_approval_flags
 from copex.config import CopexConfig
 from copex.fleet import FleetTask
 from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort

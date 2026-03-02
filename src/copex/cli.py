@@ -26,7 +26,7 @@ from rich.markdown import Markdown
 from rich.panel import Panel
 
 from copex import __version__
-from copex.approval import AuditLogger, normalize_approval_mode
+from copex.approval import AuditLogger
 from copex.cli_fleet import (
     FleetTaskSpec,
     _build_council_tasks,
@@ -71,6 +71,7 @@ from copex.cli_stream import (
     _stream_response_interactive,
     configure_stream_console,
 )
+from copex.cli_utils import apply_approval_flags as _apply_approval_flags
 from copex.config import (
     COPILOT_CLI_NOT_FOUND_MESSAGE,
     CopexConfig,
@@ -349,33 +350,6 @@ def _parse_exclude_tools(value: str | None) -> list[str]:
     if not value:
         return []
     return [item.strip() for item in value.split(",") if item.strip()]
-
-
-def _apply_approval_flags(
-    config: CopexConfig,
-    *,
-    auto_approve: bool = False,
-    approve: bool = False,
-    dry_run: bool = False,
-    audit: bool = False,
-    default_auto: bool = False,
-) -> None:
-    selected = int(auto_approve) + int(approve) + int(dry_run)
-    if selected > 1:
-        raise typer.BadParameter("Use only one of --auto-approve, --approve, or --dry-run")
-
-    if dry_run:
-        config.approval_mode = "dry-run"
-    elif approve:
-        config.approval_mode = "approve"
-    elif auto_approve or default_auto:
-        config.approval_mode = "auto-approve"
-    else:
-        config.approval_mode = normalize_approval_mode(config.approval_mode).value
-
-    if audit:
-        config.audit = True
-
 
 
 configure_stream_console(console)
