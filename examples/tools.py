@@ -3,8 +3,8 @@
 import asyncio
 from datetime import datetime
 
-from pydantic import BaseModel, Field
 from copilot import define_tool
+from pydantic import BaseModel, Field
 
 from copex import Copex
 
@@ -32,7 +32,7 @@ async def calculate(params: CalculateParams) -> str:
         # Safe eval for simple math expressions
         allowed = set("0123456789+-*/.() ")
         if not all(c in allowed for c in params.expression):
-            return f"Error: Invalid characters in expression"
+            return "Error: Invalid characters in expression"
         result = eval(params.expression)  # Only safe because we validated
         return f"{params.expression} = {result}"
     except Exception as e:

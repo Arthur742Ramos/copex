@@ -2,13 +2,10 @@
 
 from __future__ import annotations
 
-import json
 import time
-
-import pytest
+from concurrent.futures import ThreadPoolExecutor
 
 from copex.cache import CacheEntry, StepCache, clear_global_cache, get_cache
-
 
 # ── CacheEntry ───────────────────────────────────────────────────────
 
@@ -187,3 +184,19 @@ class TestGlobalCache:
         cache_mod._global_cache = None
         assert clear_global_cache() == 0
         cache_mod._global_cache = old
+
+    def test_get_cache_thread_safe_singleton(self, tmp_path):
+        import copex.cache as cache_mod
+
+        old_cache = cache_mod._global_cache
+        old_dir = cache_mod.DEFAULT_CACHE_DIR
+        cache_mod._global_cache = None
+        cache_mod.DEFAULT_CACHE_DIR = tmp_path / "cache"
+        try:
+            with ThreadPoolExecutor(max_workers=8) as executor:
+                instances = list(executor.map(lambda _: get_cache(), range(24)))
+            first = instances[0]
+            assert all(instance is first for instance in instances)
+        finally:
+            cache_mod._global_cache = old_cache
+            cache_mod.DEFAULT_CACHE_DIR = old_dir

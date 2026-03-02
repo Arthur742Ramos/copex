@@ -647,6 +647,33 @@ class TestCLIIntegration:
 
 
 # ===========================================================================
+# worker JSON framing tests
+# ===========================================================================
+
+
+class TestWorkerJsonFraming:
+    def test_is_squad_worker_json_mode(self, monkeypatch):
+        from copex.cli import _is_squad_worker_json_mode
+
+        monkeypatch.delenv("COPEX_SQUAD_WORKER", raising=False)
+        assert _is_squad_worker_json_mode(json_output=True) is False
+
+        monkeypatch.setenv("COPEX_SQUAD_WORKER", "1")
+        assert _is_squad_worker_json_mode(json_output=True) is True
+        assert _is_squad_worker_json_mode(json_output=False) is False
+
+    def test_format_framed_json_includes_valid_content_length(self):
+        from copex.cli import _format_framed_json
+
+        frame = _format_framed_json({"turn": 1, "content": "ok"})
+        header, body = frame.split("\r\n\r\n", 1)
+        assert header.startswith("Content-Length:")
+        length = int(header.split(":", 1)[1].strip())
+        assert len(body.encode("utf-8")) == length
+        assert json.loads(body)["turn"] == 1
+
+
+# ===========================================================================
 # run_streaming tests
 # ===========================================================================
 

@@ -1,14 +1,12 @@
-"""Tests for GitFinalizer (git.py)."""
+"""Tests for GitFinalizer (worktree.py)."""
 
 from __future__ import annotations
 
-import asyncio
-import subprocess
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from copex.git import GitFinalizer, GitFinalizeResult
+from copex.worktree import GitFinalizer, GitFinalizeResult
 
 
 class TestGitFinalizeResult:

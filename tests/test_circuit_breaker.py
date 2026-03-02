@@ -13,7 +13,6 @@ from copex.circuit_breaker import (
 )
 from copex.exceptions import CircuitBreakerOpen
 
-
 # ---------------------------------------------------------------------------
 # SlidingWindowBreaker
 # ---------------------------------------------------------------------------

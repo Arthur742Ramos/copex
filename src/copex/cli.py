@@ -4,32 +4,80 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
+import os
 import shutil
 import subprocess
 import sys
 import time
-from datetime import datetime, timezone
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
-    from copex.fleet import FleetTask
+    pass
 
 import typer
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.history import FileHistory
 from prompt_toolkit.key_binding import KeyBindings
-from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from rich.console import Console
-from rich.live import Live
 from rich.markdown import Markdown
 from rich.panel import Panel
 
 from copex import __version__
 from copex.approval import AuditLogger, normalize_approval_mode
-from copex.client import Copex, StreamChunk
-from copex.config import CopexConfig, load_last_model, make_client, save_last_model
+from copex.cli_fleet import (
+    FleetTaskSpec,
+    _build_council_tasks,
+    _load_fleet_json_config,
+    _load_fleet_toml_config,
+    _parse_fleet_task_specs,
+    _run_fleet,
+    configure_fleet_cli,
+    council_command,
+    fleet_command,
+    register_fleet_commands,
+)  # noqa: F401
+from copex.cli_plan import (
+    _display_plan,
+    _display_plan_summary,
+    _display_plan_summary_enhanced,
+    _format_duration,
+    _run_plan,
+    configure_plan_cli,
+    plan_command,
+    register_plan_commands,
+)  # noqa: F401
+from copex.cli_squad import (
+    _init_squad_file,
+    _legacy_squad_file_path,
+    _reset_squad_file,
+    _reset_squad_knowledge,
+    _run_squad,
+    _serialize_squad_file,
+    _show_squad_file,
+    _show_squad_knowledge,
+    _show_squad_status,
+    _squad_dir_path,
+    _squad_file_path,
+    _update_squad_file,
+    configure_squad_cli,
+    register_squad_commands,
+    squad_command,
+)  # noqa: F401
+from copex.cli_stream import (
+    _stream_response,
+    _stream_response_interactive,
+    configure_stream_console,
+)
+from copex.config import (
+    COPILOT_CLI_NOT_FOUND_MESSAGE,
+    CopexConfig,
+    load_last_model,
+    make_client,
+    save_last_model,
+)
 from copex.edits import apply_edit_text, list_undo_history, undo_last_edit_batch
 from copex.exceptions import ValidationError as CopexValidationError
 from copex.log_render import render_jsonl
@@ -41,19 +89,45 @@ from copex.models import (
     parse_reasoning_effort,
     resolve_model,
 )
-from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 from copex.ralph import RalphState, RalphWiggum
 from copex.ui import (
-    ActivityType,
     CopexUI,
     Icons,
     Theme,
-    ToolCallInfo,
     print_error,
-    print_retry,
     print_user_prompt,
     print_welcome,
 )
+
+__all__ = [
+    "FleetTaskSpec",
+    "_build_council_tasks",
+    "_display_plan",
+    "_display_plan_summary",
+    "_display_plan_summary_enhanced",
+    "_format_duration",
+    "_init_squad_file",
+    "_legacy_squad_file_path",
+    "_load_fleet_json_config",
+    "_load_fleet_toml_config",
+    "_parse_fleet_task_specs",
+    "_reset_squad_file",
+    "_reset_squad_knowledge",
+    "_run_fleet",
+    "_run_plan",
+    "_run_squad",
+    "_serialize_squad_file",
+    "_show_squad_file",
+    "_show_squad_knowledge",
+    "_show_squad_status",
+    "_squad_dir_path",
+    "_squad_file_path",
+    "_update_squad_file",
+    "council_command",
+    "fleet_command",
+    "plan_command",
+    "squad_command",
+]
 
 # Effective default: last used model or claude-opus-4.5
 _DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
@@ -78,7 +152,6 @@ def _resolve_cli_model(model: str) -> Model | _ResolvedModel:
 
 def _record_start_commit() -> None:
     """Record current git HEAD so `copex diff` can reference it later."""
-    import subprocess
 
     try:
         result = subprocess.run(
@@ -118,7 +191,7 @@ _copex_completion() {
             return 0
             ;;
         -r|--reasoning)
-            COMPREPLY=( $(compgen -W "low medium high xhigh" -- ${cur}) )
+            COMPREPLY=( $(compgen -W "none low medium high xhigh" -- ${cur}) )
             return 0
             ;;
         copex)
@@ -177,7 +250,7 @@ _copex() {
         'o1'
         'o1-mini'
     )
-    reasoning_levels=('low' 'medium' 'high' 'xhigh')
+    reasoning_levels=('none' 'low' 'medium' 'high' 'xhigh')
 
     _arguments -C \\
         '1:command:->command' \\
@@ -211,7 +284,7 @@ FISH_COMPLETION = """
 
 set -l commands chat plan ralph fleet council interactive map render models skills memory status config init login logout tui completions stats diff squad audit agent edit undo
 set -l models claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini
-set -l reasoning low medium high xhigh
+set -l reasoning none low medium high xhigh
 
 complete -c copex -f
 complete -c copex -n "not __fish_seen_subcommand_from $commands" -a "$commands"
@@ -227,21 +300,42 @@ complete -c copex -n "__fish_seen_subcommand_from completions" -a "bash zsh fish
 
 
 def version_callback(value: bool) -> None:
-    """Print version and exit."""
+    """Print version and exit.
+
+    Args:
+        value: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     if value:
         console.print(f"copex version {__version__}")
         raise typer.Exit()
 
 
 def model_callback(value: str | None) -> Model | _ResolvedModel | None:
-    """Validate model name."""
+    """Validate model name.
+
+    Args:
+        value: CLI argument or option value.
+
+    Returns:
+        Model | _ResolvedModel | None: Command result.
+    """
     if value is None:
         return None
     return _resolve_cli_model(value)
 
 
 def reasoning_callback(value: str | None) -> ReasoningEffort | None:
-    """Validate reasoning effort."""
+    """Validate reasoning effort.
+
+    Args:
+        value: CLI argument or option value.
+
+    Returns:
+        ReasoningEffort | None: Command result.
+    """
     if value is None:
         return None
     try:
@@ -283,6 +377,32 @@ def _apply_approval_flags(
         config.audit = True
 
 
+
+configure_stream_console(console)
+configure_plan_cli(
+    shared_console=console,
+    default_model=_DEFAULT_MODEL,
+    resolve_cli_model=_resolve_cli_model,
+    apply_approval_flags=_apply_approval_flags,
+)
+configure_fleet_cli(
+    shared_console=console,
+    default_model=_DEFAULT_MODEL,
+    resolve_cli_model=_resolve_cli_model,
+    parse_exclude_tools=_parse_exclude_tools,
+    format_duration=_format_duration,
+)
+configure_squad_cli(
+    shared_console=console,
+    default_model=_DEFAULT_MODEL,
+    resolve_cli_model=_resolve_cli_model,
+    apply_approval_flags=_apply_approval_flags,
+)
+register_plan_commands(app)
+register_fleet_commands(app)
+register_squad_commands(app)
+
+
 @app.callback(invoke_without_command=True)
 def main(
     ctx: typer.Context,
@@ -298,8 +418,8 @@ def main(
     ] = False,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
+        ReasoningEffort, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH,
     prompt: Annotated[
         str | None, typer.Option("--prompt", "-p", help="Execute a prompt in non-interactive mode")
     ] = None,
@@ -338,8 +458,27 @@ def main(
 ) -> None:
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops.
 
-    By default, prompts run through the squad (Lead → Developer + Tester in
-    parallel).  Pass --no-squad to use single-agent chat mode instead.
+        By default, prompts run through the squad (Lead → Developer + Tester in
+        parallel).  Pass --no-squad to use single-agent chat mode instead.
+
+    Args:
+        ctx: Typer context for command dispatch.
+        version: CLI argument or option value.
+        model: CLI argument or option value.
+        reasoning: CLI argument or option value.
+        prompt: CLI argument or option value.
+        non_interactive: CLI argument or option value.
+        allow_all: CLI argument or option value.
+        use_cli: CLI argument or option value.
+        no_squad: CLI argument or option value.
+        auto_approve: CLI argument or option value.
+        approve: CLI argument or option value.
+        dry_run: CLI argument or option value.
+        audit: CLI argument or option value.
+        force: CLI argument or option value.
+
+    Returns:
+        None: Command result.
     """
     # Record HEAD commit before any command runs (for `copex diff`)
     _record_start_commit()
@@ -398,7 +537,14 @@ def main(
 
 @memory_app.command("show")
 def memory_show() -> None:
-    """Display current project memory."""
+    """Display current project memory.
+
+    Args:
+        None.
+
+    Returns:
+        None: Command result.
+    """
     memory = ProjectMemory(Path.cwd())
     content = memory.read_memory().strip()
     if not content:
@@ -411,7 +557,14 @@ def memory_show() -> None:
 def memory_add(
     entry: Annotated[str, typer.Argument(help="Memory entry to persist.")],
 ) -> None:
-    """Add a manual memory entry."""
+    """Add a manual memory entry.
+
+    Args:
+        entry: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     memory = ProjectMemory(Path.cwd())
     if memory.add_entry(entry, kind="manual"):
         console.print("[green]Added memory entry.[/green]")
@@ -421,7 +574,14 @@ def memory_add(
 
 @memory_app.command("clear")
 def memory_clear() -> None:
-    """Reset project memory."""
+    """Reset project memory.
+
+    Args:
+        None.
+
+    Returns:
+        None: Command result.
+    """
     memory = ProjectMemory(Path.cwd())
     memory.clear()
     console.print("[green]Project memory reset.[/green]")
@@ -429,7 +589,14 @@ def memory_clear() -> None:
 
 @memory_app.command("import")
 def memory_import() -> None:
-    """Import guidance from common assistant memory files."""
+    """Import guidance from common assistant memory files.
+
+    Args:
+        None.
+
+    Returns:
+        None: Command result.
+    """
     memory = ProjectMemory(Path.cwd())
     imported = memory.import_external_guidance()
     if imported:
@@ -632,8 +799,8 @@ def chat(
         typer.Option("--context-budget", help="Override context window budget in tokens"),
     ] = None,
     reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
+        ReasoningEffort, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH,
     max_retries: Annotated[int, typer.Option("--max-retries", help="Maximum retry attempts")] = 5,
     no_stream: Annotated[
         bool, typer.Option("--no-stream", help="Disable streaming output")
@@ -703,7 +870,39 @@ def chat(
         bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
     ] = False,
 ) -> None:
-    """Send a prompt to Copilot with automatic retry on errors."""
+    """Send a prompt to Copilot with automatic retry on errors.
+
+    Args:
+        prompt: CLI argument or option value.
+        model: CLI argument or option value.
+        context_budget: CLI argument or option value.
+        reasoning: CLI argument or option value.
+        max_retries: CLI argument or option value.
+        no_stream: CLI argument or option value.
+        show_reasoning: CLI argument or option value.
+        config_file: CLI argument or option value.
+        raw: CLI argument or option value.
+        ui_theme: CLI argument or option value.
+        ui_density: CLI argument or option value.
+        skill_dir: CLI argument or option value.
+        disable_skill: CLI argument or option value.
+        no_auto_skills: CLI argument or option value.
+        json_output: CLI argument or option value.
+        quiet: CLI argument or option value.
+        stdin: CLI argument or option value.
+        context: CLI argument or option value.
+        template: CLI argument or option value.
+        output: CLI argument or option value.
+        use_cli: CLI argument or option value.
+        auto_approve: CLI argument or option value.
+        approve: CLI argument or option value.
+        dry_run: CLI argument or option value.
+        audit: CLI argument or option value.
+        force: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     # Load config: explicit flag wins; otherwise auto-load from ~/.config/copex/config.toml if present
     if config_file and config_file.exists():
         config = CopexConfig.from_file(config_file)
@@ -945,128 +1144,18 @@ async def _run_chat(
         await client.stop()
 
 
-async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> str:
-    """Stream response with beautiful live updates. Returns the final content."""
-    ui = CopexUI(
-        console, theme=client.config.ui_theme, density=client.config.ui_density, show_all_tools=True
-    )
-    ui.reset(model=client.config.model.value)
-    ui.set_activity(ActivityType.THINKING)
-
-    live_display: Live | None = None
-    refresh_stop = asyncio.Event()
-    final_content = ""
-
-    def on_chunk(chunk: StreamChunk) -> None:
-        if chunk.type == "message":
-            if chunk.is_final:
-                ui.set_final_content(chunk.content or ui.state.message, ui.state.reasoning)
-            else:
-                ui.add_message(chunk.delta)
-        elif chunk.type == "reasoning":
-            if show_reasoning:
-                if chunk.is_final:
-                    pass  # Already captured incrementally
-                else:
-                    ui.add_reasoning(chunk.delta)
-        elif chunk.type == "tool_call":
-            tool = ToolCallInfo(
-                tool_id=chunk.tool_id or "",
-                name=chunk.tool_name or "unknown",
-                arguments=chunk.tool_args or {},
-                status="running",
-            )
-            ui.add_tool_call(tool)
-        elif chunk.type == "tool_result":
-            status = "success" if chunk.tool_success is not False else "error"
-            ui.update_tool_call(
-                chunk.tool_id,
-                chunk.tool_name or "unknown",
-                status,
-                result=chunk.tool_result,
-                duration=chunk.tool_duration,
-            )
-        elif chunk.type == "system":
-            # Retry notification
-            ui.increment_retries()
-            print_retry(console, ui.state.retries, client.config.retry.max_retries, chunk.delta)
-
-        # Update the live display
-        if live_display:
-            live_display.update(ui.build_live_display())
-
-    async def refresh_loop() -> None:
-        while not refresh_stop.is_set():
-            if live_display:
-                live_display.update(ui.build_live_display())
-            await asyncio.sleep(0.1)
-
-    with Live(console=console, refresh_per_second=10, transient=True) as live:
-        live_display = live
-        live.update(ui.build_live_display())
-        refresh_task = asyncio.create_task(refresh_loop())
-        try:
-            response = await client.send(prompt, on_chunk=on_chunk)
-            # Prefer streamed content over response object (which may have stale fallback)
-            final_message = ui.state.message if ui.state.message else response.content
-            final_reasoning = (
-                (ui.state.reasoning if ui.state.reasoning else response.reasoning)
-                if show_reasoning
-                else None
-            )
-            ui.set_final_content(final_message, final_reasoning)
-            ui.state.retries = response.retries
-            ui.set_usage(response.prompt_tokens, response.completion_tokens)
-            ui.set_context_usage(response.context_used_tokens, response.context_budget_tokens)
-            final_content = final_message
-        finally:
-            refresh_stop.set()
-            try:
-                await refresh_task
-            except asyncio.CancelledError:
-                pass
-
-    # Print final beautiful output
-    console.print(ui.build_final_display())
-    return final_content
-
-
-async def _stream_response_plain(client: Copex, prompt: str) -> None:
-    """Stream response as plain text."""
-    content = ""
-    retries = 0
-
-    def on_chunk(chunk: StreamChunk) -> None:
-        nonlocal content
-        if chunk.type == "message":
-            if chunk.is_final:
-                if chunk.content:
-                    content = chunk.content
-                return
-            if chunk.delta:
-                content += chunk.delta
-                sys.stdout.write(chunk.delta)
-                sys.stdout.flush()
-        elif chunk.type == "system":
-            console.print(f"[yellow]{chunk.delta.strip()}[/yellow]")
-
-    response = await client.send(prompt, on_chunk=on_chunk)
-    retries = response.retries
-    if response.content and response.content != content:
-        if response.content.startswith(content):
-            sys.stdout.write(response.content[len(content) :])
-        else:
-            sys.stdout.write(response.content)
-    sys.stdout.write("\n")
-    sys.stdout.flush()
-
-    if retries > 0:
-        console.print(f"[dim]Completed with {retries} retries[/dim]")
 
 
 @app.command()
 def models() -> None:
-    """List available models."""
+    """List available models.
+
+    Args:
+        None.
+
+    Returns:
+        None: Command result.
+    """
     console.print("[bold]Available Models:[/bold]\n")
     for model in Model:
         console.print(f"  • {model.value}")
@@ -1083,7 +1172,14 @@ def render_command(
         ),
     ] = ...,
 ) -> None:
-    """Render JSONL session logs with readable formatting."""
+    """Render JSONL session logs with readable formatting.
+
+    Args:
+        input_path: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     if str(input_path) == "-":
         render_jsonl(sys.stdin, console)
         return
@@ -1112,7 +1208,15 @@ def skills_list(
     ] = None,
     no_auto: Annotated[bool, typer.Option("--no-auto", help="Disable auto-discovery")] = False,
 ) -> None:
-    """List all available skills."""
+    """List all available skills.
+
+    Args:
+        skill_dir: CLI argument or option value.
+        no_auto: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     from copex.skills import list_skills
 
     skills = list_skills(
@@ -1144,7 +1248,15 @@ def skills_show(
         list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
 ) -> None:
-    """Show the content of a specific skill."""
+    """Show the content of a specific skill.
+
+    Args:
+        name: CLI argument or option value.
+        skill_dir: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     from copex.skills import get_skill_content
 
     content = get_skill_content(name, skill_directories=skill_dir)
@@ -1160,8 +1272,8 @@ def skills_show(
 def tui(
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
+        ReasoningEffort, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH,
     auto_approve: Annotated[
         bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
     ] = False,
@@ -1175,7 +1287,19 @@ def tui(
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
 ) -> None:
-    """Start the Copex TUI."""
+    """Start the Copex TUI.
+
+    Args:
+        model: CLI argument or option value.
+        reasoning: CLI argument or option value.
+        auto_approve: CLI argument or option value.
+        approve: CLI argument or option value.
+        dry_run: CLI argument or option value.
+        audit: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     from copex.tui import run_tui
 
     effective_model = model or _DEFAULT_MODEL.value
@@ -1210,7 +1334,14 @@ def init(
         Path, typer.Option("--path", "-p", help="Config file path")
     ] = None,
 ) -> None:
-    """Create a default config file."""
+    """Create a default config file.
+
+    Args:
+        path: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     import tomli_w
 
     if path is None:
@@ -1247,8 +1378,8 @@ def init(
 def interactive(
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
+        ReasoningEffort, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH,
     ui_theme: Annotated[
         str | None,
         typer.Option("--ui-theme", help="UI theme (default, midnight, mono, sunset, tokyo)"),
@@ -1281,7 +1412,25 @@ def interactive(
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
 ) -> None:
-    """Start an interactive chat session."""
+    """Start an interactive chat session.
+
+    Args:
+        model: CLI argument or option value.
+        reasoning: CLI argument or option value.
+        ui_theme: CLI argument or option value.
+        ui_density: CLI argument or option value.
+        classic: CLI argument or option value.
+        skill_dir: CLI argument or option value.
+        disable_skill: CLI argument or option value.
+        no_auto_skills: CLI argument or option value.
+        auto_approve: CLI argument or option value.
+        approve: CLI argument or option value.
+        dry_run: CLI argument or option value.
+        audit: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     effective_model = model or _DEFAULT_MODEL.value
     try:
         model_enum = _resolve_cli_model(effective_model)
@@ -1525,87 +1674,6 @@ async def _interactive_loop(config: CopexConfig) -> None:
         await client.stop()
 
 
-async def _stream_response_interactive(
-    client: Copex,
-    prompt: str,
-    ui: CopexUI,
-) -> None:
-    """Stream response with beautiful UI in interactive mode."""
-    # Add user message to history
-    ui.add_user_message(prompt)
-
-    # Reset for new turn but preserve history
-    ui.reset(model=client.config.model.value, preserve_history=True)
-    ui.set_activity(ActivityType.THINKING)
-
-    live_display: Live | None = None
-    refresh_stop = asyncio.Event()
-
-    def on_chunk(chunk: StreamChunk) -> None:
-        if chunk.type == "message":
-            if chunk.is_final:
-                ui.set_final_content(chunk.content or ui.state.message, ui.state.reasoning)
-            else:
-                ui.add_message(chunk.delta)
-        elif chunk.type == "reasoning":
-            if chunk.is_final:
-                pass
-            else:
-                ui.add_reasoning(chunk.delta)
-        elif chunk.type == "tool_call":
-            tool = ToolCallInfo(
-                tool_id=chunk.tool_id or "",
-                name=chunk.tool_name or "unknown",
-                arguments=chunk.tool_args or {},
-                status="running",
-            )
-            ui.add_tool_call(tool)
-        elif chunk.type == "tool_result":
-            status = "success" if chunk.tool_success is not False else "error"
-            ui.update_tool_call(
-                chunk.tool_id,
-                chunk.tool_name or "unknown",
-                status,
-                result=chunk.tool_result,
-                duration=chunk.tool_duration,
-            )
-        elif chunk.type == "system":
-            ui.increment_retries()
-
-        if live_display:
-            live_display.update(ui.build_live_display())
-
-    async def refresh_loop() -> None:
-        while not refresh_stop.is_set():
-            if live_display:
-                live_display.update(ui.build_live_display())
-            await asyncio.sleep(0.1)
-
-    with Live(console=console, refresh_per_second=10, transient=True) as live:
-        live_display = live
-        live.update(ui.build_live_display())
-        refresh_task = asyncio.create_task(refresh_loop())
-        try:
-            response = await client.send(prompt, on_chunk=on_chunk)
-            # Prefer streamed content over response object (which may have stale fallback)
-            final_message = ui.state.message if ui.state.message else response.content
-            final_reasoning = ui.state.reasoning if ui.state.reasoning else response.reasoning
-            ui.set_final_content(final_message, final_reasoning)
-            ui.state.retries = response.retries
-            ui.set_usage(response.prompt_tokens, response.completion_tokens)
-            ui.set_context_usage(response.context_used_tokens, response.context_budget_tokens)
-        finally:
-            refresh_stop.set()
-            try:
-                await refresh_task
-            except asyncio.CancelledError:
-                pass
-
-    # Finalize the assistant response to history
-    ui.finalize_assistant_response()
-
-    console.print(ui.build_final_display())
-    console.print()  # Extra spacing
 
 
 @app.command("ralph")
@@ -1619,8 +1687,8 @@ def ralph_command(
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
+        ReasoningEffort, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH,
     skill_dir: Annotated[
         list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
     ] = None,
@@ -1632,13 +1700,26 @@ def ralph_command(
     ] = False,
 ) -> None:
     """
-    Start a Ralph Wiggum loop - iterative AI development.
+        Start a Ralph Wiggum loop - iterative AI development.
 
-    The same prompt is fed to the AI repeatedly. The AI sees its previous
-    work in conversation history and iteratively improves until complete.
+        The same prompt is fed to the AI repeatedly. The AI sees its previous
+        work in conversation history and iteratively improves until complete.
 
-    Example:
-        copex ralph "Build a REST API with CRUD and tests" --promise "ALL TESTS PASSING" -n 20
+        Example:
+            copex ralph "Build a REST API with CRUD and tests" --promise "ALL TESTS PASSING" -n 20
+
+    Args:
+        prompt: CLI argument or option value.
+        max_iterations: CLI argument or option value.
+        completion_promise: CLI argument or option value.
+        model: CLI argument or option value.
+        reasoning: CLI argument or option value.
+        skill_dir: CLI argument or option value.
+        disable_skill: CLI argument or option value.
+        no_auto_skills: CLI argument or option value.
+
+    Returns:
+        None: Command result.
     """
     effective_model = model or _DEFAULT_MODEL.value
     try:
@@ -1725,8 +1806,14 @@ async def _run_ralph(
 
 @app.command("login")
 def login() -> None:
-    """Login to GitHub (uses GitHub CLI for authentication)."""
-    import shutil
+    """Login to GitHub (uses GitHub CLI for authentication).
+
+    Args:
+        None.
+
+    Returns:
+        None: Command result.
+    """
     import subprocess
 
     # Check for gh CLI
@@ -1757,8 +1844,14 @@ def login() -> None:
 
 @app.command("logout")
 def logout() -> None:
-    """Logout from GitHub."""
-    import shutil
+    """Logout from GitHub.
+
+    Args:
+        None.
+
+    Returns:
+        None: Command result.
+    """
     import subprocess
 
     gh_path = shutil.which("gh")
@@ -1777,13 +1870,22 @@ def logout() -> None:
 
 @app.command("status")
 def status() -> None:
-    """Check Copilot CLI and GitHub authentication status."""
-    import shutil
+    """Check Copilot CLI and GitHub authentication status.
+
+    Args:
+        None.
+
+    Returns:
+        None: Command result.
+    """
     import subprocess
 
     from copex.config import find_copilot_cli
 
-    cli_path = find_copilot_cli()
+    try:
+        cli_path = find_copilot_cli()
+    except (AttributeError, TypeError):
+        cli_path = None
     gh_path = shutil.which("gh")
 
     # Get copilot version
@@ -1809,8 +1911,7 @@ def status() -> None:
     )
 
     if not cli_path:
-        console.print("\n[red]Copilot CLI not found.[/red]")
-        console.print("Install: [bold]npm install -g @github/copilot[/bold]")
+        console.print(f"\n[red]{COPILOT_CLI_NOT_FOUND_MESSAGE}[/red]")
 
     if gh_path:
         console.print("\n[bold]GitHub Auth Status:[/bold]")
@@ -1829,7 +1930,14 @@ def config_cmd(
         Path | None, typer.Option("--config", "-c", help="Config file path")
     ] = None,
 ) -> None:
-    """Validate and display the current Copex configuration."""
+    """Validate and display the current Copex configuration.
+
+    Args:
+        config_file: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     import warnings as _warnings
 
     config_path = Path(config_file) if config_file else CopexConfig.default_path()
@@ -1908,7 +2016,16 @@ def map_command(
         typer.Option("--limit", help="Max relevant files to show"),
     ] = 10,
 ) -> None:
-    """Display the repository map or task-relevant files."""
+    """Display the repository map or task-relevant files.
+
+    Args:
+        refresh: CLI argument or option value.
+        relevant: CLI argument or option value.
+        limit: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     from copex.repo_map import RepoMap
 
     repo_map = RepoMap(Path.cwd())
@@ -1924,1798 +2041,8 @@ def map_command(
         console.print(repo_map.render_map())
 
 
-@app.command("plan")
-def plan_command(
-    task: Annotated[
-        str | None, typer.Argument(help="Task to plan (optional with --resume)")
-    ] = None,
-    execute: Annotated[
-        bool, typer.Option("--execute", "-e", help="Execute the plan after generating")
-    ] = False,
-    review: Annotated[
-        bool, typer.Option("--review", "-R", help="Show plan and confirm before executing")
-    ] = False,
-    resume: Annotated[
-        bool, typer.Option("--resume", help="Resume from last checkpoint (.copex-state.json)")
-    ] = False,
-    output: Annotated[
-        Path | None, typer.Option("--output", "-o", help="Save plan to file")
-    ] = None,
-    from_step: Annotated[
-        int, typer.Option("--from-step", "-f", help="Resume execution from step number")
-    ] = 1,
-    load_plan: Annotated[
-        Path | None,
-        typer.Option("--load", "-l", help="Load plan from file instead of generating"),
-    ] = None,
-    max_iterations: Annotated[
-        int, typer.Option("--max-iterations", "-n", help="Max iterations per step (Ralph loop)")
-    ] = 10,
-    visualize: Annotated[
-        str | None,
-        typer.Option("--visualize", "-V", help="Show plan visualization (ascii, mermaid, tree)"),
-    ] = None,
-    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
-    context_budget: Annotated[
-        int | None,
-        typer.Option("--context-budget", help="Override context window budget in tokens"),
-    ] = None,
-    reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
-    skill_dir: Annotated[
-        list[str] | None, typer.Option("--skill-dir", "-S", help="Add skill directory")
-    ] = None,
-    disable_skill: Annotated[
-        list[str] | None, typer.Option("--disable-skill", help="Disable specific skill")
-    ] = None,
-    no_auto_skills: Annotated[
-        bool, typer.Option("--no-auto-skills", help="Disable skill auto-discovery")
-    ] = False,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Generate and display the plan without executing")
-    ] = False,
-    auto_approve: Annotated[
-        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
-    ] = False,
-    approve: Annotated[
-        bool, typer.Option("--approve", help="Prompt before each file change")
-    ] = False,
-    approval_dry_run: Annotated[
-        bool,
-        typer.Option(
-            "--approval-dry-run",
-            help="Show file change diffs without applying them during execution",
-        ),
-    ] = False,
-    audit: Annotated[
-        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
-    ] = False,
-) -> None:
-    """
-    Generate and optionally execute a step-by-step plan.
 
-    Examples:
-        copex plan "Build a REST API"              # Generate plan only
-        copex plan "Build a REST API" --execute    # Generate and execute
-        copex plan "Build a REST API" --review     # Generate, review, then execute
-        copex plan "Build a REST API" --dry-run    # Generate plan, show it, don't execute
-        copex plan "Build a REST API" --visualize ascii  # Show ASCII plan graph
-        copex plan --resume                        # Resume from .copex-state.json
-        copex plan "Continue" --load plan.json -f3 # Resume from step 3
-    """
-    # Validate: need task OR resume OR load_plan
-    if not task and not resume and not load_plan:
-        console.print("[red]Error: Provide a task, --resume, or --load[/red]")
-        raise typer.Exit(1) from None
 
-    effective_model = model or _DEFAULT_MODEL.value
-    try:
-        model_enum = _resolve_cli_model(effective_model)
-        requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
-        normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
-        if warning:
-            console.print(f"[yellow]{warning}[/yellow]")
-
-        config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
-        if context_budget is not None:
-            config.context_budget = context_budget
-
-        # Skills options
-        if skill_dir:
-            config.skill_directories.extend(skill_dir)
-        if disable_skill:
-            config.disabled_skills.extend(disable_skill)
-        if no_auto_skills:
-            config.auto_discover_skills = False
-        _apply_approval_flags(
-            config,
-            auto_approve=auto_approve,
-            approve=approve,
-            dry_run=approval_dry_run,
-            audit=audit,
-        )
-    except typer.BadParameter as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
-    except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
-
-    # --dry-run overrides --execute/--review/--resume to prevent execution
-    should_execute = (execute or review or resume) and not dry_run
-
-    asyncio.run(
-        _run_plan(
-            config=config,
-            task=task or "",
-            execute=should_execute,
-            review=review and not dry_run,
-            resume=resume,
-            output=output,
-            from_step=from_step,
-            load_plan=load_plan,
-            max_iterations=max_iterations,
-            visualize=visualize,
-        )
-    )
-
-
-def _format_duration(seconds: float) -> str:
-    """Format duration in human-readable form."""
-    if seconds < 60:
-        return f"{seconds:.0f}s"
-    minutes = int(seconds // 60)
-    secs = int(seconds % 60)
-    if minutes < 60:
-        return f"{minutes}m {secs}s"
-    hours = int(minutes // 60)
-    mins = int(minutes % 60)
-    return f"{hours}h {mins}m"
-
-
-async def _run_plan(
-    config: CopexConfig,
-    task: str,
-    execute: bool,
-    review: bool,
-    resume: bool,
-    output: Path | None,
-    from_step: int,
-    load_plan: Path | None,
-    max_iterations: int = 10,
-    visualize: str | None = None,
-) -> None:
-    """Run plan generation and optional execution with beautiful UI."""
-    from copex.ui import PlanUI
-    from copex.visualization import visualize_plan
-
-    client = make_client(config)
-    await client.start()
-
-    plan_ui = PlanUI(console)
-
-    try:
-        # Create Ralph instance for iterative step execution
-        ralph = RalphWiggum(client)
-        executor = PlanExecutor(client, ralph=ralph)
-        executor.max_iterations_per_step = max_iterations
-        repo_map = None
-        try:
-            from copex.repo_map import RepoMap
-
-            repo_map = RepoMap(Path.cwd())
-            repo_map.refresh(force=False)
-        except Exception as exc:
-            console.print(f"[dim]Repo map unavailable for plan: {exc}[/dim]")
-            repo_map = None
-
-        # Check for resume from checkpoint
-        if resume:
-            state = PlanState.load()
-            if state is None:
-                console.print("[red]No checkpoint found (.copex-state.json)[/red]")
-                console.print("[dim]Run a plan with --execute first to create a checkpoint[/dim]")
-                raise typer.Exit(1) from None
-
-            plan = state.plan
-            from_step = state.current_step
-            if repo_map is not None:
-                executor.repo_context = repo_map.relevant_context(state.task)
-            console.print(
-                Panel(
-                    f"[bold]Resuming plan:[/bold] {state.task}\n"
-                    f"[dim]Started:[/dim] {state.started_at}\n"
-                    f"[dim]Completed steps:[/dim] {len(state.completed)}/{len(plan.steps)}\n"
-                    f"[dim]Resuming from step:[/dim] {from_step}",
-                    title="🔄 Resume from Checkpoint",
-                    border_style="yellow",
-                )
-            )
-        elif load_plan:
-            # Load from plan file
-            if not load_plan.exists():
-                console.print(f"[red]Plan file not found: {load_plan}[/red]")
-                raise typer.Exit(1) from None
-            plan = Plan.load(load_plan)
-            if repo_map is not None:
-                executor.repo_context = repo_map.relevant_context(plan.task)
-            console.print(f"[green]✓ Loaded plan from {load_plan}[/green]\n")
-        else:
-            # Generate new plan
-            if repo_map is not None:
-                executor.repo_context = repo_map.relevant_context(task)
-            console.print(
-                Panel(
-                    f"[bold]Generating plan for:[/bold]\n{task}",
-                    title="📋 Plan Mode",
-                    border_style="blue",
-                )
-            )
-
-            plan = await executor.generate_plan(task)
-            console.print(f"\n[green]✓ Generated {len(plan.steps)} steps[/green]\n")
-
-        # Display plan overview with new UI
-        steps_info = [(s.number, s.description, s.status.value) for s in plan.steps]
-        plan_ui.print_plan_overview(steps_info)
-
-        # Show visualization if requested
-        if visualize:
-            try:
-                viz_output = visualize_plan(plan, format=visualize)
-                console.print(f"\n[bold]Plan Visualization ({visualize}):[/bold]")
-                console.print(viz_output)
-                console.print()
-            except ValueError as e:
-                console.print(f"[yellow]Visualization error: {e}[/yellow]")
-
-        # Save plan if requested
-        if output:
-            plan.save(output)
-            console.print(f"\n[green]✓ Saved plan to {output}[/green]")
-
-        # Execute if requested
-        if execute:
-            if review:
-                if not typer.confirm("\nProceed with execution?"):
-                    console.print("[yellow]Execution cancelled[/yellow]")
-                    return
-
-            # Print plan execution header
-            plan_ui.print_plan_header(
-                task=plan.task,
-                step_count=len(plan.steps),
-                model=config.model.value,
-                reasoning=config.reasoning_effort.value,
-            )
-
-            # Track execution timing
-            plan_start_time = time.time()
-
-            def on_step_start(step: PlanStep) -> None:
-                plan_ui.print_step_start(
-                    step_number=step.number,
-                    total_steps=len(plan.steps),
-                    description=step.description,
-                )
-
-            def on_step_complete(step: PlanStep) -> None:
-                duration = step.duration_seconds or 0
-                preview = (step.result or "")[:150]
-                if len(step.result or "") > 150:
-                    preview += "..."
-
-                # Calculate ETA
-                eta = None
-                if plan.completed_count >= 2:
-                    eta = plan.estimate_remaining_seconds()
-
-                plan_ui.print_step_complete(
-                    step_number=step.number,
-                    total_steps=len(plan.steps),
-                    duration=duration,
-                    result_preview=preview if preview else None,
-                    eta_remaining=eta,
-                )
-
-            def on_error(step: PlanStep, error: Exception) -> bool:
-                duration = step.duration_seconds or 0
-                plan_ui.print_step_failed(
-                    step_number=step.number,
-                    total_steps=len(plan.steps),
-                    error=str(error),
-                    duration=duration,
-                )
-                return typer.confirm("Continue with next step?", default=False)
-
-            await executor.execute_plan(
-                plan,
-                from_step=from_step,
-                on_step_start=on_step_start,
-                on_step_complete=on_step_complete,
-                on_error=on_error,
-                save_checkpoints=True,
-            )
-
-            # Calculate total time
-            total_time = time.time() - plan_start_time
-
-            # Show enhanced summary with new UI
-            plan_ui.print_plan_complete(
-                completed_steps=plan.completed_count,
-                failed_steps=plan.failed_count,
-                total_steps=len(plan.steps),
-                total_time=total_time,
-                total_tokens=plan.total_tokens,
-            )
-
-            # Save updated plan
-            if output:
-                plan.save(output)
-                console.print(f"\n[green]✓ Updated plan saved to {output}[/green]")
-
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Cancelled[/yellow]")
-        console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
-    except Exception as e:  # Catch-all: top-level CLI error handler
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
-    finally:
-        await client.stop()
-
-
-def _display_plan(plan: Plan) -> None:
-    """Display plan steps."""
-    for step in plan.steps:
-        status_icon = {
-            StepStatus.PENDING: "⬜",
-            StepStatus.RUNNING: "🔄",
-            StepStatus.COMPLETED: "✅",
-            StepStatus.FAILED: "❌",
-            StepStatus.SKIPPED: "⏭️",
-        }.get(step.status, "⬜")
-        console.print(f"{status_icon} [bold]Step {step.number}:[/bold] {step.description}")
-
-
-def _display_plan_summary(plan: Plan) -> None:
-    """Display plan execution summary."""
-    completed = plan.completed_count
-    failed = plan.failed_count
-    total = len(plan.steps)
-
-    if plan.is_complete and failed == 0:
-        console.print(
-            Panel(
-                f"[green]All {total} steps completed successfully![/green]",
-                title="✅ Plan Complete",
-                border_style="green",
-            )
-        )
-    elif failed > 0:
-        console.print(
-            Panel(
-                f"Completed: {completed}/{total}\nFailed: {failed}",
-                title="⚠️ Plan Incomplete",
-                border_style="yellow",
-            )
-        )
-    else:
-        console.print(
-            Panel(
-                f"Completed: {completed}/{total}",
-                title="📋 Progress",
-                border_style="blue",
-            )
-        )
-
-
-def _display_plan_summary_enhanced(plan: Plan, total_time: float) -> None:
-    """Display enhanced plan execution summary with timing and tokens."""
-    completed = plan.completed_count
-    failed = plan.failed_count
-    total = len(plan.steps)
-
-    # Build summary lines
-    lines = []
-
-    if plan.is_complete and failed == 0:
-        lines.append(f"[green]✅ {completed}/{total} steps completed successfully![/green]")
-    elif failed > 0:
-        lines.append(f"[yellow]⚠️ {completed}/{total} steps completed, {failed} failed[/yellow]")
-    else:
-        lines.append(f"[blue]📋 {completed}/{total} steps completed[/blue]")
-
-    # Timing
-    lines.append("")
-    lines.append(f"[bold]Total time:[/bold] {_format_duration(total_time)}")
-
-    # Per-step breakdown
-    if completed > 0:
-        avg = plan.avg_step_duration
-        if avg:
-            lines.append(f"[dim]Avg per step: {_format_duration(avg)}[/dim]")
-
-    # Token usage (if tracked)
-    if plan.total_tokens > 0:
-        lines.append(f"[bold]Tokens used:[/bold] {plan.total_tokens:,}")
-
-    # Determine panel style
-    if plan.is_complete and failed == 0:
-        title = "✅ Plan Complete"
-        border = "green"
-    elif failed > 0:
-        title = "⚠️ Plan Incomplete"
-        border = "yellow"
-    else:
-        title = "📋 Progress"
-        border = "blue"
-
-    console.print(
-        Panel(
-            "\n".join(lines),
-            title=title,
-            border_style=border,
-        )
-    )
-
-
-class FleetTaskSpec(BaseModel):
-    """Shared task schema for fleet JSON and TOML configs."""
-
-    model_config = ConfigDict(extra="forbid")
-
-    id: str | None = None
-    prompt: str
-    depends_on: list[str] = Field(default_factory=list)
-    model: Model | None = None
-    reasoning_effort: ReasoningEffort | None = None
-    cwd: str | None = None
-    on_dependency_failure: str = "block"
-    exclude_tools: list[str] = Field(default_factory=list)
-    skills: list[str] | None = None
-    skills_dirs: list[str] = Field(default_factory=list)
-    mcp_servers: dict[str, Any] | list[dict[str, Any]] | None = None
-    timeout_sec: float | None = None
-
-    @field_validator("id")
-    @classmethod
-    def _validate_id(cls, value: str | None) -> str | None:
-        if value is None:
-            return None
-        if not value.strip():
-            raise ValueError("must be a non-empty string")
-        return value.strip()
-
-    @field_validator("prompt")
-    @classmethod
-    def _validate_prompt(cls, value: str) -> str:
-        if not isinstance(value, str) or not value.strip():
-            raise ValueError("must be a non-empty string")
-        return value
-
-    @field_validator("depends_on")
-    @classmethod
-    def _validate_depends_on(cls, value: list[str]) -> list[str]:
-        if any(not isinstance(dep, str) or not dep.strip() for dep in value):
-            raise ValueError("must be a list of non-empty strings")
-        return value
-
-    @field_validator("reasoning_effort", mode="before")
-    @classmethod
-    def _parse_reasoning_effort(cls, value: Any) -> Any:
-        if value is None:
-            return None
-        if isinstance(value, ReasoningEffort):
-            return value
-        if not isinstance(value, str):
-            return value
-        parsed = parse_reasoning_effort(value)
-        if parsed is None:
-            valid = ", ".join(r.value for r in ReasoningEffort)
-            raise ValueError(f"invalid value '{value}'. Valid: {valid}")
-        return parsed
-
-    @field_validator("on_dependency_failure", mode="before")
-    @classmethod
-    def _validate_on_dependency_failure(cls, value: Any) -> str:
-        if value is None:
-            return "block"
-        if not isinstance(value, str):
-            raise ValueError("must be a string ('block' or 'continue')")
-        normalized = value.strip().lower()
-        if normalized not in {"block", "continue"}:
-            raise ValueError("must be 'block' or 'continue'")
-        return normalized
-
-    @field_validator("exclude_tools", mode="before")
-    @classmethod
-    def _parse_exclude_tools(cls, value: Any) -> Any:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [item.strip() for item in value.split(",") if item.strip()]
-        return value
-
-    @field_validator("exclude_tools")
-    @classmethod
-    def _validate_exclude_tools(cls, value: list[str]) -> list[str]:
-        if any(not isinstance(tool, str) or not tool.strip() for tool in value):
-            raise ValueError("must be a list of non-empty strings")
-        return [tool.strip() for tool in value if tool.strip()]
-
-    @field_validator("skills")
-    @classmethod
-    def _validate_skills(cls, value: list[str] | None) -> list[str] | None:
-        if value is None:
-            return None
-        if any(not isinstance(skill, str) or not skill.strip() for skill in value):
-            raise ValueError("must be a list of non-empty strings")
-        return value
-
-    @field_validator("skills_dirs", mode="before")
-    @classmethod
-    def _parse_skills_dirs(cls, value: Any) -> Any:
-        if value is None:
-            return []
-        if isinstance(value, str):
-            return [value]
-        return value
-
-    @field_validator("skills_dirs")
-    @classmethod
-    def _validate_skills_dirs(cls, value: list[str]) -> list[str]:
-        if any(not isinstance(path, str) or not path.strip() for path in value):
-            raise ValueError("must be a list of non-empty strings")
-        return [path.strip() for path in value if path.strip()]
-
-    @field_validator("mcp_servers")
-    @classmethod
-    def _validate_mcp_servers(
-        cls,
-        value: dict[str, Any] | list[dict[str, Any]] | None,
-    ) -> dict[str, Any] | list[dict[str, Any]] | None:
-        if value is None:
-            return None
-        if isinstance(value, list):
-            if any(not isinstance(server, dict) for server in value):
-                raise ValueError("must be a list of objects")
-            return value
-        if not isinstance(value, dict):
-            raise ValueError("must be an object or list of objects")
-        return value
-
-    @field_validator("timeout_sec")
-    @classmethod
-    def _validate_timeout(cls, value: float | None) -> float | None:
-        if value is None:
-            return None
-        if value <= 0:
-            raise ValueError("must be greater than zero")
-        return float(value)
-
-
-def _format_fleet_spec_error(exc: ValidationError, idx: int) -> str:
-    """Convert pydantic errors into existing CLI-style task errors."""
-    err = exc.errors(include_url=False)[0]
-    loc = ".".join(str(part) for part in err.get("loc", ()))
-    loc_suffix = f".{loc}" if loc else ""
-    return f"tasks[{idx}]{loc_suffix} {err.get('msg', 'is invalid')}"
-
-
-def _parse_fleet_task_specs(raw_tasks: Any, *, key_name: str = "tasks") -> list[FleetTask]:
-    """Parse/validate task rows from JSON or TOML using one shared schema."""
-    from copex.fleet import DependencyFailurePolicy, FleetTask
-
-    if raw_tasks is None:
-        raise ValueError(f"Fleet config missing required '{key_name}' list")
-    if not isinstance(raw_tasks, list):
-        raise ValueError(f"Fleet config '{key_name}' must be a list")
-    if not raw_tasks:
-        raise ValueError(f"Fleet config '{key_name}' list is empty")
-
-    tasks: list[FleetTask] = []
-    seen_ids: set[str] = set()
-    for idx, task_data in enumerate(raw_tasks):
-        if not isinstance(task_data, dict):
-            raise ValueError(f"tasks[{idx}] must be an object")
-
-        try:
-            spec = FleetTaskSpec.model_validate(task_data)
-        except ValidationError as exc:
-            raise ValueError(_format_fleet_spec_error(exc, idx)) from exc
-
-        task_id = spec.id or f"task-{idx + 1}"
-        if task_id in seen_ids:
-            raise ValueError(f"Duplicate task id in fleet config: '{task_id}'")
-        seen_ids.add(task_id)
-
-        tasks.append(
-            FleetTask(
-                id=task_id,
-                prompt=spec.prompt,
-                depends_on=spec.depends_on,
-                model=spec.model,
-                reasoning_effort=spec.reasoning_effort,
-                cwd=spec.cwd,
-                skills=spec.skills,
-                exclude_tools=spec.exclude_tools,
-                mcp_servers=spec.mcp_servers,
-                timeout_sec=spec.timeout_sec,
-                skills_dirs=spec.skills_dirs,
-                on_dependency_failure=DependencyFailurePolicy(spec.on_dependency_failure),
-            )
-        )
-
-    return tasks
-
-
-@app.command("fleet")
-def fleet_command(
-    prompts: Annotated[
-        list[str] | None, typer.Argument(help="Task prompts to run in parallel")
-    ] = None,
-    file: Annotated[
-        Path | None, typer.Option("--file", "-f", help="TOML or JSONL file with task definitions")
-    ] = None,
-    config_file: Annotated[
-        Path | None, typer.Option("--config", help="JSON config file with task definitions")
-    ] = None,
-    max_concurrent: Annotated[
-        int, typer.Option("--max-concurrent", help="Max concurrent tasks")
-    ] = 5,
-    parallel: Annotated[
-        int | None, typer.Option("--parallel", help="Max parallel tasks (alias for --max-concurrent)")
-    ] = None,
-    fail_fast: Annotated[
-        bool, typer.Option("--fail-fast", help="Stop all tasks on first failure")
-    ] = False,
-    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
-    context_budget: Annotated[
-        int | None,
-        typer.Option("--context-budget", help="Override context window budget in tokens"),
-    ] = None,
-    reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
-    mcp_config: Annotated[
-        Path | None, typer.Option("--mcp-config", help="Path to MCP config JSON file")
-    ] = None,
-    shared_context: Annotated[
-        str | None, typer.Option("--shared-context", help="Context prepended to all tasks")
-    ] = None,
-    timeout: Annotated[
-        float, typer.Option("--timeout", help="Per-task timeout in seconds")
-    ] = 600.0,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Print full task outputs after completion")
-    ] = False,
-    output_dir: Annotated[
-        Path | None,
-        typer.Option("--output-dir", "-o", help="Directory to save each task result as a file"),
-    ] = None,
-    artifact: Annotated[
-        Path | None,
-        typer.Option("--artifact", help="Write run artifact JSON"),
-    ] = None,
-    git_finalize: Annotated[
-        bool,
-        typer.Option(
-            "--git-finalize/--no-git-finalize",
-            help="Stage and commit all changes after fleet completes (auto-detected, enabled by default)",
-        ),
-    ] = True,
-    git_message: Annotated[
-        str | None,
-        typer.Option("--git-message", help="Commit message for git finalize"),
-    ] = None,
-    skills: Annotated[
-        list[str] | None,
-        typer.Option("--skills", help="Skill directories (.md files) to prepend to system prompt"),
-    ] = None,
-    exclude_tools: Annotated[
-        str | None,
-        typer.Option(
-            "--exclude-tools",
-            help="Comma-separated tool patterns to exclude per task (e.g. shell(rm))",
-        ),
-    ] = None,
-    dry_run: Annotated[
-        bool,
-        typer.Option(
-            "--dry-run",
-            is_flag=True,
-            help="Preview fleet actions without executing",
-        ),
-    ] = False,
-    approval_dry_run: Annotated[
-        bool,
-        typer.Option(
-            "--approval-dry-run",
-            is_flag=True,
-            help="Show file change diffs without applying them during execution",
-        ),
-    ] = False,
-    auto_approve: Annotated[
-        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
-    ] = False,
-    approve: Annotated[
-        bool, typer.Option("--approve", help="Prompt before each file change")
-    ] = False,
-    audit: Annotated[
-        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
-    ] = False,
-    commit_msg: Annotated[
-        str | None,
-        typer.Option(
-            "--commit-msg",
-            "-cm",
-            help="Git commit message (used after successful build; implies --git-finalize)",
-        ),
-    ] = None,
-    retry: Annotated[
-        int,
-        typer.Option("--retry", "-R", help="Retry N times on build failure after fleet completes"),
-    ] = 0,
-    progress: Annotated[
-        bool,
-        typer.Option("--progress", "-P", help="Show real-time file change progress"),
-    ] = False,
-    worktree: Annotated[
-        bool,
-        typer.Option("--worktree", "-w", is_flag=True, help="Run each task in an isolated git worktree"),
-    ] = False,
-) -> None:
-    """
-    Run multiple tasks in parallel with fleet execution.
-
-    Examples:
-        copex fleet "Write tests" "Fix linting" "Update docs"
-        copex fleet --file tasks.toml
-        copex fleet -f tasks.jsonl --parallel 3
-        copex fleet --config tasks.json
-        copex fleet "Task A" "Task B" --max-concurrent 3 --fail-fast
-    """
-    if config_file and (prompts or file):
-        console.print("[red]Error: Use --config without prompts or --file[/red]")
-        raise typer.Exit(1) from None
-    if not prompts and not file and not config_file:
-        console.print("[red]Error: Provide task prompts, --file, or --config[/red]")
-        raise typer.Exit(1) from None
-
-    # --parallel is an alias for --max-concurrent
-    if parallel is not None:
-        max_concurrent = parallel
-
-    effective_model = model or _DEFAULT_MODEL.value
-    try:
-        model_enum = _resolve_cli_model(effective_model)
-        requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
-        normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
-        if warning:
-            console.print(f"[yellow]{warning}[/yellow]")
-
-        config = CopexConfig(model=model_enum, reasoning_effort=normalized_effort)
-        if context_budget is not None:
-            config.context_budget = context_budget
-        if mcp_config:
-            if not mcp_config.exists():
-                console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
-                raise typer.Exit(1) from None
-            config.mcp_config_file = str(mcp_config)
-        _apply_approval_flags(
-            config,
-            auto_approve=auto_approve,
-            approve=approve,
-            dry_run=approval_dry_run,
-            audit=audit,
-            default_auto=True,
-        )
-    except typer.BadParameter as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
-    except ValueError as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
-
-    # --commit-msg implies git finalize with the given message
-    if commit_msg:
-        git_finalize = True
-        git_message = commit_msg
-
-    # --dry-run: preview what fleet would do without executing
-    if dry_run:
-        from rich.table import Table
-
-        from copex.fleet import FleetTask as _FT
-
-        # Build task list for preview (same logic as _run_fleet)
-        preview_tasks: list[_FT] = []
-        if config_file:
-            try:
-                preview_tasks = _parse_fleet_task_specs(
-                    json.loads(config_file.read_text()), key_name="tasks"
-                )
-            except Exception:
-                try:
-                    preview_tasks = _load_fleet_json_config(config_file)
-                except Exception as exc:
-                    console.print(f"[red]Error loading config: {exc}[/red]")
-                    raise typer.Exit(1) from None
-        elif file:
-            if file.suffix == ".jsonl":
-                try:
-                    from copex.multi_fleet import load_jsonl_tasks
-
-                    preview_tasks = load_jsonl_tasks(file)
-                except ValueError as exc:
-                    console.print(f"[red]Error loading JSONL: {exc}[/red]")
-                    raise typer.Exit(1) from None
-            else:
-                try:
-                    _, preview_tasks = _load_fleet_toml_config(file)
-                except ValueError as exc:
-                    console.print(f"[red]Error loading TOML: {exc}[/red]")
-                    raise typer.Exit(1) from None
-        for i, prompt in enumerate(prompts or []):
-            preview_tasks.append(_FT(id=f"task-{i + 1}", prompt=prompt))
-
-        console.print(
-            Panel(
-                f"[bold]Model:[/bold] {model_enum.value}\n"
-                f"[bold]Reasoning effort:[/bold] {normalized_effort.value}\n"
-                f"[bold]Max concurrent:[/bold] {max_concurrent}\n"
-                f"[bold]Fail fast:[/bold] {fail_fast}\n"
-                f"[bold]Timeout:[/bold] {timeout:.0f}s\n"
-                f"[bold]Git finalize:[/bold] {git_finalize}"
-                + (f"  →  [cyan]{git_message}[/cyan]" if git_message else ""),
-                title="🔍 Dry Run — Fleet Configuration",
-                border_style="yellow",
-            )
-        )
-
-        tbl = Table(title="Tasks", expand=True)
-        tbl.add_column("ID", style="cyan", no_wrap=True)
-        tbl.add_column("Prompt", max_width=70)
-        tbl.add_column("Model Override", style="dim")
-        tbl.add_column("Depends On", style="dim")
-        for t in preview_tasks:
-            tbl.add_row(
-                t.id,
-                t.prompt[:70],
-                t.model or "—",
-                ", ".join(t.depends_on) if t.depends_on else "—",
-            )
-        console.print(tbl)
-        console.print("\n[yellow bold]DRY RUN: No changes made[/yellow bold]")
-        raise typer.Exit(0)
-
-    asyncio.run(
-        _run_fleet(
-            config=config,
-            prompts=prompts or [],
-            file=file,
-            config_file=config_file,
-            max_concurrent=max_concurrent,
-            fail_fast=fail_fast,
-            shared_context=shared_context,
-            timeout=timeout,
-            verbose=verbose,
-            output_dir=output_dir,
-            artifact_path=artifact,
-            git_finalize=git_finalize,
-            git_message=git_message,
-            skills=skills or [],
-            exclude_tools=_parse_exclude_tools(exclude_tools),
-            retry=retry,
-            progress=progress,
-            worktree=worktree,
-        )
-    )
-
-
-def _build_council_tasks(
-    task: str,
-    *,
-    investigator_model: Model | None = None,
-    codex_model: Model | None = None,
-    gemini_model: Model | None = None,
-    opus_model: Model | None = None,
-    chair_model: Model | None = None,
-    reasoning_effort: ReasoningEffort = ReasoningEffort.HIGH,
-    debate: bool = False,
-    preset: str | None = None,
-    escalate: bool = False,
-) -> list[FleetTask]:
-    """Create the council workflow task graph with enhancements.
-
-    Args:
-        task: The task/problem for the council
-        investigator_model: Override model for all 3 investigators
-        codex_model: Override model for Codex investigator
-        gemini_model: Override model for Gemini investigator
-        opus_model: Override model for Opus investigator
-        chair_model: Model for chair (default: claude-opus-4.6)
-        reasoning_effort: Reasoning effort for all tasks
-        debate: Enable debate rounds (investigators revise after seeing others)
-        preset: Specialist preset (security/architecture/refactor/review)
-        escalate: Enable tie-breaker escalation on uncertainty
-    """
-    from copex.council import CouncilConfig, CouncilPreset, build_council_tasks
-
-    # Parse preset
-    council_preset = None
-    if preset:
-        try:
-            council_preset = CouncilPreset(preset.lower())
-        except ValueError:
-            valid = ", ".join(p.value for p in CouncilPreset)
-            console.print(f"[yellow]Warning: Invalid preset '{preset}'. Valid: {valid}[/yellow]")
-
-    config = CouncilConfig(
-        investigator_model=investigator_model,
-        codex_model=codex_model,
-        gemini_model=gemini_model,
-        opus_model=opus_model,
-        chair_model=chair_model or Model.CLAUDE_OPUS_4_6,
-        reasoning_effort=reasoning_effort,
-        debate=debate,
-        preset=council_preset,
-        escalate=escalate,
-    )
-
-    return build_council_tasks(task, config)
-
-
-@app.command("council")
-def council_command(
-    task: Annotated[str, typer.Argument(help="Task/problem for the model council")],
-    max_concurrent: Annotated[
-        int, typer.Option("--max-concurrent", help="Max concurrent tasks")
-    ] = 3,
-    timeout: Annotated[
-        float, typer.Option("--timeout", help="Per-task timeout in seconds")
-    ] = 900.0,
-    shared_context: Annotated[
-        str | None, typer.Option("--shared-context", help="Context prepended to all tasks")
-    ] = None,
-    mcp_config: Annotated[
-        Path | None, typer.Option("--mcp-config", help="Path to MCP config JSON file")
-    ] = None,
-    verbose: Annotated[
-        bool, typer.Option("--verbose", "-v", help="Print full task outputs after completion")
-    ] = False,
-    output_dir: Annotated[
-        Path | None,
-        typer.Option("--output-dir", "-o", help="Directory to save each task result as a file"),
-    ] = None,
-    artifact: Annotated[
-        Path | None,
-        typer.Option("--artifact", help="Write run artifact JSON"),
-    ] = None,
-    git_finalize: Annotated[
-        bool,
-        typer.Option(
-            "--git-finalize/--no-git-finalize",
-            help="Stage and commit all changes after council completes",
-        ),
-    ] = True,
-    git_message: Annotated[
-        str | None,
-        typer.Option("--git-message", help="Commit message for git finalize"),
-    ] = None,
-    skills: Annotated[
-        list[str] | None,
-        typer.Option("--skills", help="Skill directories (.md files) to prepend to system prompt"),
-    ] = None,
-    exclude_tools: Annotated[
-        str | None,
-        typer.Option(
-            "--exclude-tools",
-            help="Comma-separated tool patterns to exclude per task (e.g. shell(rm))",
-        ),
-    ] = None,
-    # New council enhancement options
-    investigator_model: Annotated[
-        str | None,
-        typer.Option(
-            "--investigator-model",
-            help="Model for all 3 investigators (overrides defaults)",
-        ),
-    ] = None,
-    codex_model: Annotated[
-        str | None,
-        typer.Option("--codex-model", help="Model for Codex investigator"),
-    ] = None,
-    gemini_model: Annotated[
-        str | None,
-        typer.Option("--gemini-model", help="Model for Gemini investigator"),
-    ] = None,
-    opus_model: Annotated[
-        str | None,
-        typer.Option("--opus-model", help="Model for Opus investigator (not chair)"),
-    ] = None,
-    chair_model: Annotated[
-        str | None,
-        typer.Option("--chair-model", help="Model for chair (default: claude-opus-4.6)"),
-    ] = None,
-    reasoning: Annotated[
-        str | None,
-        typer.Option(
-            "-r", "--reasoning", help="Reasoning effort for all tasks (low/medium/high/xhigh)"
-        ),
-    ] = None,
-    debate: Annotated[
-        bool,
-        typer.Option(
-            "--debate/--no-debate",
-            help="Enable debate round (investigators revise after seeing others)",
-        ),
-    ] = False,
-    preset: Annotated[
-        str | None,
-        typer.Option(
-            "--preset",
-            help="Specialist preset: security, architecture, refactor, review",
-        ),
-    ] = None,
-    escalate: Annotated[
-        bool,
-        typer.Option(
-            "--escalate/--no-escalate", help="Enable tie-breaker escalation on uncertainty"
-        ),
-    ] = False,
-) -> None:
-    """Run a council workflow: Codex + Gemini + Opus, with Opus as chair.
-
-    Enhanced council features:
-
-    \b
-    MODEL SELECTION:
-      --investigator-model  Override model for all 3 investigators
-      --codex-model         Override just Codex
-      --gemini-model        Override just Gemini
-      --opus-model          Override just Opus investigator
-      --chair-model         Override chair model (default: claude-opus-4.6)
-
-    \b
-    DEBATE ROUNDS:
-      --debate              After initial opinions, each investigator sees others'
-                            responses and can revise their position
-
-    \b
-    SPECIALIST PRESETS:
-      --preset security      Focus on vulnerabilities, auth, injection
-      --preset architecture  Focus on patterns, scaling, modularity
-      --preset refactor      Focus on code quality, DRY, naming
-      --preset review        Balanced code review
-
-    \b
-    TIE-BREAKER:
-      --escalate            If chair is uncertain (confidence < 0.7), re-run
-                            with xhigh reasoning for a definitive answer
-    """
-
-    # Parse model options
-    def parse_model(m: str | None) -> Model | _ResolvedModel | None:
-        if m is None:
-            return None
-        try:
-            return _resolve_cli_model(m)
-        except ValueError:
-            console.print(f"[red]Invalid model: {m}[/red]")
-            raise typer.Exit(1) from None
-
-    inv_model = parse_model(investigator_model)
-    cdx_model = parse_model(codex_model)
-    gem_model = parse_model(gemini_model)
-    op_model = parse_model(opus_model)
-    chr_model = parse_model(chair_model)
-
-    # Parse reasoning effort
-    effort = ReasoningEffort.HIGH
-    if reasoning:
-        try:
-            effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
-        except ValueError:
-            console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
-            raise typer.Exit(1) from None
-
-    config = CopexConfig(
-        model=chr_model or Model.CLAUDE_OPUS_4_6,
-        reasoning_effort=effort,
-    )
-    if mcp_config:
-        if not mcp_config.exists():
-            console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
-            raise typer.Exit(1) from None
-        config.mcp_config_file = str(mcp_config)
-
-    council_tasks = _build_council_tasks(
-        task,
-        investigator_model=inv_model,
-        codex_model=cdx_model,
-        gemini_model=gem_model,
-        opus_model=op_model,
-        chair_model=chr_model,
-        reasoning_effort=effort,
-        debate=debate,
-        preset=preset,
-        escalate=escalate,
-    )
-    asyncio.run(
-        _run_fleet(
-            config=config,
-            prompts=[],
-            file=None,
-            config_file=None,
-            max_concurrent=max_concurrent,
-            fail_fast=False,
-            shared_context=shared_context,
-            timeout=timeout,
-            verbose=verbose,
-            output_dir=output_dir,
-            artifact_path=artifact,
-            git_finalize=git_finalize,
-            git_message=git_message,
-            skills=skills or [],
-            exclude_tools=_parse_exclude_tools(exclude_tools),
-            tasks_override=council_tasks,
-        )
-    )
-
-
-def _load_fleet_json_config(path: Path) -> list[FleetTask]:
-    """Load and validate JSON fleet config."""
-    if not path.exists():
-        raise ValueError(f"Config file not found: {path}")
-
-    try:
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
-    except json.JSONDecodeError as exc:
-        raise ValueError(
-            f"Invalid JSON in {path}: {exc.msg} (line {exc.lineno} column {exc.colno})"
-        ) from exc
-
-    if not isinstance(data, dict):
-        raise ValueError("Fleet config must be a JSON object with a top-level 'tasks' list")
-
-    raw_tasks = data.get("tasks")
-    return _parse_fleet_task_specs(raw_tasks, key_name="tasks")
-
-
-def _load_fleet_toml_config(path: Path) -> tuple[dict[str, Any], list[FleetTask]]:
-    """Load TOML fleet config and return (fleet_section, tasks)."""
-    try:
-        import tomllib  # Python 3.11+
-    except ImportError:
-        import tomli as tomllib  # type: ignore
-
-    if not path.exists():
-        raise ValueError(f"File not found: {path}")
-
-    with open(path, "rb") as f:
-        data = tomllib.load(f)
-
-    if not isinstance(data, dict):
-        raise ValueError("Fleet TOML must contain a top-level table/object")
-
-    fleet_section = data.get("fleet", {})
-    if not isinstance(fleet_section, dict):
-        raise ValueError("fleet section must be a table/object")
-
-    raw_tasks = data.get("task")
-    if raw_tasks is None:
-        return fleet_section, []
-    if isinstance(raw_tasks, list) and not raw_tasks:
-        return fleet_section, []
-
-    tasks = _parse_fleet_task_specs(raw_tasks, key_name="task")
-    return fleet_section, tasks
-
-
-async def _run_fleet(
-    config: CopexConfig,
-    prompts: list[str],
-    file: Path | None,
-    config_file: Path | None,
-    max_concurrent: int,
-    fail_fast: bool,
-    shared_context: str | None,
-    timeout: float,
-    verbose: bool = False,
-    output_dir: Path | None = None,
-    artifact_path: Path | None = None,
-    git_finalize: bool = True,
-    git_message: str | None = None,
-    skills: list[str] | None = None,
-    exclude_tools: list[str] | None = None,
-    tasks_override: list[FleetTask] | None = None,
-    retry: int = 0,
-    progress: bool = False,
-    worktree: bool = False,
-) -> None:
-    """Run fleet tasks with live progress display."""
-    import threading
-
-    from rich.table import Table
-
-    from copex.fleet import Fleet, FleetConfig, FleetTask
-
-    fleet_config = FleetConfig(
-        max_concurrent=max_concurrent,
-        timeout=timeout,
-        fail_fast=fail_fast,
-        shared_context=shared_context,
-        git_auto_finalize=git_finalize,
-    )
-
-    tasks: list[FleetTask] = []
-    fleet_skills = skills or []
-    fleet_excluded = exclude_tools or []
-
-    def _merge_skills(base: list[str], extra: list[str]) -> list[str]:
-        merged: list[str] = []
-        for path in [*base, *extra]:
-            if path not in merged:
-                merged.append(path)
-        return merged
-
-    def _merge_excludes(base: list[str], extra: list[str]) -> list[str]:
-        merged: list[str] = []
-        for tool in [*base, *extra]:
-            if tool not in merged:
-                merged.append(tool)
-        return merged
-
-    # Direct task graph (used by preset modes like council)
-    if tasks_override is not None:
-        tasks = list(tasks_override)
-        for task in tasks:
-            task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
-            task.exclude_tools = _merge_excludes(
-                fleet_excluded,
-                task.exclude_tools or [],
-            )
-
-    # Load tasks from JSON config file
-    elif config_file:
-        try:
-            tasks = _load_fleet_json_config(config_file)
-        except ValueError as exc:
-            console.print(f"[red]Error: {exc}[/red]")
-            raise typer.Exit(1) from None
-        for task in tasks:
-            task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
-            task.exclude_tools = _merge_excludes(
-                fleet_excluded,
-                task.exclude_tools or [],
-            )
-
-    # Load tasks from TOML or JSONL file
-    elif file:
-        if file.suffix == ".jsonl":
-            # JSONL multi-task file
-            try:
-                from copex.multi_fleet import load_jsonl_tasks
-
-                parsed_tasks = load_jsonl_tasks(file)
-            except ValueError as exc:
-                console.print(f"[red]Error: {exc}[/red]")
-                raise typer.Exit(1) from None
-
-            for task in parsed_tasks:
-                task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
-                task.exclude_tools = _merge_excludes(
-                    fleet_excluded,
-                    task.exclude_tools or [],
-                )
-                tasks.append(task)
-        else:
-            # TOML file
-            try:
-                fleet_section, parsed_tasks = _load_fleet_toml_config(file)
-            except ValueError as exc:
-                console.print(f"[red]Error: {exc}[/red]")
-                raise typer.Exit(1) from None
-
-            # Apply fleet-level config from file
-            if "max_concurrent" in fleet_section:
-                fleet_config.max_concurrent = fleet_section["max_concurrent"]
-            if "shared_context" in fleet_section:
-                fleet_config.shared_context = fleet_section["shared_context"]
-            if "timeout" in fleet_section:
-                fleet_config.timeout = fleet_section["timeout"]
-            if "fail_fast" in fleet_section:
-                fleet_config.fail_fast = fleet_section["fail_fast"]
-
-            for task in parsed_tasks:
-                task.skills_dirs = _merge_skills(fleet_skills, task.skills_dirs)
-                task.exclude_tools = _merge_excludes(
-                    fleet_excluded,
-                    task.exclude_tools or [],
-                )
-                tasks.append(task)
-
-    # Add CLI prompt tasks
-    if tasks_override is None and not config_file:
-        for i, prompt in enumerate(prompts):
-            tasks.append(
-                FleetTask(
-                    id=f"task-{i + 1}",
-                    prompt=prompt,
-                    skills_dirs=fleet_skills,
-                    exclude_tools=fleet_excluded,
-                )
-            )
-
-    if not tasks:
-        console.print("[red]No tasks to run[/red]")
-        raise typer.Exit(1) from None
-
-    try:
-        from copex.repo_map import RepoMap
-
-        repo_root = Path(config.cwd) if config.cwd else Path.cwd()
-        repo_map = RepoMap(repo_root)
-        repo_map.refresh(force=False)
-        for task in tasks:
-            base_prompt = task.prompt
-            relevant_context = repo_map.relevant_context(
-                base_prompt,
-                max_files=6,
-                max_symbols_per_file=6,
-            )
-            if relevant_context:
-                task.prompt = f"{relevant_context}\n\n{base_prompt}"
-    except Exception as exc:
-        console.print(f"[dim]Repo map unavailable for fleet: {exc}[/dim]")
-
-    # Track statuses for live display
-    statuses: dict[str, str] = {t.id: "pending" for t in tasks}
-
-    def on_status(task_id: str, status: str) -> None:
-        statuses[task_id] = status
-
-    def build_table() -> Table:
-        table = Table(title="Fleet Progress", expand=True)
-        table.add_column("Task", style="cyan", no_wrap=True)
-        table.add_column("Status", justify="center")
-        table.add_column("Prompt", max_width=60)
-
-        task_map = {t.id: t for t in tasks}
-        for task_id, status in statuses.items():
-            if status == "pending":
-                badge = "[dim]⏳ pending[/dim]"
-            elif status == "running":
-                badge = "[yellow]⚡ running[/yellow]"
-            elif status == "done":
-                badge = "[green]✅ done[/green]"
-            elif status == "failed":
-                badge = "[red]❌ failed[/red]"
-            elif status == "skipped":
-                badge = "[dim]⏭️  skipped[/dim]"
-            else:
-                badge = f"[dim]{status}[/dim]"
-            prompt_text = task_map[task_id].prompt[:60]
-            table.add_row(task_id, badge, prompt_text)
-        return table
-
-    console.print(
-        Panel(
-            f"[bold]Running {len(tasks)} task(s)[/bold] • "
-            f"max concurrent: {fleet_config.max_concurrent} • "
-            f"timeout: {fleet_config.timeout:.0f}s",
-            title="🚀 Fleet",
-            border_style="blue",
-        )
-    )
-
-    start_time = time.time()
-
-    # --progress: background thread that watches for file changes
-    _progress_stop = threading.Event()
-    _progress_thread: threading.Thread | None = None
-
-    if progress:
-        cwd = Path(config.cwd) if config.cwd else Path.cwd()
-
-        def _snapshot_files(root: Path) -> dict[Path, tuple[float, int]]:
-            """Return {path: (mtime, line_count)} for tracked files."""
-            snap: dict[Path, tuple[float, int]] = {}
-            for p in root.rglob("*"):
-                if p.is_file() and ".git" not in p.parts and not p.name.startswith("."):
-                    try:
-                        st = p.stat()
-                        with open(p, encoding="utf-8", errors="replace") as f:
-                            line_count = sum(1 for _ in f)
-                        snap[p] = (st.st_mtime, line_count)
-                    except (OSError, UnicodeDecodeError):
-                        pass
-            return snap
-
-        _baseline = _snapshot_files(cwd)
-
-        def _progress_worker() -> None:
-            while not _progress_stop.wait(timeout=3.0):
-                elapsed = time.time() - start_time
-                mins, secs = divmod(int(elapsed), 60)
-                current = _snapshot_files(cwd)
-                for p, (mtime, lines) in current.items():
-                    base = _baseline.get(p)
-                    if base is None:
-                        rel = p.relative_to(cwd)
-                        console.print(
-                            f"  [dim][{mins}m {secs:02d}s] Created: {rel} (+{lines} lines)[/dim]"
-                        )
-                        _baseline[p] = (mtime, lines)
-                    elif mtime > base[0]:
-                        diff = lines - base[1]
-                        sign = "+" if diff >= 0 else ""
-                        rel = p.relative_to(cwd)
-                        console.print(
-                            f"  [dim][{mins}m {secs:02d}s] Modified: {rel} ({sign}{diff} lines)[/dim]"
-                        )
-                        _baseline[p] = (mtime, lines)
-
-        _progress_thread = threading.Thread(target=_progress_worker, daemon=True)
-        _progress_thread.start()
-
-    # ── Worktree isolation setup ───────────────────────────────────
-    worktree_managers: dict[str, WorktreeManager] = {}  # task_id -> manager  # noqa: F821
-    if worktree:
-        from copex.worktree import WorktreeManager
-
-        repo_root = WorktreeManager.get_repo_root(Path.cwd())
-        if repo_root is None:
-            console.print("[red]Error: --worktree requires a git repository[/red]")
-            raise typer.Exit(1) from None
-        if WorktreeManager.has_uncommitted_changes(repo_root):
-            console.print(
-                "[yellow]Warning: uncommitted changes in working tree. "
-                "Worktrees will be based on HEAD (uncommitted changes won't be included).[/yellow]"
-            )
-        for task in tasks:
-            mgr = WorktreeManager(repo_root=repo_root)
-            create_result = mgr.create_worktree()
-            if not create_result.success:
-                console.print(
-                    f"[red]Failed to create worktree for task '{task.id}': "
-                    f"{create_result.error}[/red]"
-                )
-                # Clean up already-created worktrees
-                for prev_mgr in worktree_managers.values():
-                    prev_mgr.cleanup_worktree()
-                raise typer.Exit(1) from None
-            worktree_managers[task.id] = mgr
-            # Override task cwd to the worktree path
-            task.cwd = str(mgr.worktree_path)
-            console.print(
-                f"  [dim]🌲 Task '{task.id}' → worktree {mgr.worktree_path}[/dim]"
-            )
-
-    async with Fleet(config, fleet_config) as fleet:
-        for task in tasks:
-            fleet.add(
-                task.prompt,
-                task_id=task.id,
-                depends_on=task.depends_on if task.depends_on else None,
-                model=task.model,
-                reasoning_effort=task.reasoning_effort,
-                cwd=task.cwd,
-                skills=task.skills,
-                exclude_tools=task.exclude_tools,
-                mcp_servers=task.mcp_servers,
-                timeout_sec=task.timeout_sec,
-                skills_dirs=task.skills_dirs,
-                on_dependency_failure=task.on_dependency_failure,
-            )
-
-        with Live(build_table(), console=console, refresh_per_second=4) as live:
-
-            async def _run_with_updates() -> list:
-
-                results = await fleet.run(on_status=on_status)
-                # Mark final statuses
-                for r in results:
-                    statuses[r.task_id] = "done" if r.success else "failed"
-                live.update(build_table())
-                return results
-
-            results = await _run_with_updates()
-
-    # ── Worktree merge-back & cleanup ────────────────────────────────
-    if worktree and worktree_managers:
-        merge_failures: list[str] = []
-        for r in results:
-            mgr = worktree_managers.get(r.task_id)
-            if mgr is None:
-                continue
-            if r.success:
-                commit_res = mgr.commit_in_worktree(
-                    f"fleet({r.task_id}): apply changes"
-                )
-                if commit_res.success and commit_res.commit_hash:
-                    merge_res = mgr.merge_back()
-                    if merge_res.success:
-                        console.print(
-                            f"  [green]✅ Task '{r.task_id}' merged back "
-                            f"({commit_res.commit_hash[:8]})[/green]"
-                        )
-                    else:
-                        merge_failures.append(
-                            f"Task '{r.task_id}': {merge_res.error}"
-                        )
-                        console.print(
-                            f"  [red]❌ Task '{r.task_id}' merge failed: "
-                            f"{merge_res.error}[/red]"
-                        )
-                elif commit_res.error == "No changes to commit":
-                    console.print(
-                        f"  [dim]Task '{r.task_id}': no changes to merge[/dim]"
-                    )
-                else:
-                    console.print(
-                        f"  [red]❌ Task '{r.task_id}' commit failed: "
-                        f"{commit_res.error}[/red]"
-                    )
-            else:
-                console.print(
-                    f"  [dim]Task '{r.task_id}' failed — skipping merge[/dim]"
-                )
-
-            # Always clean up
-            mgr.cleanup_worktree()
-
-        if merge_failures:
-            console.print(
-                Panel(
-                    "\n".join(merge_failures),
-                    title="⚠️  Worktree Merge Failures",
-                    border_style="red",
-                )
-            )
-
-    # Stop progress watcher
-    if _progress_thread is not None:
-        _progress_stop.set()
-        _progress_thread.join(timeout=5.0)
-
-    # --retry: detect build commands and retry on failure
-    if retry > 0:
-        _BUILD_CMDS = [
-            "lake build", "cargo build", "npm run build", "yarn build",
-            "make", "go build", "dotnet build", "gradle build",
-            "mvn compile", "tsc", "pnpm build",
-        ]
-
-        def _detect_build_cmd() -> str | None:
-            """Try to detect a build command from task prompts or common project files."""
-            cwd_path = Path(config.cwd) if config.cwd else Path.cwd()
-            # Check for lakefile / Cargo.toml / package.json etc.
-            detectors: list[tuple[str, str]] = [
-                ("lakefile.lean", "lake build"),
-                ("Cargo.toml", "cargo build"),
-                ("package.json", "npm run build"),
-                ("Makefile", "make"),
-                ("go.mod", "go build ./..."),
-                ("build.gradle", "gradle build"),
-                ("pom.xml", "mvn compile"),
-                ("tsconfig.json", "tsc --noEmit"),
-            ]
-            for marker, cmd in detectors:
-                if (cwd_path / marker).exists():
-                    return cmd
-            return None
-
-        build_cmd = _detect_build_cmd()
-        if build_cmd:
-            console.print(f"[blue]🔨 Detected build command: {build_cmd}[/blue]")
-            for attempt in range(1, retry + 1):
-                console.print(f"[yellow]Running build check ({attempt}/{retry})…[/yellow]")
-                build_result = subprocess.run(
-                    build_cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=config.cwd or None,
-                )
-                if build_result.returncode == 0:
-                    console.print("[green]✅ Build succeeded![/green]")
-                    break
-                else:
-                    errors_text = (build_result.stderr or build_result.stdout or "unknown error").strip()
-                    # Truncate very long error output
-                    if len(errors_text) > 4000:
-                        errors_text = errors_text[:4000] + "\n... (truncated)"
-                    console.print(
-                        f"[red]Build failed (attempt {attempt}/{retry}).[/red]\n"
-                        f"[dim]{errors_text[:500]}[/dim]"
-                    )
-                    if attempt >= retry:
-                        console.print("[red]❌ All retry attempts exhausted. Build still failing.[/red]")
-                        break
-                    # Use fleet to fix the errors
-                    fix_prompt = (
-                        f"Build failed with errors:\n{errors_text}\n\n"
-                        f"Please fix these errors. The build command is: {build_cmd}"
-                    )
-                    console.print(f"[yellow]Retry {attempt}/{retry}: fixing build errors…[/yellow]")
-                    async with Fleet(config, fleet_config) as retry_fleet:
-                        retry_fleet.add(fix_prompt, task_id=f"retry-{attempt}")
-                        retry_results = await retry_fleet.run()
-                        for r in retry_results:
-                            if not r.success:
-                                console.print(f"[red]Retry task failed: {r.error}[/red]")
-        else:
-            console.print("[dim]--retry: no build system detected, skipping build check[/dim]")
-
-    total_time = time.time() - start_time
-    successes = sum(1 for r in results if r.success)
-    failures = len(results) - successes
-    git_artifact: dict[str, Any] | None = None
-
-    # Summary
-    summary_lines = [
-        f"[green]✅ Succeeded: {successes}[/green]",
-        f"[red]❌ Failed:    {failures}[/red]",
-        f"[blue]⏱  Duration:  {_format_duration(total_time)}[/blue]",
-    ]
-
-    if failures > 0:
-        summary_lines.append("")
-        for r in results:
-            if not r.success:
-                err = str(r.error) if r.error else "unknown error"
-                summary_lines.append(f"  [red]• {r.task_id}: {err}[/red]")
-
-    console.print(
-        Panel(
-            "\n".join(summary_lines),
-            title="📊 Fleet Summary",
-            border_style="green" if failures == 0 else "red",
-        )
-    )
-
-    # Print full task outputs when --verbose is set
-    if verbose:
-        for r in results:
-            content = r.response.content if r.response else None
-            if content:
-                console.print(
-                    Panel(
-                        content,
-                        title=f"📝 {r.task_id}",
-                        border_style="green" if r.success else "red",
-                    )
-                )
-
-    # Save each task result to a file when --output-dir is set
-    if output_dir:
-        output_dir.mkdir(parents=True, exist_ok=True)
-        for r in results:
-            content = r.response.content if r.response else ""
-            out_file = output_dir / f"{r.task_id}.md"
-            out_file.write_text(content or f"Error: {r.error}")
-        console.print(f"[blue]Results saved to {output_dir}/[/blue]")
-
-    # Git finalize: stage and commit all changes
-    if git_finalize:
-        from copex.git import GitFinalizer
-
-        if not GitFinalizer.is_git_repo():
-            console.print("[dim]Not a git repository — skipping git finalize[/dim]")
-            git_artifact = {"enabled": True, "success": False, "error": "not a git repository"}
-        else:
-            # Auto-generate commit message from task descriptions if not provided
-            if git_message:
-                message = git_message
-            else:
-                task_summaries = [t.prompt[:50] for t in tasks[:5]]
-                desc = "; ".join(task_summaries)
-                if len(tasks) > 5:
-                    desc += f" (+{len(tasks) - 5} more)"
-                message = f"fleet: {desc}"
-
-            console.print("[dim]Detecting changes…[/dim]")
-            finalizer = GitFinalizer(message=message)
-            git_result = await finalizer.finalize()
-            git_artifact = {
-                "enabled": True,
-                "success": bool(git_result.success),
-                "message": message,
-                "commit_hash": git_result.commit_hash,
-                "files_staged": git_result.files_staged,
-                "error": git_result.error,
-            }
-
-            if git_result.success and git_result.commit_hash:
-                console.print(
-                    Panel(
-                        f"[green]Committed {git_result.files_staged} file(s)[/green]\n"
-                        f"[dim]{git_result.commit_hash}[/dim] {message}",
-                        title="🔒 Git Finalize",
-                        border_style="green",
-                    )
-                )
-            elif git_result.success:
-                console.print("[dim]No changes to commit[/dim]")
-            else:
-                console.print(f"[red]Git finalize failed: {git_result.error}[/red]")
-    else:
-        git_artifact = {"enabled": False}
-
-    if artifact_path:
-        result_map = {r.task_id: r for r in results}
-        task_artifacts: list[dict[str, Any]] = []
-
-        total_prompt_tokens = 0
-        total_completion_tokens = 0
-        for task in tasks:
-            result = result_map.get(task.id)
-            response = result.response if result else None
-            prompt_tokens = int(response.prompt_tokens or 0) if response else 0
-            completion_tokens = int(response.completion_tokens or 0) if response else 0
-            total_prompt_tokens += prompt_tokens
-            total_completion_tokens += completion_tokens
-            task_artifacts.append(
-                {
-                    "id": task.id,
-                    "depends_on": task.depends_on,
-                    "on_dependency_failure": (
-                        task.on_dependency_failure.value
-                        if hasattr(task.on_dependency_failure, "value")
-                        else str(task.on_dependency_failure)
-                    ),
-                    "model": (task.model.value if task.model else config.model.value),
-                    "reasoning_effort": (
-                        task.reasoning_effort.value
-                        if task.reasoning_effort
-                        else config.reasoning_effort.value
-                    ),
-                    "status": statuses.get(task.id, "unknown"),
-                    "success": result.success if result else None,
-                    "duration_ms": result.duration_ms if result else None,
-                    "error": str(result.error) if result and result.error else None,
-                    "prompt_tokens": prompt_tokens,
-                    "completion_tokens": completion_tokens,
-                    "usage": response.usage if response else None,
-                    "output_file": (
-                        str((output_dir / f"{task.id}.md").resolve()) if output_dir else None
-                    ),
-                    "content_preview": (
-                        response.content[:500] if response and response.content else None
-                    ),
-                }
-            )
-
-        artifact = {
-            "created_at": datetime.now(timezone.utc).isoformat(),
-            "summary": {
-                "total_tasks": len(tasks),
-                "succeeded": successes,
-                "failed": failures,
-                "duration_seconds": total_time,
-                "prompt_tokens": total_prompt_tokens,
-                "completion_tokens": total_completion_tokens,
-            },
-            "run_config": {
-                "max_concurrent": fleet_config.max_concurrent,
-                "timeout_seconds": fleet_config.timeout,
-                "fail_fast": fleet_config.fail_fast,
-                "shared_context": fleet_config.shared_context,
-            },
-            "git_finalize": git_artifact,
-            "tasks": task_artifacts,
-        }
-
-        artifact_path.parent.mkdir(parents=True, exist_ok=True)
-        artifact_path.write_text(json.dumps(artifact, indent=2), encoding="utf-8")
-        console.print(f"[blue]Run artifact saved to {artifact_path}[/blue]")
-
-    if failures > 0:
-        raise typer.Exit(1) from None
 
 
 @app.command("campaign")
@@ -3735,8 +2062,8 @@ def campaign_command(
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
+        ReasoningEffort, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH,
     timeout: Annotated[
         float, typer.Option("--timeout", help="Per-task timeout in seconds")
     ] = 600.0,
@@ -3775,16 +2102,36 @@ def campaign_command(
 ) -> None:
     """Run a campaign: discover targets, batch them, run fleet waves.
 
-    A campaign orchestrates multi-wave fleet execution:
-      1. Run --discover command to find targets
-      2. Batch targets into groups of --batch-size
-      3. Run each wave as a parallel fleet batch
-      4. Report results; state saved to .copex/campaign.json for resume
+        A campaign orchestrates multi-wave fleet execution:
+          1. Run --discover command to find targets
+          2. Batch targets into groups of --batch-size
+          3. Run each wave as a parallel fleet batch
+          4. Report results; state saved to .copex/campaign.json for resume
 
-    \b
-    Examples:
-        copex campaign --goal "Add type annotations" --discover "find . -name '*.py'" --batch-size 5
-        copex campaign --resume   # resume interrupted campaign
+        
+        Examples:
+            copex campaign --goal "Add type annotations" --discover "find . -name '*.py'" --batch-size 5
+            copex campaign --resume   # resume interrupted campaign
+
+    Args:
+        goal: CLI argument or option value.
+        discover: CLI argument or option value.
+        batch_size: CLI argument or option value.
+        max_concurrent: CLI argument or option value.
+        parallel: CLI argument or option value.
+        model: CLI argument or option value.
+        reasoning: CLI argument or option value.
+        timeout: CLI argument or option value.
+        resume: CLI argument or option value.
+        verbose: CLI argument or option value.
+        git_finalize: CLI argument or option value.
+        git_message: CLI argument or option value.
+        skills: CLI argument or option value.
+        exclude_tools: CLI argument or option value.
+        state_file: CLI argument or option value.
+
+    Returns:
+        None: Command result.
     """
     from copex.campaign import (
         WaveStatus,
@@ -3971,8 +2318,8 @@ def agent_command(
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
+        ReasoningEffort, typer.Option("--reasoning", "-r", help="Reasoning effort level")
+    ] = ReasoningEffort.HIGH,
     max_turns: Annotated[
         int, typer.Option("--max-turns", "-t", help="Maximum agent turns")
     ] = 10,
@@ -4002,14 +2349,31 @@ def agent_command(
 ) -> None:
     """Run an agent loop: prompt → tool calls → respond → repeat.
 
-    The agent sends the prompt, observes tool calls, and continues
-    until the model stops calling tools or max-turns is reached.
-    Designed for machine consumption via --json (JSON Lines output).
+        The agent sends the prompt, observes tool calls, and continues
+        until the model stops calling tools or max-turns is reached.
+        Designed for machine consumption via --json (JSON Lines output).
 
-    Examples:
-        copex agent "Fix the failing test in src/auth.py" --max-turns 5
-        copex agent "Refactor the logger module" --json | jq .
-        echo "Add type hints" | copex agent --stdin --json
+        Examples:
+            copex agent "Fix the failing test in src/auth.py" --max-turns 5
+            copex agent "Refactor the logger module" --json | jq .
+            echo "Add type hints" | copex agent --stdin --json
+
+    Args:
+        prompt: CLI argument or option value.
+        model: CLI argument or option value.
+        reasoning: CLI argument or option value.
+        max_turns: CLI argument or option value.
+        json_output: CLI argument or option value.
+        use_cli: CLI argument or option value.
+        config_file: CLI argument or option value.
+        stdin: CLI argument or option value.
+        auto_approve: CLI argument or option value.
+        approve: CLI argument or option value.
+        dry_run: CLI argument or option value.
+        audit: CLI argument or option value.
+
+    Returns:
+        None: Command result.
     """
     # Load config
     if config_file and config_file.exists():
@@ -4062,6 +2426,38 @@ def agent_command(
     asyncio.run(_run_agent(config, prompt, max_turns=max_turns, json_output=json_output))
 
 
+def _is_squad_worker_json_mode(*, json_output: bool) -> bool:
+    if not json_output:
+        return False
+    return os.environ.get("COPEX_SQUAD_WORKER", "").strip().lower() in {"1", "true", "yes", "on"}
+
+
+def _configure_worker_logging_to_stderr() -> None:
+    for logger_name in ("", "copex"):
+        logger_obj = logging.getLogger(logger_name)
+        for handler in logger_obj.handlers:
+            set_stream = getattr(handler, "setStream", None)
+            if callable(set_stream):
+                try:
+                    set_stream(sys.stderr)
+                except (AttributeError, ValueError):
+                    continue
+
+
+def _format_framed_json(payload: dict[str, Any]) -> str:
+    body = json.dumps(payload, ensure_ascii=False)
+    body_len = len(body.encode("utf-8"))
+    return f"Content-Length: {body_len}\r\n\r\n{body}"
+
+
+def _emit_json_payload(payload: dict[str, Any], *, framed: bool) -> None:
+    if framed:
+        sys.stdout.write(_format_framed_json(payload))
+        sys.stdout.flush()
+        return
+    print(json.dumps(payload, ensure_ascii=False), flush=True)
+
+
 async def _run_agent(
     config: CopexConfig,
     prompt: str,
@@ -4073,13 +2469,16 @@ async def _run_agent(
     from copex.agent import AgentSession
 
     client = make_client(config)
+    worker_json_mode = _is_squad_worker_json_mode(json_output=json_output)
+    if worker_json_mode:
+        _configure_worker_logging_to_stderr()
 
     try:
         session = AgentSession(client, max_turns=max_turns)
         async with session:
             if json_output:
                 async for turn in session.run_streaming(prompt):
-                    print(turn.to_json(), flush=True)
+                    _emit_json_payload(turn.to_dict(), framed=worker_json_mode)
             else:
                 result = await session.run(prompt)
                 for turn in result.turns:
@@ -4104,7 +2503,7 @@ async def _run_agent(
     except Exception as e:
         if json_output:
             error_obj = {"turn": 0, "content": "", "tool_calls": [], "stop_reason": "error", "error": str(e)}
-            print(json.dumps(error_obj), flush=True)
+            _emit_json_payload(error_obj, framed=worker_json_mode)
         else:
             console.print(f"[red]Agent error: {e}[/red]")
         raise typer.Exit(1) from None
@@ -4150,612 +2549,6 @@ def _print_agent_turn(turn: Any) -> None:
     )
 
 
-@app.command("squad")
-def squad_command(
-    args: Annotated[
-        list[str] | None,
-        typer.Argument(help="Task for the squad, or subcommand (status/show/init/add/remove/reset/knowledge)"),
-    ] = None,
-    model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
-    reasoning: Annotated[
-        str, typer.Option("--reasoning", "-r", help="Reasoning effort level")
-    ] = ReasoningEffort.HIGH.value,
-    json_output: Annotated[
-        bool, typer.Option("--json", help="Output JSON result")
-    ] = False,
-    use_cli: Annotated[
-        bool,
-        typer.Option("--use-cli", help="Use CLI subprocess instead of SDK"),
-    ] = False,
-    no_ai: Annotated[
-        bool,
-        typer.Option("--no-ai", help="Skip AI repo analysis, use pattern matching"),
-    ] = False,
-    max_cost: Annotated[
-        float | None,
-        typer.Option("--max-cost", min=0.0, help="Abort if cumulative squad cost exceeds USD limit"),
-    ] = None,
-    max_tokens: Annotated[
-        int | None,
-        typer.Option("--max-tokens", min=1, help="Abort if cumulative squad tokens exceed limit"),
-    ] = None,
-    config_file: Annotated[
-        Path | None, typer.Option("--config", "-c", help="Config file path")
-    ] = None,
-    stdin: Annotated[bool, typer.Option("--stdin", "-i", help="Read prompt from stdin")] = False,
-    auto_approve: Annotated[
-        bool, typer.Option("--auto-approve", help="Apply file changes without prompts")
-    ] = False,
-    approve: Annotated[
-        bool, typer.Option("--approve", help="Prompt before each file change")
-    ] = False,
-    dry_run: Annotated[
-        bool, typer.Option("--dry-run", help="Show file change diffs without applying them")
-    ] = False,
-    audit: Annotated[
-        bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
-    ] = False,
-    force: Annotated[
-        bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
-    ] = False,
-) -> None:
-    """Run a squad or manage the repo .squad file.
-
-    Management subcommands:
-      - status: display parsed squad configuration
-      - show: display .squad content
-      - init: create .squad from AI repo analysis
-      - add/remove: apply natural-language edits to .squad using AI
-      - reset: delete .squad and fall back to dynamic AI analysis
-      - knowledge: show/reset persistent squad knowledge store
-
-    Without a management subcommand, this runs the squad workflow.
-
-    Examples:
-        copex squad "Build a REST API with auth"
-        copex squad status
-        copex squad show
-        copex squad init
-        copex squad add "Add a Security Auditor agent that reviews code for vulnerabilities"
-        copex squad remove "Remove the Docs agent"
-        copex squad reset
-        copex squad knowledge
-        copex squad knowledge reset
-    """
-    raw_args = args or []
-    subcommand = raw_args[0].lower() if raw_args else None
-    if subcommand == "status":
-        if len(raw_args) != 1:
-            console.print("[red]Usage: copex squad status[/red]")
-            raise typer.Exit(1) from None
-        _show_squad_status(json_output=json_output)
-        return
-    if subcommand == "show":
-        if len(raw_args) != 1:
-            console.print("[red]Usage: copex squad show[/red]")
-            raise typer.Exit(1) from None
-        _show_squad_file(json_output=json_output)
-        return
-    if subcommand == "reset":
-        if len(raw_args) != 1:
-            console.print("[red]Usage: copex squad reset[/red]")
-            raise typer.Exit(1) from None
-        _reset_squad_file(json_output=json_output)
-        return
-    if subcommand == "knowledge":
-        action = raw_args[1].lower() if len(raw_args) > 1 else "show"
-        if action == "show":
-            if len(raw_args) not in {1, 2}:
-                console.print("[red]Usage: copex squad knowledge [show][/red]")
-                raise typer.Exit(1) from None
-            _show_squad_knowledge(json_output=json_output)
-            return
-        if action == "reset":
-            if len(raw_args) != 2:
-                console.print("[red]Usage: copex squad knowledge reset[/red]")
-                raise typer.Exit(1) from None
-            _reset_squad_knowledge(json_output=json_output)
-            return
-        console.print("[red]Usage: copex squad knowledge [reset][/red]")
-        raise typer.Exit(1) from None
-
-    # Load config
-    if config_file and config_file.exists():
-        config = CopexConfig.from_file(config_file)
-    else:
-        default_path = CopexConfig.default_path()
-        config = CopexConfig.from_file(default_path) if default_path.exists() else CopexConfig()
-
-    # Override model
-    effective_model = model or _DEFAULT_MODEL.value
-    try:
-        config.model = _resolve_cli_model(effective_model)
-    except ValueError:
-        console.print(f"[red]Invalid model: {effective_model}[/red]")
-        raise typer.Exit(1) from None
-
-    # Reasoning effort
-    try:
-        requested_effort = parse_reasoning_effort(reasoning)
-        if requested_effort is None:
-            raise ValueError(reasoning)
-        normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
-        if warning and not json_output:
-            console.print(f"[yellow]{warning}[/yellow]")
-        config.reasoning_effort = normalized_effort
-    except ValueError:
-        console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
-        raise typer.Exit(1) from None
-
-    if use_cli:
-        config.use_cli = True
-    try:
-        _apply_approval_flags(
-            config,
-            auto_approve=auto_approve,
-            approve=approve,
-            dry_run=dry_run,
-            audit=audit,
-            default_auto=True,
-        )
-    except typer.BadParameter as e:
-        console.print(f"[red]Error: {e}[/red]")
-        raise typer.Exit(1) from None
-
-    if subcommand == "init":
-        if len(raw_args) != 1:
-            console.print("[red]Usage: copex squad init[/red]")
-            raise typer.Exit(1) from None
-        asyncio.run(_init_squad_file(config, json_output=json_output))
-        return
-
-    if subcommand in {"add", "remove"}:
-        request = " ".join(raw_args[1:]).strip()
-        if not request:
-            console.print(f"[red]Usage: copex squad {subcommand} \"<request>\"[/red]")
-            raise typer.Exit(1) from None
-        asyncio.run(
-            _update_squad_file(config, request, action=subcommand, json_output=json_output)
-        )
-        return
-
-    prompt = " ".join(raw_args).strip() if raw_args else None
-
-    # Read prompt
-    if stdin:
-        if not sys.stdin.isatty():
-            prompt = sys.stdin.read().strip()
-        else:
-            console.print("[yellow]Enter prompt (Ctrl+D to submit):[/yellow]")
-            prompt = sys.stdin.read().strip()
-
-    if prompt is None and not stdin:
-        if sys.stdin.isatty():
-            console.print("[yellow]Enter prompt (Ctrl+D to submit):[/yellow]")
-        prompt = sys.stdin.read().strip()
-
-    if not prompt:
-        console.print("[red]No prompt provided[/red]")
-        raise typer.Exit(1) from None
-
-    asyncio.run(
-        _run_squad(
-            config,
-            prompt,
-            json_output=json_output,
-            no_ai=no_ai,
-            max_cost=max_cost,
-            max_tokens=max_tokens,
-            auto_approve_gates=auto_approve,
-            force=force,
-        )
-    )
-
-
-def _squad_dir_path(path: Path | None = None) -> Path:
-    root = path or Path.cwd()
-    return root / ".squad"
-
-
-def _squad_file_path(path: Path | None = None) -> Path:
-    return _squad_dir_path(path) / "team.toml"
-
-
-def _legacy_squad_file_path(path: Path | None = None) -> Path:
-    root = path or Path.cwd()
-    return root / ".squad"
-
-
-def _show_squad_file(*, json_output: bool = False) -> None:
-    squad_path = _squad_file_path()
-    legacy_path = _legacy_squad_file_path()
-    selected_path: Path | None = None
-    if squad_path.is_file():
-        selected_path = squad_path
-    elif legacy_path.is_file():
-        selected_path = legacy_path
-
-    if selected_path is None:
-        if json_output:
-            print(json.dumps({"exists": False, "path": str(squad_path)}), flush=True)
-        else:
-            console.print("[yellow]No .squad file found.[/yellow]")
-        return
-
-    content = selected_path.read_text(encoding="utf-8")
-    if json_output:
-        print(
-            json.dumps({"exists": True, "path": str(selected_path), "content": content}, ensure_ascii=False),
-            flush=True,
-        )
-    else:
-        console.print(f"[cyan]{selected_path}[/cyan]")
-        console.print(content)
-
-
-def _show_squad_status(*, json_output: bool = False) -> None:
-    from rich.table import Table
-
-    from copex.squad_team import SquadTeam
-
-    team = SquadTeam.load_squad_file(Path.cwd())
-    squad_path = _squad_file_path()
-    if team is None:
-        if json_output:
-            print(json.dumps({"exists": False, "path": str(squad_path)}), flush=True)
-        else:
-            console.print("[yellow]No .squad/team.toml found.[/yellow]")
-        return
-
-    lead = team.get_agent("lead")
-    agents_payload = []
-    for agent in team.agents:
-        agents_payload.append(
-            {
-                "name": agent.name,
-                "role": agent.role,
-                "phase": agent.phase,
-                "retries": int(agent.retries),
-                "subtasks": list(agent.subtasks),
-            }
-        )
-
-    if json_output:
-        print(
-            json.dumps(
-                {
-                    "exists": True,
-                    "path": str(squad_path),
-                    "lead": lead.name if lead else "Lead",
-                    "agents": agents_payload,
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        return
-
-    table = Table(title="Squad Status", expand=True)
-    table.add_column("Role", style="cyan", no_wrap=True)
-    table.add_column("Name", style="white")
-    table.add_column("Phase", justify="center")
-    table.add_column("Retries", justify="center")
-    table.add_column("Subtasks", style="dim")
-    for agent in team.agents:
-        subtasks = ", ".join(agent.subtasks) if agent.subtasks else "—"
-        table.add_row(
-            agent.role,
-            agent.name,
-            str(agent.phase),
-            str(int(agent.retries)),
-            subtasks,
-        )
-
-    console.print(f"[cyan]{squad_path}[/cyan]")
-    if lead is not None:
-        console.print(f"[bold]Lead:[/bold] {lead.name}")
-    console.print(table)
-
-
-def _reset_squad_file(*, json_output: bool = False) -> None:
-    squad_dir = _squad_dir_path()
-    legacy_file = _legacy_squad_file_path()
-    deleted = False
-    if squad_dir.is_dir():
-        shutil.rmtree(squad_dir)
-        deleted = True
-    elif legacy_file.is_file():
-        legacy_file.unlink()
-        deleted = True
-    if json_output:
-        print(json.dumps({"deleted": deleted, "path": str(squad_dir)}), flush=True)
-    elif deleted:
-        console.print(f"[green]Deleted {squad_dir}[/green]")
-    else:
-        console.print("[yellow]No .squad file found.[/yellow]")
-
-
-def _show_squad_knowledge(*, json_output: bool = False) -> None:
-    squad_dir = _squad_dir_path()
-    knowledge_dir = squad_dir / "knowledge"
-    decisions_path = squad_dir / "decisions.md"
-    knowledge: dict[str, str] = {}
-
-    if knowledge_dir.is_dir():
-        for file_path in sorted(knowledge_dir.glob("*.md")):
-            knowledge[file_path.stem] = file_path.read_text(encoding="utf-8")
-
-    decisions = decisions_path.read_text(encoding="utf-8") if decisions_path.is_file() else ""
-
-    if json_output:
-        print(
-            json.dumps(
-                {
-                    "path": str(squad_dir),
-                    "knowledge": knowledge,
-                    "decisions": decisions,
-                },
-                ensure_ascii=False,
-            ),
-            flush=True,
-        )
-        return
-
-    if not knowledge and not decisions:
-        console.print("[yellow]No squad knowledge found.[/yellow]")
-        return
-
-    console.print(f"[cyan]{squad_dir}[/cyan]")
-    if decisions:
-        console.print("[bold]Shared decisions[/bold]")
-        console.print(decisions)
-    for role, content in knowledge.items():
-        console.print(f"[bold]{role} knowledge[/bold]")
-        console.print(content)
-
-
-def _reset_squad_knowledge(*, json_output: bool = False) -> None:
-    squad_dir = _squad_dir_path()
-    knowledge_dir = squad_dir / "knowledge"
-    decisions_path = squad_dir / "decisions.md"
-
-    deleted_paths: list[str] = []
-    if knowledge_dir.is_dir():
-        shutil.rmtree(knowledge_dir)
-        deleted_paths.append(str(knowledge_dir))
-    if decisions_path.is_file():
-        decisions_path.unlink()
-        deleted_paths.append(str(decisions_path))
-
-    if json_output:
-        print(
-            json.dumps(
-                {
-                    "deleted": bool(deleted_paths),
-                    "paths": deleted_paths,
-                }
-            ),
-            flush=True,
-        )
-    elif deleted_paths:
-        for path in deleted_paths:
-            console.print(f"[green]Deleted {path}[/green]")
-    else:
-        console.print("[yellow]No squad knowledge found.[/yellow]")
-
-
-def _serialize_squad_file(team: Any, squad_path: Path) -> dict[str, Any]:
-    lead = team.get_agent("lead")
-    return {
-        "path": str(squad_path),
-        "lead": lead.name if lead else "Lead",
-        "agents": [
-            {
-                "name": agent.name,
-                "role": agent.role,
-                "phase": agent.phase,
-                "depends_on": list(agent.depends_on),
-            }
-            for agent in team.agents
-            if agent.role != "lead"
-        ],
-        "phases": [
-            {"phase": phase, "gate": gate}
-            for phase, gate in sorted(getattr(team, "phase_gates", {}).items())
-        ],
-    }
-
-
-async def _init_squad_file(config: CopexConfig, *, json_output: bool = False) -> None:
-    from copex.squad_team import SquadTeam
-
-    team = await SquadTeam.from_repo_ai(config=config, path=Path.cwd())
-    squad_path = _squad_file_path()
-    team.save_squad_file(squad_path)
-    if json_output:
-        print(json.dumps(_serialize_squad_file(team, squad_path), ensure_ascii=False), flush=True)
-    else:
-        console.print(f"[green]Created {squad_path}[/green]")
-
-
-async def _update_squad_file(
-    config: CopexConfig,
-    request: str,
-    *,
-    action: str,
-    json_output: bool = False,
-) -> None:
-    from copex.squad_team import SquadTeam
-
-    team = await SquadTeam.update_from_request(
-        f"{action}: {request}",
-        config=config,
-        path=Path.cwd(),
-    )
-    squad_path = _squad_file_path()
-    team.save_squad_file(squad_path)
-    if json_output:
-        print(json.dumps(_serialize_squad_file(team, squad_path), ensure_ascii=False), flush=True)
-    else:
-        console.print(f"[green]Updated {squad_path}[/green]")
-
-
-async def _run_squad(
-    config: CopexConfig,
-    prompt: str,
-    *,
-    json_output: bool = False,
-    no_ai: bool = False,
-    max_cost: float | None = None,
-    max_tokens: int | None = None,
-    auto_approve_gates: bool = False,
-    force: bool = False,
-) -> None:
-    """Run the squad coordinator."""
-    from copex.squad import SquadCoordinator
-    from copex.squad_team import SquadTeam
-
-    try:
-        if not json_output:
-            console.print(
-                Panel(
-                    "[bold cyan]Squad[/bold cyan] — AI-assembled team for your repo",
-                    border_style="cyan",
-                    expand=False,
-                )
-            )
-
-        # Create team based on --no-ai flag
-        team = None
-        if no_ai:
-            team = await SquadTeam.from_repo_or_file(config, use_ai=False)
-        else:
-            team = SquadTeam.load_squad_file()
-            if not json_output:
-                if team is not None:
-                    console.print("📄 Using .squad configuration")
-                else:
-                    console.print("🔍 Analyzing repository...")
-
-        coordinator = SquadCoordinator(
-            config,
-            team=team,
-            max_cost=max_cost,
-            max_tokens=max_tokens,
-        )
-        result = None
-        stream_progress = (
-            not json_output
-            and not force
-            and not auto_approve_gates
-            and not (team is not None and bool(team.phase_gates))
-        )
-        async with coordinator:
-            if stream_progress:
-                from copex.squad import SquadEventType, _ROLE_EMOJIS
-
-                async for event in coordinator.run_streaming(prompt):
-                    if event.event_type == SquadEventType.PHASE_STARTED and event.phase is not None:
-                        console.print(f"[cyan]▶ Phase {event.phase} started[/cyan]")
-                        continue
-                    if event.event_type == SquadEventType.PHASE_COMPLETED and event.phase is not None:
-                        style = "green" if event.success else "red"
-                        status = "completed" if event.success else "failed"
-                        console.print(f"[{style}]✓ Phase {event.phase} {status}[/{style}]")
-                        continue
-                    if event.event_type == SquadEventType.AGENT_STARTED:
-                        role = (event.role or "").split("__", 1)[0]
-                        agent = event.agent
-                        emoji = agent.emoji if agent is not None else _ROLE_EMOJIS.get(role, "🔹")
-                        name = agent.name if agent is not None else role.replace("_", " ").title()
-                        console.print(f"  {emoji} {name}: [yellow]running[/yellow]")
-                        continue
-                    if event.event_type == SquadEventType.AGENT_COMPLETED:
-                        role = (event.role or "").split("__", 1)[0]
-                        agent = event.agent
-                        emoji = agent.emoji if agent is not None else _ROLE_EMOJIS.get(role, "🔹")
-                        name = agent.name if agent is not None else role.replace("_", " ").title()
-                        success = bool(event.success)
-                        style = "green" if success else "red"
-                        status = "done" if success else "failed"
-                        line = f"  {emoji} {name}: [{style}]{status}[/{style}]"
-                        if event.error and not success:
-                            line += f" [dim]({event.error})[/dim]"
-                        console.print(line)
-                        continue
-                    if event.event_type == SquadEventType.SQUAD_COMPLETED:
-                        result = event.result
-            else:
-                def on_status(task_id: str, status: str) -> None:
-                    if json_output:
-                        return
-                    from copex.squad import _ROLE_EMOJIS
-
-                    role = task_id.split("__", 1)[0]
-                    emoji = _ROLE_EMOJIS.get(role, "🔹")
-                    name = role.replace("_", " ").title()
-                    console.print(f"  {emoji} {name}: [dim]{status}[/dim]")
-
-                result = await coordinator.run(
-                    prompt,
-                    on_status=on_status,
-                    auto_approve_gates=auto_approve_gates,
-                    force=force,
-                    interactive=(sys.stdin.isatty() and sys.stdout.isatty() and not json_output),
-                )
-
-            if result is None:
-                raise typer.Exit(1) from None
-
-            # Show team composition after analysis
-            if not json_output and coordinator.team.agents:
-                team_desc = "  ".join(
-                    f"{a.emoji} {a.name}" for a in coordinator.team.agents
-                )
-                console.print(f"  Team: {team_desc}")
-
-        if json_output:
-            print(result.to_json(indent=2), flush=True)
-        else:
-            for ar in result.agent_results:
-                style = "green" if ar.success else "red"
-                title = f"{ar.agent.emoji} {ar.agent.name}"
-                content = ar.content[:3000] if ar.content else "[dim]No output[/dim]"
-                if ar.content and len(ar.content) > 3000:
-                    content += f"\n... ({len(ar.content)} chars total)"
-                if ar.error:
-                    content += f"\n[red]Error: {ar.error}[/red]"
-                console.print(
-                    Panel(
-                        content,
-                        title=f"[bold {style}]{title}[/bold {style}]",
-                        subtitle=f"[dim]{ar.duration_ms / 1000:.1f}s[/dim]",
-                        border_style=style,
-                    )
-                )
-
-            console.print()
-            stop_style = "green" if result.success else "red"
-            agents_ok = sum(1 for ar in result.agent_results if ar.success)
-            agents_total = len(result.agent_results)
-            console.print(
-                Panel(
-                    f"[bold]{agents_ok}/{agents_total}[/bold] agents succeeded · "
-                    f"[bold]{result.total_duration_ms / 1000:.1f}s[/bold] total",
-                    title=f"[bold {stop_style}]Squad Complete[/bold {stop_style}]",
-                    border_style=stop_style,
-                    expand=False,
-                )
-            )
-    except KeyboardInterrupt:
-        console.print("\n[yellow]Squad interrupted[/yellow]")
-    except Exception as e:
-        if json_output:
-            error_obj = {"success": False, "error": str(e), "agents": []}
-            print(json.dumps(error_obj), flush=True)
-        else:
-            console.print(f"[red]Squad error: {e}[/red]")
-        raise typer.Exit(1) from None
 
 
 @app.command("edit")
@@ -4769,7 +2562,15 @@ def edit_command(
         typer.Option("--verify/--no-verify", help="Run syntax/lint/type verification"),
     ] = True,
 ) -> None:
-    """Apply structured edits (unified diff, SEARCH/REPLACE, whole-file blocks)."""
+    """Apply structured edits (unified diff, SEARCH/REPLACE, whole-file blocks).
+
+    Args:
+        edit_file: CLI argument or option value.
+        verify: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     if edit_file is not None:
         if not edit_file.exists():
             console.print(f"[red]Edit file not found: {edit_file}[/red]")
@@ -4824,7 +2625,14 @@ def edit_command(
 def undo_command(
     list_history: Annotated[bool, typer.Option("--list", help="List undo history")] = False,
 ) -> None:
-    """Undo structured edits from the latest (or listed) undo batch."""
+    """Undo structured edits from the latest (or listed) undo batch.
+
+    Args:
+        list_history: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     if list_history:
         history = list_undo_history(Path.cwd())
         if not history:
@@ -4855,10 +2663,16 @@ def completions_command(
 ) -> None:
     """Generate shell completion scripts.
 
-    Examples:
-        copex completions bash >> ~/.bashrc
-        copex completions zsh >> ~/.zshrc
-        copex completions fish > ~/.config/fish/completions/copex.fish
+        Examples:
+            copex completions bash >> ~/.bashrc
+            copex completions zsh >> ~/.zshrc
+            copex completions fish > ~/.config/fish/completions/copex.fish
+
+    Args:
+        shell: CLI argument or option value.
+
+    Returns:
+        None: Command result.
     """
     shell = shell.lower()
 
@@ -4882,8 +2696,14 @@ def completions_command(
 def stats_command() -> None:
     """Show statistics for recent copex runs.
 
-    Displays: last model, reasoning effort, token usage, estimated cost,
-    total runs & tokens today.
+        Displays: last model, reasoning effort, token usage, estimated cost,
+        total runs & tokens today.
+
+    Args:
+        None.
+
+    Returns:
+        None: Command result.
     """
     from copex.stats import StatsTracker, load_state
 
@@ -4963,7 +2783,16 @@ def audit_command(
         str | None, typer.Option("--file", help="Filter by file path")
     ] = None,
 ) -> None:
-    """Show approval audit log entries."""
+    """Show approval audit log entries.
+
+    Args:
+        action: CLI argument or option value.
+        last: CLI argument or option value.
+        file: CLI argument or option value.
+
+    Returns:
+        None: Command result.
+    """
     if action.lower() != "show":
         console.print(f"[red]Unknown audit action: {action}[/red]")
         console.print("[red]Usage: copex audit show [--last N] [--file PATH][/red]")
@@ -5005,9 +2834,14 @@ def diff_command(
 ) -> None:
     """Show what changed since the last copex run started.
 
-    Uses git to compare HEAD against the commit recorded when copex last ran.
+        Uses git to compare HEAD against the commit recorded when copex last ran.
+
+    Args:
+        full: CLI argument or option value.
+
+    Returns:
+        None: Command result.
     """
-    import subprocess
 
     from copex.stats import load_start_commit, load_state
 

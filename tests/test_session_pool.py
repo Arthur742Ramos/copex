@@ -3,10 +3,8 @@
 from __future__ import annotations
 
 import asyncio
-import time
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
@@ -331,7 +329,7 @@ class TestSessionPool:
                 self._lock = asyncio.Lock()
                 self.enter_count = 0
 
-            async def __aenter__(self) -> "_CountingLock":
+            async def __aenter__(self) -> _CountingLock:
                 self.enter_count += 1
                 await self._lock.acquire()
                 return self
@@ -348,3 +346,13 @@ class TestSessionPool:
 
         # Reuse path should lock once for checkout and once for release.
         assert counting_lock.enter_count == 2
+
+    @pytest.mark.asyncio
+    async def test_cleanup_loop_returns_cleanly_on_cancelled_error(self, monkeypatch) -> None:
+        pool = SessionPool()
+
+        async def _raise_cancelled(_: float) -> None:
+            raise asyncio.CancelledError
+
+        monkeypatch.setattr(asyncio, "sleep", _raise_cancelled)
+        await pool._cleanup_loop()

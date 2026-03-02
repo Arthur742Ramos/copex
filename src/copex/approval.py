@@ -17,13 +17,15 @@ from rich.console import Console, Group
 from rich.panel import Panel
 from rich.text import Text
 
+from copex.constants import PATH_KEYS
+
 
 class ApprovalMode(str, Enum):
     """Modes controlling how file changes are handled."""
 
     AUTO_APPROVE = "auto-approve"
     APPROVE = "approve"
-    MANUAL = "approve"  # Backward-compatible alias.
+    MANUAL = "manual"
     DENY_ALL = "deny-all"
     POLICY_BASED = "policy-based"
     DRY_RUN = "dry-run"
@@ -191,17 +193,6 @@ class AuditEntry:
         )
 
 
-PATH_KEYS = (
-    "path",
-    "file_path",
-    "file",
-    "filepath",
-    "target_file",
-    "target",
-    "filename",
-    "relative_path",
-    "absolute_path",
-)
 NEW_CONTENT_KEYS = ("content", "new_content", "text", "contents")
 OLD_STRING_KEYS = ("old_string", "oldText", "old")
 NEW_STRING_KEYS = ("new_string", "newText", "new")
@@ -257,8 +248,18 @@ RISK_REASON_SCORES = {
 
 def default_audit_log_path(cwd: Path | None = None) -> Path:
     """Default audit log location."""
-    base = cwd or Path.cwd()
-    return base / ".copex" / "audit.log"
+    project_root = Path.cwd().resolve(strict=False)
+    base = Path(cwd) if cwd is not None else project_root
+    if not base.is_absolute():
+        base = project_root / base
+    resolved_base = base.resolve(strict=False)
+    try:
+        resolved_base.relative_to(project_root)
+    except ValueError as exc:
+        raise ValueError(
+            f"Audit log path must stay within the project directory: {project_root}"
+        ) from exc
+    return resolved_base / ".copex" / "audit.log"
 
 
 def normalize_approval_mode(value: ApprovalMode | str | None) -> ApprovalMode:
@@ -266,6 +267,8 @@ def normalize_approval_mode(value: ApprovalMode | str | None) -> ApprovalMode:
     if value is None:
         return ApprovalMode.AUTO_APPROVE
     if isinstance(value, ApprovalMode):
+        if value == ApprovalMode.APPROVE:
+            return ApprovalMode.MANUAL
         return value
     normalized = str(value).strip().lower()
     aliases = {

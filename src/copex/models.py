@@ -10,6 +10,7 @@ import asyncio
 import logging
 import re
 import subprocess
+import threading
 from enum import Enum
 
 log = logging.getLogger(__name__)
@@ -53,6 +54,7 @@ _NO_REASONING_MODELS: set[str] = {
 
 # Dynamic reasoning-support cache populated by ``refresh_model_capabilities()``.
 _reasoning_support: dict[str, bool] | None = None
+_reasoning_support_lock = threading.Lock()
 
 
 async def refresh_model_capabilities(*, timeout: float = 5.0) -> dict[str, bool]:
@@ -76,7 +78,8 @@ async def refresh_model_capabilities(*, timeout: float = 5.0) -> dict[str, bool]
                 None,
             )
             result[m.id] = bool(supports)
-        _reasoning_support = result
+        with _reasoning_support_lock:
+            _reasoning_support = result
         log.debug("Refreshed model capabilities: %d models", len(result))
         return result
     except Exception:
@@ -100,9 +103,11 @@ def model_supports_reasoning(model: Model | str) -> bool:
     ``_NO_REASONING_MODELS`` set.
     """
     model_id = model.value if isinstance(model, Model) else str(model)
-    if _reasoning_support is not None:
-        if model_id in _reasoning_support:
-            return _reasoning_support[model_id]
+    with _reasoning_support_lock:
+        cached = _reasoning_support
+    if cached is not None:
+        if model_id in cached:
+            return cached[model_id]
     return model_id not in _NO_REASONING_MODELS
 
 # ---------------------------------------------------------------------------
@@ -110,6 +115,7 @@ def model_supports_reasoning(model: Model | str) -> bool:
 # ---------------------------------------------------------------------------
 
 _discovered_models: list[str] | None = None
+_discovered_models_lock = threading.Lock()
 
 _MODEL_CHOICES_RE = re.compile(
     r'--model\b.*?\(choices:\s*(.+?)\)',
@@ -127,34 +133,41 @@ def discover_models() -> list[str]:
     if _discovered_models is not None:
         return _discovered_models
 
-    try:
-        from copex.config import find_copilot_cli
+    with _discovered_models_lock:
+        if _discovered_models is not None:
+            return _discovered_models
 
-        cli_path = find_copilot_cli()
-        if cli_path is None:
-            raise FileNotFoundError("copilot CLI not found")
+        try:
+            from copex.config import COPILOT_CLI_NOT_FOUND_MESSAGE, find_copilot_cli
 
-        result = subprocess.run(
-            [cli_path, "--help"],
-            capture_output=True,
-            text=True,
-            timeout=10,
-        )
-        if result.returncode != 0:
-            raise RuntimeError(f"copilot --help exited with code {result.returncode}")
-        m = _MODEL_CHOICES_RE.search(result.stdout)
-        if m:
-            raw = m.group(1)
-            models = [s.strip().strip('"').strip("'") for s in raw.split(",")]
-            models = [s for s in models if s]
-            if models:
-                _discovered_models = models
-                return _discovered_models
-    except (OSError, subprocess.SubprocessError):
-        pass
+            try:
+                cli_path = find_copilot_cli()
+            except (AttributeError, TypeError) as exc:
+                raise RuntimeError(COPILOT_CLI_NOT_FOUND_MESSAGE) from exc
+            if cli_path is None:
+                raise FileNotFoundError("copilot CLI not found")
 
-    _discovered_models = [model.value for model in Model]
-    return _discovered_models
+            result = subprocess.run(
+                [cli_path, "--help"],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                raise RuntimeError(f"copilot --help exited with code {result.returncode}")
+            m = _MODEL_CHOICES_RE.search(result.stdout)
+            if m:
+                raw = m.group(1)
+                models = [s.strip().strip('"').strip("'") for s in raw.split(",")]
+                models = [s for s in models if s]
+                if models:
+                    _discovered_models = models
+                    return _discovered_models
+        except (OSError, subprocess.SubprocessError):
+            pass
+
+        _discovered_models = [model.value for model in Model]
+        return _discovered_models
 
 
 def resolve_model(model_str: str) -> str:
@@ -199,8 +212,10 @@ def no_reasoning_models() -> set[str]:
     Uses dynamically discovered capabilities when available, otherwise returns
     the hardcoded ``_NO_REASONING_MODELS`` set.
     """
-    if _reasoning_support is not None:
-        return {mid for mid, supports in _reasoning_support.items() if not supports}
+    with _reasoning_support_lock:
+        cached = _reasoning_support
+    if cached is not None:
+        return {mid for mid, supports in cached.items() if not supports}
     return set(_NO_REASONING_MODELS)
 
 

@@ -207,7 +207,7 @@ def test_streaming_with_reasoning_captures_both():
 
     assert response.content == "Here's my answer"
     assert response.reasoning == "Let me think"
-    
+
     reasoning_chunks = [c for c in chunks if c.type == "reasoning"]
     message_chunks = [c for c in chunks if c.type == "message"]
     assert len(reasoning_chunks) >= 1

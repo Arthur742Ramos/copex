@@ -4,6 +4,7 @@ dependency timeout, validation, and helper functions."""
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -14,6 +15,8 @@ from copex.fleet import (
     DynamicSemaphore,
     Fleet,
     FleetConfig,
+    FleetCoordinator,
+    FleetMailbox,
     FleetResult,
     FleetTask,
     _is_rate_limit_error,
@@ -21,8 +24,6 @@ from copex.fleet import (
     _prepend_shared_context,
     _run_task_with_retry,
 )
-from unittest.mock import AsyncMock, patch
-
 
 # ---------------------------------------------------------------------------
 # TestDynamicSemaphore
@@ -420,6 +421,37 @@ class TestDependencyTimeout:
         assert "'b'" in str(by_id["c"].error)
         assert mock_copex.send.call_count == 1
 
+    @pytest.mark.asyncio
+    async def test_dep_timeout_not_triggered_by_slow_completion_callbacks(self):
+        """Dependency timeout should not block a task already becoming ready."""
+
+        async def _respond(prompt, **kwargs):
+            return Response(content=f"ok-{prompt}")
+
+        class _SlowMailbox(FleetMailbox):
+            async def send(self, to_task, message, *, from_task=None):
+                await asyncio.sleep(0.08)
+                return await super().send(to_task, message, from_task=from_task)
+
+        mailbox = _SlowMailbox()
+        tasks = [
+            FleetTask(id="a", prompt="A"),
+            FleetTask(id="b", prompt="B", depends_on=["a"]),
+        ]
+        coord = FleetCoordinator(CopexConfig())
+        config = FleetConfig(dep_timeout=0.05, timeout=10.0, max_concurrent=1)
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_respond)
+
+        with patch("copex.fleet.CopilotClient", None), patch(
+            "copex.fleet.Copex", return_value=mock_copex
+        ):
+            results = await coord.run(tasks, config=config, mailbox=mailbox)
+
+        by_id = {result.task_id: result for result in results}
+        assert by_id["a"].success
+        assert by_id["b"].success
+
 
 # ---------------------------------------------------------------------------
 # TestPrependSharedContext
@@ -538,6 +570,41 @@ class TestFleetConfigDefaults:
         assert config.default_retry_delay == 1.0
 
 
+class TestFleetValidation:
+    @pytest.mark.asyncio
+    async def test_coordinator_rejects_duplicate_task_ids(self):
+        coord = FleetCoordinator(CopexConfig())
+        tasks = [
+            FleetTask(id="dup", prompt="A"),
+            FleetTask(id="dup", prompt="B"),
+        ]
+
+        with pytest.raises(ValueError, match="Duplicate task id 'dup'"):
+            await coord.run(tasks, config=FleetConfig())
+
+    @pytest.mark.asyncio
+    async def test_coordinator_rejects_invalid_fleet_config(self):
+        coord = FleetCoordinator(CopexConfig())
+        tasks = [FleetTask(id="t1", prompt="hello")]
+
+        with pytest.raises(ValueError, match="max_concurrent must be >= 1"):
+            await coord.run(tasks, config=FleetConfig(max_concurrent=0))
+
+    def test_add_rejects_invalid_retry_values(self):
+        fleet = Fleet()
+        with pytest.raises(ValueError, match="retries must be >= 0"):
+            fleet.add("task", task_id="t1", retries=-1)
+        with pytest.raises(ValueError, match="retry_delay must be >= 0"):
+            fleet.add("task", task_id="t2", retry_delay=-0.1)
+
+    def test_add_rejects_invalid_timeout_and_cwd(self, tmp_path):
+        fleet = Fleet()
+        with pytest.raises(ValueError, match="timeout_sec must be > 0"):
+            fleet.add("task", task_id="t1", timeout_sec=0)
+        with pytest.raises(ValueError, match="cwd does not exist"):
+            fleet.add("task", task_id="t2", cwd=str(tmp_path / "missing"))
+
+
 # ---------------------------------------------------------------------------
 # TestAdaptiveConcurrencyRace - verify resize inside lock
 # ---------------------------------------------------------------------------
@@ -551,7 +618,7 @@ class TestAdaptiveConcurrencyRace:
         """Concurrent on_rate_limit calls should not race on resize."""
         ac = AdaptiveConcurrency(initial=8, minimum=1, restore_after=2)
         # Run multiple concurrent rate limit calls
-        results = await asyncio.gather(
+        await asyncio.gather(
             ac.on_rate_limit(),
             ac.on_rate_limit(),
             ac.on_rate_limit(),

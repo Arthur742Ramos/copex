@@ -391,17 +391,20 @@ class MetricsCollector:
 
 # Global collector for convenience
 _global_collector: MetricsCollector | None = None
+_global_collector_lock = threading.Lock()
 
 
 def get_collector() -> MetricsCollector:
     """Get or create global metrics collector."""
     global _global_collector
-    if _global_collector is None:
-        _global_collector = MetricsCollector()
-    return _global_collector
+    with _global_collector_lock:
+        if _global_collector is None:
+            _global_collector = MetricsCollector()
+        return _global_collector
 
 
 def reset_collector() -> None:
     """Reset global metrics collector."""
     global _global_collector
-    _global_collector = None
+    with _global_collector_lock:
+        _global_collector = None

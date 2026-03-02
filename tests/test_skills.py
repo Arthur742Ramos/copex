@@ -1,9 +1,6 @@
 """Tests for skills auto-discovery."""
 
-import tempfile
 from pathlib import Path
-
-import pytest
 
 from copex.skills import SkillDiscovery, SkillInfo, get_skill_content, list_skills
 

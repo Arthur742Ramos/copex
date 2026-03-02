@@ -10,7 +10,6 @@ import warnings
 from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
-from pathlib import Path
 from typing import Any
 
 from copilot import CopilotClient
@@ -27,9 +26,9 @@ from copex.circuit_breaker import (
     ModelAwareBreaker,
     SlidingWindowBreaker,  # noqa: F401
 )
-from copex.config import CopexConfig
+from copex.config import COPILOT_CLI_NOT_FOUND_MESSAGE, CopexConfig
 from copex.context import SmartContextWindow
-from copex.exceptions import AllModelsUnavailable, CircuitBreakerOpen
+from copex.exceptions import AllModelsUnavailable, CircuitBreakerOpen, CopexTimeoutError
 from copex.memory import auto_capture_memory
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
@@ -131,8 +130,11 @@ class Copex:
         """Start the Copilot client."""
         if self._started:
             return
-        self._client = CopilotClient(self.config.to_client_options())
-        await self._client.start()
+        try:
+            self._client = CopilotClient(self.config.to_client_options())
+            await self._client.start()
+        except (AttributeError, TypeError):
+            raise RuntimeError(COPILOT_CLI_NOT_FOUND_MESSAGE) from None
         self._started = True
 
     async def stop(self) -> None:
@@ -788,7 +790,7 @@ class Copex:
                     tokens=tokens,
                 )
                 self._cb_record_success()
-                root = Path(self.config.working_directory or self.config.cwd or Path.cwd())
+                root = self.config.working_dir
                 try:
                     auto_capture_memory(original_prompt, result.content, root=root, mode="sdk")
                 except OSError:
@@ -918,7 +920,7 @@ class Copex:
                 model=self._current_model or self.config.model.value,
                 audit_enabled=bool(self.config.audit),
             )
-        approval_cwd = Path(self.config.working_directory or Path.cwd())
+        approval_cwd = self.config.working_dir
 
         def _approval_key(tool_id: str | None, tool_name: str) -> str:
             nonlocal pending_counter
@@ -1106,7 +1108,7 @@ class Copex:
                     idle_time = loop.time() - state.last_activity
                     if idle_time >= self.config.timeout:
                         model_info = f" (model={self._current_model})" if self._current_model else ""
-                        raise TimeoutError(
+                        raise CopexTimeoutError(
                             f"Response timed out after {idle_time:.1f}s of inactivity{model_info}"
                         ) from None
                     # Had recent activity, keep waiting

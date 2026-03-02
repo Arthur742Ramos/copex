@@ -18,7 +18,6 @@ from copex.security import (
     validate_path,
 )
 
-
 # ── filter_env_vars ──────────────────────────────────────────────────
 
 class TestFilterEnvVars:

@@ -25,6 +25,7 @@ import os
 import re
 import time
 from collections.abc import AsyncIterator
+from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
@@ -160,7 +161,19 @@ _DECISIONS_SECTION_HEADING = "Key Decisions and Trade-offs"
 _MAX_PERSISTED_CONTEXT_CHARS = 4000
 _MAX_PERSISTED_ITEM_CHARS = 280
 _MAX_PERSISTED_ITEMS = 8
+_TAIL_READ_CHUNK_BYTES = 4096
 _MAIL_REF_RE = re.compile(r"\{\{\s*mail:(?P<role>[a-zA-Z0-9_.-]+)\s*\}\}")
+
+
+@dataclass(frozen=True)
+class _RepoScanSummary:
+    has_source: bool
+    has_tests: bool
+    source_extensions: tuple[str, ...]
+
+
+_REPO_CONTEXT_CACHE: dict[Path, dict[str, Any]] = {}
+_REPO_SCAN_CACHE: dict[Path, _RepoScanSummary] = {}
 
 
 def _now_iso_utc() -> str:
@@ -247,50 +260,84 @@ def _append_markdown_items(path: Path, *, title: str, items: list[str]) -> None:
 def _read_text_tail(path: Path, *, max_chars: int = _MAX_PERSISTED_CONTEXT_CHARS) -> str:
     if not path.is_file():
         return ""
-    text = path.read_text(encoding="utf-8").strip()
-    if len(text) <= max_chars:
+    if max_chars <= 0:
+        return ""
+
+    max_bytes = max_chars * 4
+    truncated = False
+    chunks: list[bytes] = []
+    collected = 0
+    with path.open("rb") as handle:
+        handle.seek(0, os.SEEK_END)
+        position = handle.tell()
+        while position > 0 and collected < max_bytes:
+            read_size = min(_TAIL_READ_CHUNK_BYTES, position, max_bytes - collected)
+            position -= read_size
+            handle.seek(position)
+            chunk = handle.read(read_size)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            collected += len(chunk)
+        truncated = position > 0
+
+    text = b"".join(reversed(chunks)).decode("utf-8", errors="ignore").strip()
+    if not truncated and len(text) <= max_chars:
         return text
     return "[Older entries truncated]\n" + text[-max_chars:]
 
 
-def _has_source_files(root: Path) -> bool:
-    """Check for source code files (shallow scan, fast exit)."""
+def _scan_repo_files(root: Path) -> _RepoScanSummary:
+    resolved_root = root.resolve()
+    cached = _REPO_SCAN_CACHE.get(resolved_root)
+    if cached is not None:
+        return cached
+
+    has_source = False
+    has_tests = any((resolved_root / name).is_dir() for name in ("tests", "test"))
+    extensions: set[str] = set()
+
     try:
-        for _, dirs, files in os.walk(root, topdown=True):
+        for _, dirs, files in os.walk(resolved_root, topdown=True):
             dirs[:] = [
                 d for d in dirs
                 if not d.startswith(".") and d not in _SCAN_SKIP_DIRS
             ]
             for file_name in files:
-                if Path(file_name).suffix.lower() in _SOURCE_EXTENSIONS:
-                    return True
+                ext = Path(file_name).suffix.lower()
+                if ext in _SOURCE_EXTENSIONS:
+                    has_source = True
+                    extensions.add(ext)
+                if not has_tests:
+                    lower_name = file_name.lower()
+                    if lower_name.startswith("test_") and "." in lower_name:
+                        has_tests = True
+                    elif "." in lower_name and lower_name.rsplit(".", 1)[0].endswith("_test"):
+                        has_tests = True
+                    elif ".spec." in lower_name:
+                        has_tests = True
+            if has_source and has_tests and len(extensions) == len(_SOURCE_EXTENSIONS):
+                break
     except OSError:
         pass
-    return False
+
+    summary = _RepoScanSummary(
+        has_source=has_source,
+        has_tests=has_tests,
+        source_extensions=tuple(sorted(extensions)),
+    )
+    _REPO_SCAN_CACHE[resolved_root] = summary
+    return summary
+
+
+def _has_source_files(root: Path) -> bool:
+    """Check for source code files."""
+    return _scan_repo_files(root).has_source
 
 
 def _has_test_files(root: Path) -> bool:
     """Check for test directories or test file patterns."""
-    for name in ("tests", "test"):
-        if (root / name).is_dir():
-            return True
-    try:
-        for _, dirs, files in os.walk(root, topdown=True):
-            dirs[:] = [
-                d for d in dirs
-                if not d.startswith(".") and d not in _SCAN_SKIP_DIRS
-            ]
-            for file_name in files:
-                lower_name = file_name.lower()
-                if lower_name.startswith("test_") and "." in lower_name:
-                    return True
-                if "." in lower_name and lower_name.rsplit(".", 1)[0].endswith("_test"):
-                    return True
-                if ".spec." in lower_name:
-                    return True
-    except OSError:
-        pass
-    return False
+    return _scan_repo_files(root).has_tests
 
 
 def _has_docs(root: Path) -> bool:
@@ -335,13 +382,22 @@ def _has_backend(root: Path) -> bool:
     return any((root / d).is_dir() for d in _BACKEND_DIRS)
 
 
+def _clear_repo_context_cache() -> None:
+    _REPO_CONTEXT_CACHE.clear()
+    _REPO_SCAN_CACHE.clear()
+
+
 def _gather_repo_context(path: Path | None = None) -> dict[str, Any]:
     """Gather repository context for AI analysis.
 
     Reads pyproject.toml, README.md, directory structure, and source file
     extensions. Returns a dictionary with all available context.
     """
-    root = path or Path.cwd()
+    root = (path or Path.cwd()).resolve()
+    cached = _REPO_CONTEXT_CACHE.get(root)
+    if cached is not None:
+        return deepcopy(cached)
+
     context: dict[str, Any] = {}
 
     # Read pyproject.toml
@@ -396,17 +452,11 @@ def _gather_repo_context(path: Path | None = None) -> dict[str, Any]:
     except Exception:
         pass
 
-    # Source file extensions found
-    extensions: set[str] = set()
-    for ext in _SOURCE_EXTENSIONS:
-        try:
-            if next(root.rglob(f"*{ext}"), None) is not None:
-                extensions.add(ext)
-        except OSError:
-            pass
-    if extensions:
-        context["source_extensions"] = sorted(extensions)
+    scan_summary = _scan_repo_files(root)
+    if scan_summary.source_extensions:
+        context["source_extensions"] = list(scan_summary.source_extensions)
 
+    _REPO_CONTEXT_CACHE[root] = deepcopy(context)
     return context
 
 
@@ -516,6 +566,7 @@ class SquadAgent:
     depends_on: list[str] = field(default_factory=list)
     subtasks: list[str] = field(default_factory=list)
     retries: int = 1
+    retry_delay: float | None = None
 
     @classmethod
     def default_for_role(cls, role: SquadRole | str) -> SquadAgent:
@@ -555,6 +606,14 @@ class SquadAgentResult:
     completion_tokens: int = 0
 
 
+class SquadAggregationStrategy(str, Enum):
+    """Strategies for aggregating squad agent content."""
+
+    CONCAT = "concat"
+    SUCCESS_ONLY = "success_only"
+    FAILURES_ONLY = "failures_only"
+
+
 @dataclass
 class SquadResult:
     """Aggregated result from the squad."""
@@ -562,15 +621,51 @@ class SquadResult:
     agent_results: list[SquadAgentResult] = field(default_factory=list)
     total_duration_ms: float = 0.0
     success: bool = True
+    role_dependencies: dict[str, list[str]] = field(default_factory=dict)
+    task_dependencies: dict[str, list[str]] = field(default_factory=dict)
 
     @property
     def final_content(self) -> str:
         """Get the combined output from all agents."""
+        return self.aggregate_content()
+
+    @staticmethod
+    def _coerce_aggregation_strategy(
+        strategy: SquadAggregationStrategy | str,
+    ) -> SquadAggregationStrategy:
+        if isinstance(strategy, SquadAggregationStrategy):
+            return strategy
+        try:
+            return SquadAggregationStrategy(str(strategy).strip().lower())
+        except ValueError as exc:
+            raise ValueError(f"Unsupported squad aggregation strategy: {strategy}") from exc
+
+    def aggregate_content(
+        self,
+        *,
+        strategy: SquadAggregationStrategy | str = SquadAggregationStrategy.CONCAT,
+        roles: list[str] | None = None,
+        separator: str = "\n\n---\n\n",
+    ) -> str:
+        """Aggregate agent content using a selectable strategy."""
+        selected_strategy = self._coerce_aggregation_strategy(strategy)
+        role_filter = (
+            {_normalize_role_identifier(role) for role in roles}
+            if roles is not None
+            else None
+        )
+
         parts = []
         for ar in self.agent_results:
+            if role_filter is not None and ar.agent.role not in role_filter:
+                continue
+            if selected_strategy == SquadAggregationStrategy.SUCCESS_ONLY and not ar.success:
+                continue
+            if selected_strategy == SquadAggregationStrategy.FAILURES_ONLY and ar.success:
+                continue
             if ar.content:
                 parts.append(f"## {ar.agent.emoji} {ar.agent.name}\n\n{ar.content}")
-        return "\n\n---\n\n".join(parts)
+        return separator.join(parts)
 
     def to_dict(self) -> dict[str, Any]:
         """Serialize to a dictionary."""
@@ -590,6 +685,16 @@ class SquadResult:
                 }
                 for ar in self.agent_results
             ],
+            "dependencies": {
+                "roles": {
+                    role: list(dependencies)
+                    for role, dependencies in self.role_dependencies.items()
+                },
+                "tasks": {
+                    task_id: list(dependencies)
+                    for task_id, dependencies in self.task_dependencies.items()
+                },
+            },
         }
 
     def to_json(self, *, indent: int | None = None) -> str:
@@ -689,6 +794,7 @@ class SquadCoordinator:
         auto_approve_gates: bool | None = None,
         force: bool = False,
         interactive: bool | None = None,
+        mailbox: FleetMailbox | None = None,
     ) -> SquadResult:
         """Run the squad on a task.
 
@@ -698,6 +804,7 @@ class SquadCoordinator:
             auto_approve_gates: Skip phase gate prompts when True.
             force: Force rerun of all tasks and ignore incremental cache.
             interactive: Override whether gate prompts should be interactive.
+            mailbox: Optional FleetMailbox for inter-agent communication.
 
         Returns:
             SquadResult with results from all agents.
@@ -749,7 +856,7 @@ class SquadCoordinator:
         current_prompt = prompt
         cumulative_cost = 0.0
         cumulative_tokens = 0
-        mailbox = FleetMailbox()
+        shared_mailbox = mailbox or FleetMailbox()
 
         final_result: SquadResult | None = None
         while True:
@@ -761,6 +868,7 @@ class SquadCoordinator:
                     auto_approve_gates=gate_auto_approve,
                     interactive=interactive_mode,
                     force=force,
+                    mailbox=shared_mailbox,
                 )
             else:
                 fleet = Fleet(self._config, fleet_config=self._fleet_config)
@@ -768,14 +876,18 @@ class SquadCoordinator:
                     fleet,
                     current_prompt,
                     task_prompts=task_prompts,
-                    mailbox=mailbox,
+                    mailbox=shared_mailbox,
                 )
-                fleet_results = await fleet.run(on_status=on_status)
+                fleet_results = await self._run_fleet(
+                    fleet,
+                    on_status=on_status,
+                    mailbox=shared_mailbox,
+                )
                 fleet_results = await self._retry_failed_agents(
                     fleet_results,
                     task_prompts,
                     on_status=on_status,
-                    mailbox=mailbox,
+                    mailbox=shared_mailbox,
                 )
                 self._persist_state_from_results(
                     task_ids=task_ids,
@@ -789,6 +901,9 @@ class SquadCoordinator:
             )
             self._enforce_budget(cumulative_cost, cumulative_tokens)
             iteration_result = self._build_result(fleet_results, task_ids)
+            role_dependencies, task_dependencies = self._dependency_graphs(task_ids)
+            iteration_result.role_dependencies = role_dependencies
+            iteration_result.task_dependencies = task_dependencies
             tester_results = [
                 ar
                 for ar in iteration_result.agent_results
@@ -830,6 +945,7 @@ class SquadCoordinator:
         prompt: str,
         *,
         on_status: Any | None = None,
+        mailbox: FleetMailbox | None = None,
     ) -> AsyncIterator[SquadEvent]:
         """Run the squad while emitting real-time squad-level progress events."""
         start_time = time.monotonic()
@@ -869,7 +985,7 @@ class SquadCoordinator:
         current_prompt = prompt
         cumulative_cost = 0.0
         cumulative_tokens = 0
-        mailbox = FleetMailbox()
+        shared_mailbox = mailbox or FleetMailbox()
 
         final_result: SquadResult | None = None
         while True:
@@ -879,7 +995,7 @@ class SquadCoordinator:
                 fleet,
                 current_prompt,
                 task_prompts=task_prompts,
-                mailbox=mailbox,
+                mailbox=shared_mailbox,
             )
             task_to_role = self._task_to_role_map(task_ids)
             role_to_task_ids = {
@@ -901,7 +1017,7 @@ class SquadCoordinator:
             task_success: dict[str, bool] = {}
 
             async with fleet:
-                async for event in fleet.run_streaming(mailbox=mailbox):
+                async for event in fleet.run_streaming(mailbox=shared_mailbox):
                     task_id = event.task_id
                     if task_id is None:
                         continue
@@ -988,7 +1104,7 @@ class SquadCoordinator:
                 fleet_results,
                 task_prompts,
                 on_status=on_status,
-                mailbox=mailbox,
+                mailbox=shared_mailbox,
             )
             cumulative_cost += sum(fr.total_cost for fr in fleet_results)
             cumulative_tokens += sum(
@@ -1003,6 +1119,9 @@ class SquadCoordinator:
             )
 
             iteration_result = self._build_result(fleet_results, task_ids)
+            role_dependencies, task_dependencies = self._dependency_graphs(task_ids)
+            iteration_result.role_dependencies = role_dependencies
+            iteration_result.task_dependencies = task_dependencies
             tester_results = [
                 ar
                 for ar in iteration_result.agent_results
@@ -1053,6 +1172,36 @@ class SquadCoordinator:
                 if task_id:
                     mapping[task_id] = role
         return mapping
+
+    @staticmethod
+    async def _run_fleet(
+        fleet: Fleet,
+        *,
+        on_status: Any | None,
+        mailbox: FleetMailbox | None = None,
+    ) -> list[FleetResult]:
+        if mailbox is not None:
+            try:
+                return await fleet.run(on_status=on_status, mailbox=mailbox)
+            except TypeError as exc:
+                if "mailbox" not in str(exc):
+                    raise
+        return await fleet.run(on_status=on_status)
+
+    def _dependency_graphs(
+        self,
+        task_ids: dict[str, str],
+    ) -> tuple[dict[str, list[str]], dict[str, list[str]]]:
+        role_dependencies: dict[str, list[str]] = {}
+        task_dependencies: dict[str, list[str]] = {}
+
+        for agent in self.team.agents:
+            role_dependencies[agent.role] = self._dependency_roles(agent)
+            deps = self._get_dependencies(agent, task_ids)
+            for task_id in [tid for tid in task_ids.get(agent.role, "").split("|") if tid]:
+                task_dependencies[task_id] = list(deps)
+
+        return role_dependencies, task_dependencies
 
     def _validate_team_dependency_graph(self) -> None:
         role_ids = [agent.role for agent in self.team.agents]
@@ -1281,6 +1430,7 @@ class SquadCoordinator:
         auto_approve_gates: bool,
         interactive: bool,
         force: bool,
+        mailbox: FleetMailbox,
     ) -> tuple[list[FleetResult], dict[str, str]]:
         task_ids = self._build_task_id_map()
         known_roles = set(task_ids)
@@ -1291,7 +1441,6 @@ class SquadCoordinator:
             level = levels.get(agent.role, max(1, agent.phase))
             agents_by_level.setdefault(level, []).append(agent)
 
-        mailbox = FleetMailbox()
         for tid_value in task_ids.values():
             for task_id in tid_value.split("|"):
                 if task_id:
@@ -1420,7 +1569,11 @@ class SquadCoordinator:
                     )
                     task_prompts[tid] = rendered_prompt
 
-            run_results = await fleet.run(on_status=on_status) if fleet.tasks else []
+            run_results = (
+                await self._run_fleet(fleet, on_status=on_status, mailbox=mailbox)
+                if fleet.tasks
+                else []
+            )
             run_results = await self._retry_failed_agents(
                 run_results,
                 task_prompts,
@@ -1894,6 +2047,9 @@ class SquadCoordinator:
                     break
                 if self._is_timeout_error(current.error):
                     break
+                retry_delay = self._retry_delay_for_task(task_id, attempt)
+                if retry_delay > 0:
+                    await asyncio.sleep(retry_delay)
 
                 retry_prompt = self._materialize_prompt(prompt_template, results_by_id)
                 retry_task_id = f"{task_id}__retry" if attempt == 0 else f"{task_id}__retry{attempt + 1}"
@@ -1906,7 +2062,11 @@ class SquadCoordinator:
                         model=self._config.model,
                         retries=0,
                     )
-                    retry_results = await retry_fleet.run(on_status=on_status)
+                    retry_results = await self._run_fleet(
+                        retry_fleet,
+                        on_status=on_status,
+                        mailbox=mailbox,
+                    )
                 retry_result = next(
                     (result for result in retry_results if result.task_id == retry_task_id),
                     None,
@@ -1939,6 +2099,17 @@ class SquadCoordinator:
             return max(0, int(agent.retries))
         except (TypeError, ValueError):
             return 1
+
+    def _retry_delay_for_task(self, task_id: str, attempt: int) -> float:
+        role = task_id.split("__", 1)[0]
+        agent = self.team.get_agent(role)
+        if agent is None or agent.retry_delay is None:
+            return 0.0
+        try:
+            base_delay = max(0.0, float(agent.retry_delay))
+        except (TypeError, ValueError):
+            return 0.0
+        return base_delay * (2 ** max(0, int(attempt)))
 
     def _enforce_budget(self, cumulative_cost: float, cumulative_tokens: int) -> None:
         if self._max_cost is not None and cumulative_cost > self._max_cost:

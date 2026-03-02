@@ -7,15 +7,14 @@ import pytest
 from copex.conditions import (
     Condition,
     ConditionContext,
-    CustomCondition,
+    _evaluate_expression,
+    _parse_value,
+    _resolve_reference,
+    _substitute_references,
     all_of,
     any_of,
     none_of,
     when,
-    _parse_value,
-    _resolve_reference,
-    _substitute_references,
-    _evaluate_expression,
 )
 
 

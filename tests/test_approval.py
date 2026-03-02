@@ -3,6 +3,7 @@ from __future__ import annotations
 import io
 from pathlib import Path
 
+import pytest
 from rich.console import Console
 
 from copex.approval import (
@@ -16,6 +17,7 @@ from copex.approval import (
     ProposedFileChange,
     RiskAssessor,
     build_preview,
+    default_audit_log_path,
     extract_proposed_changes,
     normalize_approval_mode,
     summarize_changes,
@@ -162,7 +164,7 @@ def test_approval_gate_enables_audit_alias(tmp_path: Path) -> None:
     gate.log_execution_event(reviewed, success=True, result="ok")
     entries = logger.query(last=10)
     assert len(entries) == 2
-    assert entries[0].mode == "approve"
+    assert entries[0].mode == "manual"
 
 
 def test_audit_schema_includes_decision_risk_fingerprint_result_and_error(tmp_path: Path) -> None:
@@ -240,6 +242,12 @@ def test_normalize_approval_mode_aliases() -> None:
     assert normalize_approval_mode("deny") == ApprovalMode.DENY_ALL
     assert normalize_approval_mode("policy") == ApprovalMode.POLICY_BASED
     assert normalize_approval_mode("dry") == ApprovalMode.DRY_RUN
+    assert normalize_approval_mode(ApprovalMode.APPROVE) == ApprovalMode.MANUAL
+
+
+def test_approval_mode_manual_is_distinct() -> None:
+    assert ApprovalMode.MANUAL.value == "manual"
+    assert ApprovalMode.MANUAL is not ApprovalMode.APPROVE
 
 
 def test_risk_escalation_for_large_config_delete(tmp_path: Path) -> None:
@@ -271,6 +279,17 @@ def test_risk_assessor_flags_security_content() -> None:
     assert risk.severity == "high"
     assert "security-sensitive-file" in risk.reasons
     assert "secret-like-content" in risk.reasons
+
+
+def test_default_audit_log_path_stays_in_project(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    assert default_audit_log_path() == tmp_path / ".copex" / "audit.log"
+
+
+def test_default_audit_log_path_rejects_parent_traversal(monkeypatch, tmp_path: Path) -> None:
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ValueError, match="project directory"):
+        default_audit_log_path(Path(".."))
 
 
 def test_change_stats_helper_matches_summary(tmp_path: Path) -> None:

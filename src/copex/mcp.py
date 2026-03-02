@@ -14,13 +14,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
-import os
 import re
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
+
+from copex.security import filter_env_vars
 
 logger = logging.getLogger(__name__)
 
@@ -135,13 +136,15 @@ class StdioTransport(MCPTransport):
         else:
             cmd = list(cmd) + self.config.args
 
+        safe_env = filter_env_vars()
+        safe_env.update(self.config.env)
         self._process = await asyncio.create_subprocess_exec(
             *cmd,
             stdin=asyncio.subprocess.PIPE,
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.DEVNULL,
             cwd=self.config.cwd,
-            env={**dict(os.environ), **self.config.env} if self.config.env else None,
+            env=safe_env,
         )
 
         # Start reader task
@@ -186,17 +189,8 @@ class StdioTransport(MCPTransport):
         try:
             while True:
                 try:
-                    line = await self._process.stdout.readline()
-                    if not line:
-                        break
-
-                    text = line.decode("utf-8").strip()
-                    if not text:
-                        continue
-
-                    try:
-                        message = json.loads(text)
-                    except json.JSONDecodeError:
+                    message = await self._read_message()
+                    if message is None:
                         continue
 
                     # Handle response
@@ -211,6 +205,8 @@ class StdioTransport(MCPTransport):
                             else:
                                 future.set_result(message.get("result"))
 
+                except EOFError:
+                    break
                 except asyncio.CancelledError:
                     break
                 except Exception:  # Catch-all: reader loop must not crash
@@ -223,6 +219,50 @@ class StdioTransport(MCPTransport):
             for future in pending.values():
                 if not future.done():
                     future.set_exception(ConnectionError("MCP transport closed unexpectedly"))
+
+    async def _read_message(self) -> dict[str, Any] | None:
+        """Read one MCP message (Content-Length framed or newline-delimited JSON)."""
+        if not self._process or not self._process.stdout:
+            return None
+
+        first_line = await self._process.stdout.readline()
+        if not first_line:
+            raise EOFError
+
+        first_text = first_line.decode("utf-8", errors="replace").strip()
+        if not first_text:
+            return None
+
+        if first_text.lower().startswith("content-length:"):
+            try:
+                content_length = int(first_text.split(":", 1)[1].strip())
+            except (IndexError, ValueError):
+                logger.debug("Invalid MCP Content-Length header: %r", first_text)
+                return None
+
+            if content_length < 0:
+                logger.debug("Negative MCP Content-Length: %r", first_text)
+                return None
+
+            while True:
+                header_line = await self._process.stdout.readline()
+                if not header_line:
+                    raise EOFError
+                if header_line in (b"\r\n", b"\n"):
+                    break
+
+            body = await self._process.stdout.readexactly(content_length)
+            body_text = body.decode("utf-8", errors="replace")
+            try:
+                return json.loads(body_text)
+            except json.JSONDecodeError:
+                logger.debug("Failed to decode framed MCP JSON", exc_info=True)
+                return None
+
+        try:
+            return json.loads(first_text)
+        except json.JSONDecodeError:
+            return None
 
     async def _write(self, message: dict[str, Any]) -> None:
         """Write a message to the server."""

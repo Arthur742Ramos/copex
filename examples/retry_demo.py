@@ -43,7 +43,7 @@ async def main():
             on_chunk=on_chunk,
         )
 
-        print(f"\n\n--- Stats ---")
+        print("\n\n--- Stats ---")
         print(f"Retries: {response.retries}")
         print(f"Auto-continues: {response.auto_continues}")
         print(f"Response length: {len(response.content)} chars")

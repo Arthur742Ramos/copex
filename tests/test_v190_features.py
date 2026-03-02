@@ -2,19 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
-from types import SimpleNamespace
-
-import pytest
-
-from copex.backoff import categorize_error, ErrorCategory
+from copex.backoff import ErrorCategory, categorize_error
 from copex.client import (
+    DEFAULT_FALLBACK_CHAINS,
     Copex,
     ModelAwareBreaker,
-    DEFAULT_FALLBACK_CHAINS,
 )
 from copex.config import CopexConfig
-
 
 # =============================================================================
 # categorize_error Tests (Task 4: Fixed performance and false positives)

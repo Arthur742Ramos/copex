@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
-import pytest
-
 from copex.cli import SlashCompleter, _display_plan, _display_plan_summary
 from copex.plan import Plan, PlanStep, StepStatus
 
@@ -117,10 +115,10 @@ class TestPlanDisplay:
                 PlanStep(number=2, description="Second step", status=StepStatus.PENDING),
             ],
         )
-        
+
         _display_plan(plan)
         captured = capsys.readouterr()
-        
+
         assert "Step 1" in captured.out
         assert "First step" in captured.out
         assert "Step 2" in captured.out
@@ -135,10 +133,10 @@ class TestPlanDisplay:
                 PlanStep(number=2, description="Step 2", status=StepStatus.COMPLETED),
             ],
         )
-        
+
         _display_plan_summary(plan)
         captured = capsys.readouterr()
-        
+
         assert "2 steps completed" in captured.out or "Plan Complete" in captured.out
 
     def test_display_plan_summary_with_failures(self, capsys):
@@ -150,8 +148,8 @@ class TestPlanDisplay:
                 PlanStep(number=2, description="Step 2", status=StepStatus.FAILED),
             ],
         )
-        
+
         _display_plan_summary(plan)
         captured = capsys.readouterr()
-        
+
         assert "Failed" in captured.out or "Incomplete" in captured.out

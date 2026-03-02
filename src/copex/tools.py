@@ -16,9 +16,11 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from copex.constants import PATH_KEYS
+
 
 @dataclass
-class ToolResult:
+class ToolExecutionResult:
     """Result from a tool execution."""
 
     name: str
@@ -40,21 +42,8 @@ class ParallelToolConfig:
     approval_workflow: Any | None = None  # Optional ApprovalWorkflow for write operations
 
 
-_PATH_KEYS = (
-    "path",
-    "file_path",
-    "file",
-    "filepath",
-    "target_file",
-    "target",
-    "filename",
-    "relative_path",
-    "absolute_path",
-)
-
-
 def _extract_candidate_path(payload: dict[str, Any]) -> str | None:
-    for key in _PATH_KEYS:
+    for key in PATH_KEYS:
         value = payload.get(key)
         if isinstance(value, str) and value.strip():
             return value
@@ -274,7 +263,7 @@ class ToolRegistry:
         name: str,
         params: dict[str, Any],
         timeout: float | None = None,
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """
         Execute a single tool.
 
@@ -284,13 +273,13 @@ class ToolRegistry:
             timeout: Optional timeout override
 
         Returns:
-            ToolResult with success/failure info
+            ToolExecutionResult with success/failure info
         """
         import time
 
         tool = self._tools.get(name)
         if not tool:
-            return ToolResult(
+            return ToolExecutionResult(
                 name=name,
                 success=False,
                 error=f"Tool not found: {name}",
@@ -331,7 +320,7 @@ class ToolRegistry:
                             success=True,
                             result=f"skipped by approval workflow: {target}",
                         )
-                    return ToolResult(
+                    return ToolExecutionResult(
                         name=name,
                         success=True,
                         result=f"Skipped by approval workflow: {target}",
@@ -347,7 +336,7 @@ class ToolRegistry:
                         success=True,
                         result=dry_run_payload,
                     )
-                return ToolResult(
+                return ToolExecutionResult(
                     name=name,
                     success=True,
                     result=dry_run_payload,
@@ -378,7 +367,7 @@ class ToolRegistry:
                 log_execution_event(approval_reviews, success=True, result=result)
             duration = (time.time() - start) * 1000
 
-            return ToolResult(
+            return ToolExecutionResult(
                 name=name,
                 success=True,
                 result=result,
@@ -393,14 +382,14 @@ class ToolRegistry:
                     success=False,
                     error=f"Timeout after {timeout}s",
                 )
-            return ToolResult(
+            return ToolExecutionResult(
                 name=name,
                 success=False,
                 error=f"Timeout after {timeout}s",
                 duration_ms=duration,
             )
 
-        except Exception as e:  # Catch-all: tool execution failures become ToolResult
+        except Exception as e:  # Catch-all: tool execution failures become ToolExecutionResult
             duration = (time.time() - start) * 1000
             if callable(log_execution_event) and approval_reviews:
                 log_execution_event(
@@ -408,7 +397,7 @@ class ToolRegistry:
                     success=False,
                     error=str(e),
                 )
-            return ToolResult(
+            return ToolExecutionResult(
                 name=name,
                 success=False,
                 error=str(e),
@@ -419,7 +408,7 @@ class ToolRegistry:
         self,
         calls: list[tuple[str, dict[str, Any]]],
         max_concurrent: int | None = None,
-    ) -> list[ToolResult]:
+    ) -> list[ToolExecutionResult]:
         """
         Execute multiple tools in parallel.
 
@@ -428,7 +417,7 @@ class ToolRegistry:
             max_concurrent: Override max concurrent limit
 
         Returns:
-            List of ToolResult in same order as calls
+            List of ToolExecutionResult in same order as calls
         """
         if not calls:
             return []
@@ -436,35 +425,35 @@ class ToolRegistry:
         max_concurrent = max_concurrent or self.config.max_concurrent
         semaphore = asyncio.Semaphore(max_concurrent)
 
-        async def limited_execute(idx: int, name: str, params: dict) -> tuple[int, ToolResult]:
+        async def limited_execute(idx: int, name: str, params: dict) -> tuple[int, ToolExecutionResult]:
             async with semaphore:
                 if self.config.retry_on_error:
                     return idx, await self.execute_with_retry(name, params)
                 return idx, await self.execute(name, params)
 
-        tasks: list[asyncio.Task[tuple[int, ToolResult]]] = []
-        task_indices: dict[asyncio.Task[tuple[int, ToolResult]], int] = {}
+        tasks: list[asyncio.Task[tuple[int, ToolExecutionResult]]] = []
+        task_indices: dict[asyncio.Task[tuple[int, ToolExecutionResult]], int] = {}
         for idx, (name, params) in enumerate(calls):
             task = asyncio.create_task(limited_execute(idx, name, params))
             tasks.append(task)
             task_indices[task] = idx
 
-        results: list[ToolResult | None] = [None] * len(calls)
-        pending: set[asyncio.Task[tuple[int, ToolResult]]] = set(tasks)
+        results: list[ToolExecutionResult | None] = [None] * len(calls)
+        pending: set[asyncio.Task[tuple[int, ToolExecutionResult]]] = set(tasks)
 
-        def _task_to_result(task: asyncio.Task[tuple[int, ToolResult]]) -> tuple[int, ToolResult]:
+        def _task_to_result(task: asyncio.Task[tuple[int, ToolExecutionResult]]) -> tuple[int, ToolExecutionResult]:
             fallback_idx = task_indices[task]
             try:
                 idx, result = task.result()
                 return idx, result
             except asyncio.CancelledError:
-                return fallback_idx, ToolResult(
+                return fallback_idx, ToolExecutionResult(
                     name=calls[fallback_idx][0],
                     success=False,
                     error="Cancelled",
                 )
             except Exception as exc:
-                return fallback_idx, ToolResult(
+                return fallback_idx, ToolExecutionResult(
                     name=calls[fallback_idx][0],
                     success=False,
                     error=str(exc),
@@ -506,7 +495,7 @@ class ToolRegistry:
         if self.config.fail_fast and any(r is None for r in results):
             for idx, result in enumerate(results):
                 if result is None:
-                    results[idx] = ToolResult(
+                    results[idx] = ToolExecutionResult(
                         name=calls[idx][0],
                         success=False,
                         error="Cancelled due to fail_fast",
@@ -519,7 +508,7 @@ class ToolRegistry:
         name: str,
         params: dict[str, Any],
         max_retries: int | None = None,
-    ) -> ToolResult:
+    ) -> ToolExecutionResult:
         """
         Execute a tool with retries on failure.
 
@@ -529,7 +518,7 @@ class ToolRegistry:
             max_retries: Override max retries
 
         Returns:
-            ToolResult from last attempt
+            ToolExecutionResult from last attempt
         """
         max_retries = max_retries or self.config.max_retries
 

@@ -4,7 +4,7 @@ from pathlib import Path
 
 import pytest
 
-from copex.config import _parse_node_version
+from copex.config import COPILOT_CLI_NOT_FOUND_MESSAGE, CopexConfig, _parse_node_version
 
 
 class TestParseNodeVersion:
@@ -52,3 +52,27 @@ class TestParseNodeVersion:
         dirs = [Path(".DS_Store"), Path("v18.0.0"), Path("lts")]
         sorted_dirs = sorted(dirs, key=_parse_node_version, reverse=True)
         assert sorted_dirs[0].name == "v18.0.0"
+
+
+class TestWorkingDir:
+    def test_working_dir_prefers_working_directory_over_cwd(self) -> None:
+        config = CopexConfig(working_directory="/tmp/work", cwd="/tmp/cwd")
+        assert config.working_dir == Path("/tmp/work")
+
+    def test_working_dir_uses_cwd_when_working_directory_missing(self) -> None:
+        config = CopexConfig(cwd="/tmp/cwd")
+        assert config.working_dir == Path("/tmp/cwd")
+
+    def test_working_dir_falls_back_to_process_cwd(self, tmp_path: Path, monkeypatch) -> None:
+        monkeypatch.chdir(tmp_path)
+        config = CopexConfig()
+        assert config.working_dir == tmp_path
+
+
+class TestClientOptions:
+    def test_to_client_options_raises_clear_error_when_cli_lookup_type_fails(self, monkeypatch) -> None:
+        monkeypatch.setattr("copex.config.find_copilot_cli", lambda: (_ for _ in ()).throw(TypeError()))
+        config = CopexConfig(cli_path=None)
+
+        with pytest.raises(RuntimeError, match=COPILOT_CLI_NOT_FOUND_MESSAGE):
+            config.to_client_options()

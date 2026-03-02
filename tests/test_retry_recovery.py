@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 import pytest
 
-from copex.client import Copex, StreamChunk
+from copex.client import Copex
 from copex.config import CopexConfig, RetryConfig
 from copex.models import EventType
 

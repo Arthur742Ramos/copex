@@ -7,6 +7,7 @@ Demonstrates:
 """
 
 import asyncio
+
 from copex import AgentSession, Copex, CopexConfig, Model
 
 

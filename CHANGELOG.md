@@ -7,6 +7,15 @@
 - New `squad_team` module with expanded squad composition/configuration behavior.
 - CLI improvements across squad and planning workflows.
 
+### Performance
+- Squad repo-context scanning now uses a single pruned `os.walk` pass with cache reuse across source/test detection.
+- `SquadCoordinator.run()` and `run_streaming()` reuse gathered repo context per run path to avoid duplicate scans.
+
+### Fixes
+- Shared task-output placeholder regex source between fleet and squad to prevent drift.
+- `_read_text_tail()` now reads bounded tail chunks instead of loading full files into memory.
+- Squad team persistence explicitly depends on `tomli-w` for canonical TOML writing.
+
 ### CI
 - Wired `squad-release` automation to create GitHub releases that trigger PyPI publishing.
 

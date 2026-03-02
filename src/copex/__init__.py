@@ -1,5 +1,7 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
+from typing import TYPE_CHECKING, Any
+
 __version__ = "2.18.0"
 
 # Re-export core components for convenience
@@ -48,8 +50,10 @@ from .exceptions import (
     CircuitBreakerOpen,
     ConfigError,
     ConfigurationError,
-    ConnectionError,
+    ConnectionError,  # Deprecated alias.
+    CopexConnectionError,
     CopexError,
+    CopexTimeoutError,
     MCPError,
     PlanExecutionError,
     RateLimitError,
@@ -58,7 +62,7 @@ from .exceptions import (
     SessionError,
     SessionRecoveryFailed,
     StreamingError,
-    TimeoutError,
+    TimeoutError,  # Deprecated alias.
     ToolExecutionError,
     ValidationError,
 )
@@ -67,6 +71,7 @@ from .fleet import (
     Fleet,
     FleetConfig,
     FleetCoordinator,
+    FleetMailbox,
     FleetResult,
     FleetSummary,
     FleetTask,
@@ -85,9 +90,16 @@ from .models import (
     resolve_model,
 )
 from .persistence import PersistentSession, SessionStore
-from .repo_map import RelevantFile, RepoMap, RepoMapFile
 from .skills import SkillDiscovery, SkillInfo, get_skill_content, list_skills
-from .squad import SquadAgent, SquadAgentResult, SquadCoordinator, SquadResult, SquadRole, SquadTeam
+from .squad import (
+    SquadAgent,
+    SquadAgentResult,
+    SquadAggregationStrategy,
+    SquadCoordinator,
+    SquadResult,
+    SquadRole,
+    SquadTeam,
+)
 from .stats import RunStats, StatsTracker, load_start_commit, load_state, save_start_commit
 from .templates import (
     StepInstance,
@@ -101,141 +113,84 @@ from .templates import (
 )
 from .visualization import render_ascii, render_mermaid, visualize_plan
 
+if TYPE_CHECKING:
+    from .repo_map import RelevantFile, RepoMap, RepoMapFile
+
 __all__ = [
-    # Agent
-    "AgentSession",
-    "AgentTurn",
-    "AgentResult",
-    # Approval
-    "ApprovalAction",
-    "ApprovalGate",
-    "ApprovalMode",
-    "ApprovalWorkflow",
-    "AuditEntry",
-    "AuditLogger",
-    "ChangeStats",
-    "ChangePreview",
-    "ChangeStatistics",
-    "DiffPreview",
-    "RiskAssessment",
-    "RiskAssessor",
-    # Core
+    # Core API
     "Copex",
-    "CopilotCLI",
     "CopexConfig",
+    "CopilotCLI",
     "make_client",
+    "find_copilot_cli",
     "Model",
     "ReasoningEffort",
+    "resolve_model",
     "discover_models",
     "get_available_models",
     "model_supports_reasoning",
-    "no_reasoning_models",
     "refresh_model_capabilities",
-    "resolve_model",
-    # Skills
-    "SkillDiscovery",
-    "SkillInfo",
-    "find_copilot_cli",
-    "get_skill_content",
-    "list_skills",
-    # Exceptions
-    "AllModelsUnavailable",
-    "AuthenticationError",
-    "CircuitBreakerOpen",
-    "ConfigError",
-    "ConfigurationError",
-    "ConnectionError",
-    "CopexError",
-    "MCPError",
-    "PlanExecutionError",
-    "RateLimitError",
-    "RetryError",
-    "SecurityError",
-    "SessionError",
-    "SessionRecoveryFailed",
-    "StreamingError",
-    "TimeoutError",
-    "ToolExecutionError",
-    "ValidationError",
-    # Retry/Backoff
-    "AdaptiveRetry",
-    "with_retry",
-    "BackoffStrategy",
-    "ErrorCategory",
-    # Caching
-    "StepCache",
-    "get_cache",
-    "clear_global_cache",
-    # Conditions
-    "Condition",
-    "ConditionContext",
-    "when",
-    "all_of",
-    "any_of",
-    # Structured edits
-    "EditFormat",
-    "EditOperation",
-    "EditBatchResult",
-    "UndoBatchInfo",
-    "UndoResult",
-    "VerificationCheck",
-    "VerificationReport",
-    "parse_structured_edits",
-    "apply_edit_text",
-    "apply_edit_operations",
-    "run_verification",
-    "list_undo_history",
-    "undo_last_edit_batch",
-    # Templates
-    "StepTemplate",
-    "StepInstance",
-    "TemplateRegistry",
-    "get_registry",
-    "create_step",
-    "test_workflow",
-    "build_workflow",
-    "deploy_workflow",
-    # Visualization
-    "visualize_plan",
-    "render_ascii",
-    "render_mermaid",
-    # Fleet
-    "AdaptiveConcurrency",
+    "no_reasoning_models",
+    # Main orchestration
+    "AgentSession",
+    "AgentTurn",
+    "AgentResult",
     "Fleet",
+    "FleetTask",
     "FleetConfig",
     "FleetCoordinator",
+    "FleetMailbox",
     "FleetResult",
     "FleetSummary",
-    "FleetTask",
-    "FleetStore",
-    "RunRecord",
-    "TaskRecord",
     "summarize_fleet_results",
-    # Persistence
+    "SquadCoordinator",
+    "SquadTeam",
+    "SquadAgent",
+    "SquadRole",
+    "SquadResult",
+    "SquadAgentResult",
+    "SquadAggregationStrategy",
+    # Runtime support
     "SessionStore",
     "PersistentSession",
-    # Checkpointing
     "CheckpointStore",
     "CheckpointedRalph",
-    # Stats
-    "RunStats",
-    "StatsTracker",
-    "save_start_commit",
-    "load_start_commit",
-    "load_state",
-    # Squad
-    "SquadAgent",
-    "SquadAgentResult",
-    "SquadCoordinator",
-    "SquadResult",
-    "SquadRole",
-    "SquadTeam",
-    # Repo map
-    "RepoMap",
-    "RepoMapFile",
-    "RelevantFile",
-    # Metrics
     "MetricsCollector",
     "RequestMetrics",
     "SessionMetrics",
+    "list_skills",
+    "get_skill_content",
+    "SkillDiscovery",
+    "SkillInfo",
+    # Exception API
+    "CopexError",
+    "ConfigError",
+    "ConfigurationError",
+    "ValidationError",
+    "SecurityError",
+    "AuthenticationError",
+    "RateLimitError",
+    "RetryError",
+    "MCPError",
+    "PlanExecutionError",
+    "CircuitBreakerOpen",
+    "SessionError",
+    "SessionRecoveryFailed",
+    "AllModelsUnavailable",
+    "ToolExecutionError",
+    "StreamingError",
+    "CopexTimeoutError",
+    "CopexConnectionError",
 ]
+
+
+def __getattr__(name: str) -> Any:
+    if name in {"RepoMap", "RepoMapFile", "RelevantFile"}:
+        from .repo_map import RelevantFile, RepoMap, RepoMapFile
+
+        return {
+            "RepoMap": RepoMap,
+            "RepoMapFile": RepoMapFile,
+            "RelevantFile": RelevantFile,
+        }[name]
+    raise AttributeError(f"module {__name__!r} has no attribute {name!r}")

@@ -7,6 +7,7 @@ All custom exceptions inherit from CopexError for unified error handling.
 from __future__ import annotations
 
 import logging
+import warnings
 from typing import Any
 
 logger = logging.getLogger(__name__)
@@ -187,7 +188,7 @@ class SecurityError(CopexError):
         self.violation_type = violation_type
 
 
-class TimeoutError(CopexError):
+class CopexTimeoutError(CopexError):
     """Raised when an operation times out.
 
     Attributes:
@@ -242,7 +243,7 @@ class RateLimitError(CopexError):
         self.retry_after = retry_after
 
 
-class ConnectionError(CopexError):
+class CopexConnectionError(CopexError):
     """Raised for network connection errors.
 
     Attributes:
@@ -265,6 +266,52 @@ class ConnectionError(CopexError):
         super().__init__(message, ctx)
         self.host = host
         self.port = port
+
+
+class TimeoutError(CopexTimeoutError):
+    """Deprecated alias for ``CopexTimeoutError``."""
+
+    def __init__(
+        self,
+        message: str,
+        timeout_seconds: float | None = None,
+        operation: str | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        warnings.warn(
+            "copex.exceptions.TimeoutError is deprecated; use CopexTimeoutError",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(
+            message,
+            timeout_seconds=timeout_seconds,
+            operation=operation,
+            context=context,
+        )
+
+
+class ConnectionError(CopexConnectionError):
+    """Deprecated alias for ``CopexConnectionError``."""
+
+    def __init__(
+        self,
+        message: str,
+        host: str | None = None,
+        port: int | None = None,
+        context: dict[str, Any] | None = None,
+    ) -> None:
+        warnings.warn(
+            "copex.exceptions.ConnectionError is deprecated; use CopexConnectionError",
+            DeprecationWarning,
+            stacklevel=2,
+        )
+        super().__init__(
+            message,
+            host=host,
+            port=port,
+            context=context,
+        )
 
 
 class CircuitBreakerOpen(CopexError):

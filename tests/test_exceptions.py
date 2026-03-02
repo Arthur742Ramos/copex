@@ -11,7 +11,9 @@ from copex.exceptions import (
     ConfigError,
     ConfigurationError,
     ConnectionError,
+    CopexConnectionError,
     CopexError,
+    CopexTimeoutError,
     MCPError,
     PlanExecutionError,
     RateLimitError,
@@ -108,7 +110,7 @@ class TestSecurityError:
 
 class TestTimeoutError:
     def test_with_details(self) -> None:
-        e = TimeoutError("timed out", timeout_seconds=30, operation="send")
+        e = CopexTimeoutError("timed out", timeout_seconds=30, operation="send")
         assert e.timeout_seconds == 30
         assert e.operation == "send"
 
@@ -126,7 +128,7 @@ class TestRateLimitError:
 
 class TestConnectionError:
     def test_with_host_port(self) -> None:
-        e = ConnectionError("refused", host="localhost", port=8080)
+        e = CopexConnectionError("refused", host="localhost", port=8080)
         assert e.host == "localhost"
         assert e.port == 8080
 
@@ -142,9 +144,11 @@ class TestInheritanceHierarchy:
             PlanExecutionError,
             ValidationError,
             SecurityError,
+            CopexTimeoutError,
             TimeoutError,
             AuthenticationError,
             RateLimitError,
+            CopexConnectionError,
             ConnectionError,
             CircuitBreakerOpen,
             SessionError,
@@ -168,3 +172,15 @@ class TestInheritanceHierarchy:
             raise RateLimitError("limited")
         with pytest.raises(CopexError):
             raise SessionRecoveryFailed("failed")
+
+
+class TestDeprecatedAliases:
+    def test_timeout_alias_warns(self) -> None:
+        with pytest.warns(DeprecationWarning):
+            err = TimeoutError("timed out")
+        assert isinstance(err, CopexTimeoutError)
+
+    def test_connection_alias_warns(self) -> None:
+        with pytest.warns(DeprecationWarning):
+            err = ConnectionError("refused")
+        assert isinstance(err, CopexConnectionError)

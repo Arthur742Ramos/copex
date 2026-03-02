@@ -750,6 +750,83 @@ def _track_git_files(
                     git_finalizer.track(path)
 
 
+def _collect_fleet_config_errors(config: FleetConfig) -> list[str]:
+    errors: list[str] = []
+    if config.max_concurrent < 1:
+        errors.append("max_concurrent must be >= 1")
+    if config.timeout <= 0:
+        errors.append("timeout must be > 0")
+    if config.default_retries < 0:
+        errors.append("default_retries must be >= 0")
+    if config.default_retry_delay < 0:
+        errors.append("default_retry_delay must be >= 0")
+    if config.dep_timeout is not None and config.dep_timeout <= 0:
+        errors.append("dep_timeout must be > 0 when set")
+    if config.min_concurrent < 1:
+        errors.append("min_concurrent must be >= 1")
+    if config.min_concurrent > config.max_concurrent:
+        errors.append("min_concurrent cannot exceed max_concurrent")
+    if config.concurrency_restore_after < 1:
+        errors.append("concurrency_restore_after must be >= 1")
+    return errors
+
+
+def _collect_task_validation_errors(
+    tasks: list[FleetTask], *, check_cwd: bool
+) -> list[str]:
+    errors: list[str] = []
+    seen_ids: set[str] = set()
+
+    for index, task in enumerate(tasks):
+        task_id = task.id
+        if not isinstance(task_id, str) or not task_id.strip():
+            errors.append(f"Task at index {index} has an empty id")
+            continue
+        if task_id != task_id.strip():
+            errors.append(f"Task '{task_id}' has leading/trailing whitespace in id")
+        if task_id in seen_ids:
+            errors.append(f"Duplicate task id '{task_id}'")
+        seen_ids.add(task_id)
+
+        if not isinstance(task.prompt, str) or not task.prompt.strip():
+            errors.append(f"Task '{task_id}' has an empty prompt")
+
+        if task.timeout_sec is not None and task.timeout_sec <= 0:
+            errors.append(
+                f"Task '{task_id}' has invalid timeout_sec={task.timeout_sec}; must be > 0"
+            )
+        if task.retries is not None and task.retries < 0:
+            errors.append(
+                f"Task '{task_id}' has invalid retries={task.retries}; must be >= 0"
+            )
+        if task.retry_delay is not None and task.retry_delay < 0:
+            errors.append(
+                f"Task '{task_id}' has invalid retry_delay={task.retry_delay}; must be >= 0"
+            )
+
+        if check_cwd and task.cwd is not None:
+            try:
+                task_cwd = Path(task.cwd)
+            except (TypeError, ValueError) as exc:
+                errors.append(f"Task '{task_id}' has invalid cwd '{task.cwd}': {exc}")
+            else:
+                if not task_cwd.exists():
+                    errors.append(f"Task '{task_id}' cwd does not exist: {task_cwd}")
+                elif not task_cwd.is_dir():
+                    errors.append(f"Task '{task_id}' cwd is not a directory: {task_cwd}")
+
+        seen_deps: set[str] = set()
+        for dep in task.depends_on:
+            if not isinstance(dep, str) or not dep.strip():
+                errors.append(f"Task '{task_id}' has an empty dependency id")
+                continue
+            if dep in seen_deps:
+                errors.append(f"Task '{task_id}' has duplicate dependency '{dep}'")
+            seen_deps.add(dep)
+
+    return errors
+
+
 @dataclass
 class FleetTask:
     """A single task to be executed by a fleet agent."""
@@ -955,6 +1032,13 @@ class FleetCoordinator:
             List of FleetResult in the same order as input tasks.
         """
         config = config or FleetConfig()
+        validation_errors = [
+            *_collect_fleet_config_errors(config),
+            *_collect_task_validation_errors(tasks, check_cwd=True),
+        ]
+        if validation_errors:
+            detail = "\n".join(f"  - {error}" for error in validation_errors)
+            raise ValueError(f"Fleet validation failed:\n{detail}")
         self._validate_dag(tasks)
 
         results: dict[str, FleetResult] = {}
@@ -1001,6 +1085,7 @@ class FleetCoordinator:
         execution_futures: dict[asyncio.Task[tuple[str, FleetResult]], str] = {}
         fatal_failures: dict[str, Exception] = {}
         fail_fast_shutdown = False
+        scheduler_state_lock = asyncio.Lock()
 
         # Create shared client and session pool for efficiency (v1.9.0)
         # Skip SDK client when use_cli is set — tasks use CopilotCLI instead
@@ -1042,34 +1127,49 @@ class FleetCoordinator:
                 *,
                 status: str,
             ) -> None:
-                if task_id in finished:
-                    return
+                should_cancel = False
+                async with scheduler_state_lock:
+                    if task_id in finished:
+                        return
+                    if status == "blocked" and (task_id in queued_ids or task_id in running_ids):
+                        return
 
-                try:
                     results[task_id] = result
                     ordered_results[result_index[task_id]] = result
                     finished[task_id] = result.success
-                    if config.fail_fast and not result.success:
-                        cancel_event.set()
-                    if on_status:
-                        on_status(task_id, status)
-                    if mailbox is not None:
-                        payload = {
-                            "task_id": task_id,
-                            "success": result.success,
-                            "content": result.response.content if result.response else "",
-                            "error": str(result.error) if result.error else None,
-                            "duration_ms": result.duration_ms,
-                        }
-                        for dependent_id in dependents.get(task_id, []):
-                            await mailbox.send(
-                                dependent_id,
-                                payload,
-                                from_task=task_id,
-                            )
+                    should_cancel = config.fail_fast and not result.success
 
-                    newly_ready: list[FleetTask] = []
+                if should_cancel:
+                    cancel_event.set()
+
+                done_events[task_id].set()
+                scheduler_wakeup.set()
+
+                if on_status:
+                    on_status(task_id, status)
+                if mailbox is not None:
+                    payload = {
+                        "task_id": task_id,
+                        "success": result.success,
+                        "content": result.response.content if result.response else "",
+                        "error": str(result.error) if result.error else None,
+                        "duration_ms": result.duration_ms,
+                    }
                     for dependent_id in dependents.get(task_id, []):
+                        await mailbox.send(
+                            dependent_id,
+                            payload,
+                            from_task=task_id,
+                        )
+
+                newly_ready: list[FleetTask] = []
+                for dependent_id in dependents.get(task_id, []):
+                    dependent_task: FleetTask | None = None
+                    dep_policy = DependencyFailurePolicy.BLOCK
+                    failed_deps: list[str] = []
+                    was_cancelled = False
+
+                    async with scheduler_state_lock:
                         if dependent_id in finished:
                             continue
                         remaining_deps[dependent_id] -= 1
@@ -1080,36 +1180,38 @@ class FleetCoordinator:
                             continue
 
                         dependent_task = task_by_id[dependent_id]
-                        dep_policy = _normalize_dep_failure_policy(dependent_task.on_dependency_failure)
-                        failed_deps = failed_upstreams.get(dependent_id, [])
-                        if failed_deps and dep_policy == DependencyFailurePolicy.BLOCK:
-                            blocked = FleetResult(
-                                task_id=dependent_id,
-                                success=False,
-                                error=RuntimeError(
-                                    f"Dependency failed for task '{dependent_id}': "
-                                    f"upstream {failed_deps!r} did not succeed"
-                                ),
-                            )
-                            await _complete_task(dependent_id, blocked, status="blocked")
-                            continue
+                        dep_policy = _normalize_dep_failure_policy(
+                            dependent_task.on_dependency_failure
+                        )
+                        failed_deps = list(failed_upstreams.get(dependent_id, []))
+                        was_cancelled = cancel_event.is_set()
 
-                        if cancel_event.is_set():
-                            cancelled = FleetResult(
-                                task_id=dependent_id,
-                                success=False,
-                                error=asyncio.CancelledError("Fleet cancelled due to fail-fast"),
-                            )
-                            await _complete_task(dependent_id, cancelled, status="failed")
-                            continue
+                    if failed_deps and dep_policy == DependencyFailurePolicy.BLOCK:
+                        blocked = FleetResult(
+                            task_id=dependent_id,
+                            success=False,
+                            error=RuntimeError(
+                                f"Dependency failed for task '{dependent_id}': "
+                                f"upstream {failed_deps!r} did not succeed"
+                            ),
+                        )
+                        await _complete_task(dependent_id, blocked, status="blocked")
+                        continue
 
+                    if was_cancelled:
+                        cancelled = FleetResult(
+                            task_id=dependent_id,
+                            success=False,
+                            error=asyncio.CancelledError("Fleet cancelled due to fail-fast"),
+                        )
+                        await _complete_task(dependent_id, cancelled, status="failed")
+                        continue
+
+                    if dependent_task is not None:
                         newly_ready.append(dependent_task)
 
-                    for ready_task in sorted(newly_ready, key=lambda task: priority_index[task.id]):
-                        _enqueue_ready(ready_task)
-                finally:
-                    done_events[task_id].set()
-                    scheduler_wakeup.set()
+                for ready_task in sorted(newly_ready, key=lambda task: priority_index[task.id]):
+                    _enqueue_ready(ready_task)
 
             async def _watch_dependency_timeout(task: FleetTask) -> None:
                 if not task.depends_on:
@@ -1121,9 +1223,12 @@ class FleetCoordinator:
                         timeout=_dependency_wait_timeout(task),
                     )
                 except asyncio.TimeoutError:
-                    if task.id in finished:
+                    async with scheduler_state_lock:
+                        if task.id in finished or task.id in queued_ids or task.id in running_ids:
+                            return
+                        timed_out = [dep for dep in task.depends_on if not done_events[dep].is_set()]
+                    if not timed_out:
                         return
-                    timed_out = [dep for dep in task.depends_on if not done_events[dep].is_set()]
                     blocked = FleetResult(
                         task_id=task.id,
                         success=False,
@@ -1387,8 +1492,8 @@ class FleetCoordinator:
             instructions_file = None
 
         task_timeout = task.timeout_sec if task.timeout_sec is not None else fleet_cfg.timeout
-        task_cwd = task.cwd if task.cwd is not None else self._base_config.cwd
-        task_working_dir = task.cwd if task.cwd is not None else self._base_config.working_directory
+        task_working_dir = str(Path(task.cwd)) if task.cwd is not None else str(self._base_config.working_dir)
+        task_cwd = task_working_dir
         task_skills = task.skills if task.skills is not None else self._base_config.skills
         if task.exclude_tools is None:
             task_excluded = self._base_config.excluded_tools
@@ -1635,6 +1740,26 @@ class Fleet:
         Returns:
             The task ID (auto-generated from prompt if not provided).
         """
+        if not isinstance(prompt, str) or not prompt.strip():
+            raise ValueError("Task prompt must not be empty")
+        if task_id is not None:
+            if not isinstance(task_id, str) or not task_id.strip():
+                raise ValueError("task_id must not be empty")
+            if task_id != task_id.strip():
+                raise ValueError("task_id must not include leading/trailing whitespace")
+        if timeout_sec is not None and timeout_sec <= 0:
+            raise ValueError("timeout_sec must be > 0")
+        if retries is not None and retries < 0:
+            raise ValueError("retries must be >= 0")
+        if retry_delay is not None and retry_delay < 0:
+            raise ValueError("retry_delay must be >= 0")
+        if cwd is not None:
+            cwd_path = Path(cwd)
+            if not cwd_path.exists():
+                raise ValueError(f"cwd does not exist: {cwd_path}")
+            if not cwd_path.is_dir():
+                raise ValueError(f"cwd is not a directory: {cwd_path}")
+
         tid = task_id or _slugify(prompt)
 
         # Ensure unique ID
@@ -1778,8 +1903,11 @@ class Fleet:
         - MCP server configs have required fields
         - Prompt template {{task:id.field}} references valid task IDs
         """
-        task_ids = {t.id for t in self._tasks}
-        errors: list[str] = []
+        errors = [
+            *_collect_fleet_config_errors(self._fleet_config),
+            *_collect_task_validation_errors(self._tasks, check_cwd=True),
+        ]
+        task_ids = {t.id for t in self._tasks if isinstance(t.id, str) and t.id.strip()}
 
         for task in self._tasks:
             # Validate skills_dirs

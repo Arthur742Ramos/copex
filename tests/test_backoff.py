@@ -2,8 +2,6 @@
 
 from __future__ import annotations
 
-import asyncio
-
 import pytest
 
 from copex.backoff import (
@@ -15,7 +13,6 @@ from copex.backoff import (
     with_retry,
 )
 from copex.exceptions import RateLimitError, RetryError
-
 
 # ---------------------------------------------------------------------------
 # BackoffStrategy

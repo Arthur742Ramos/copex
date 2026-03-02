@@ -1,12 +1,11 @@
 from __future__ import annotations
 
-import pytest
-
 from unittest.mock import AsyncMock, patch
 
+import pytest
+
 from copex.client import Response
-from copex.config import CopexConfig
-from copex.fleet import Fleet, FleetConfig, FleetTask
+from copex.fleet import Fleet
 from copex.fleet_store import FleetStore
 
 

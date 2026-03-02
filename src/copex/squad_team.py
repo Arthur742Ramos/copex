@@ -9,6 +9,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import tomli_w
+
 try:
     import tomllib
 except ImportError:  # pragma: no cover - Python < 3.11
@@ -38,6 +40,7 @@ from copex.squad import (
     _normalize_depends_on_roles,
     _normalize_role_identifier,
 )
+from copex.squad_team_ai import build_repo_analysis_prompt, parse_repo_analysis_response
 
 logger = logging.getLogger(__name__)
 
@@ -51,6 +54,16 @@ def _clamp_retries(value: Any, fallback: int = 1) -> int:
     except (TypeError, ValueError):
         retries = fallback
     return max(0, retries)
+
+
+def _clamp_retry_delay(value: Any) -> float | None:
+    if value is None:
+        return None
+    try:
+        retry_delay = float(value)
+    except (TypeError, ValueError):
+        return None
+    return max(0.0, retry_delay)
 
 
 @dataclass
@@ -257,6 +270,7 @@ class SquadTeam:
                 else []
             )
             retries = _clamp_retries(item.get("retries", 1), fallback=1)
+            retry_delay = _clamp_retry_delay(item.get("retry_delay"))
 
             emoji_raw = str(item.get("emoji", "")).strip()
             agents.append(
@@ -269,6 +283,7 @@ class SquadTeam:
                     depends_on=depends_on,
                     subtasks=subtasks,
                     retries=retries,
+                    retry_delay=retry_delay,
                 )
             )
 
@@ -297,6 +312,7 @@ class SquadTeam:
                 else []
             )
             retries = _clamp_retries(item.get("retries", 1), fallback=1)
+            retry_delay = _clamp_retry_delay(item.get("retry_delay"))
             agents.append(SquadAgent(
                 name=item.get("name", role_str.replace("_", " ").title()),
                 role=role_str,
@@ -310,6 +326,7 @@ class SquadTeam:
                 depends_on=depends_on,
                 subtasks=subtasks,
                 retries=retries,
+                retry_delay=retry_delay,
             ))
 
         if not agents:
@@ -369,6 +386,8 @@ class SquadTeam:
                 item["subtasks"] = agent.subtasks
             if agent.retries != 1:
                 item["retries"] = _clamp_retries(agent.retries, fallback=1)
+            if agent.retry_delay is not None:
+                item["retry_delay"] = _clamp_retry_delay(agent.retry_delay)
             serialized_agents.append(item)
         payload: dict[str, Any] = {
             "lead": lead_name,
@@ -445,9 +464,14 @@ class SquadTeam:
         agents = payload.get("agents", [])
         phases = payload.get("phases", [])
 
+        def _toml_value(value: Any) -> str:
+            dumped = tomli_w.dumps({"value": value}).strip()
+            _, literal = dumped.split("=", 1)
+            return literal.strip()
+
         lines = [
             "[squad]",
-            f"lead = {json.dumps(lead_name, ensure_ascii=False)}",
+            f"lead = {_toml_value(lead_name)}",
         ]
         if isinstance(phases, list):
             for item in phases:
@@ -457,8 +481,8 @@ class SquadTeam:
                 gate = bool(item.get("gate", False))
                 lines.append("")
                 lines.append("[[squad.phases]]")
-                lines.append(f"phase = {phase}")
-                lines.append(f"gate = {str(gate).lower()}")
+                lines.append(f"phase = {_toml_value(phase)}")
+                lines.append(f"gate = {_toml_value(gate)}")
         if isinstance(agents, list):
             for item in agents:
                 if not isinstance(item, dict):
@@ -469,30 +493,31 @@ class SquadTeam:
                     continue
                 lines.append("")
                 lines.append("[[squad.agents]]")
-                lines.append(f"name = {json.dumps(name, ensure_ascii=False)}")
-                lines.append(f"role = {json.dumps(role_desc, ensure_ascii=False)}")
-                lines.append(f"phase = {_clamp_phase(item.get('phase', 2), fallback=2)}")
+                lines.append(f"name = {_toml_value(name)}")
+                lines.append(f"role = {_toml_value(role_desc)}")
+                lines.append(
+                    f"phase = {_toml_value(_clamp_phase(item.get('phase', 2), fallback=2))}"
+                )
 
                 role_id = str(item.get("id", "")).strip().lower()
                 if role_id:
-                    lines.append(f"id = {json.dumps(role_id, ensure_ascii=False)}")
+                    lines.append(f"id = {_toml_value(role_id)}")
                 depends_on = _normalize_depends_on_roles(item.get("depends_on", []))
                 if depends_on:
-                    depends_on_str = ", ".join(
-                        json.dumps(dep, ensure_ascii=False) for dep in depends_on
-                    )
-                    lines.append(f"depends_on = [{depends_on_str}]")
+                    lines.append(f"depends_on = {_toml_value(depends_on)}")
                 if "retries" in item:
-                    lines.append(f"retries = {_clamp_retries(item.get('retries', 1), fallback=1)}")
+                    lines.append(
+                        f"retries = {_toml_value(_clamp_retries(item.get('retries', 1), fallback=1))}"
+                    )
+                retry_delay = _clamp_retry_delay(item.get("retry_delay"))
+                if retry_delay is not None:
+                    lines.append(f"retry_delay = {_toml_value(retry_delay)}")
 
                 subtasks = item.get("subtasks")
                 if isinstance(subtasks, list):
                     normalized = [str(subtask).strip() for subtask in subtasks if str(subtask).strip()]
                     if normalized:
-                        subtasks_str = ", ".join(
-                            json.dumps(subtask, ensure_ascii=False) for subtask in normalized
-                        )
-                        lines.append(f"subtasks = [{subtasks_str}]")
+                        lines.append(f"subtasks = {_toml_value(normalized)}")
 
         config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
         logger.info(f"Squad team saved to {config_path}")
@@ -552,6 +577,8 @@ class SquadTeam:
             '- "role": short responsibility sentence',
             '- "phase": integer 1-4',
             '- "depends_on": optional list of role IDs this agent depends on',
+            '- "retries": optional non-negative integer retry count for this role',
+            '- "retry_delay": optional non-negative float base delay (seconds) between retries',
             '- "id": optional snake_case role identifier',
             '- "lead": optional boolean (true for lead entry)',
             "",
@@ -611,6 +638,9 @@ class SquadTeam:
             retries = item.get("retries")
             if retries is not None:
                 agent_entry["retries"] = _clamp_retries(retries, fallback=1)
+            retry_delay = _clamp_retry_delay(item.get("retry_delay"))
+            if retry_delay is not None:
+                agent_entry["retry_delay"] = retry_delay
             subtasks = item.get("subtasks")
             if isinstance(subtasks, list):
                 normalized_subtasks = [
@@ -671,91 +701,17 @@ class SquadTeam:
             if existing_team is None:
                 existing_team = cls.load_squad_file(path or Path.cwd())
 
-            # Build prompt for AI
-            prompt_parts = [
-                "Analyze this repository and determine what development team roles are needed.",
-                "",
-                "# Repository Context",
-            ]
-
-            if context.get("project_name"):
-                prompt_parts.append(f"Project: {context['project_name']}")
-            if context.get("description"):
-                prompt_parts.append(f"Description: {context['description']}")
-            if context.get("source_extensions"):
-                prompt_parts.append(f"Languages: {', '.join(context['source_extensions'])}")
-            if context.get("dependencies"):
-                deps = context["dependencies"]
-                prompt_parts.append(f"Dependencies: {', '.join(deps[:5])}")
-            if context.get("directory_structure"):
-                struct = "\n".join(context["directory_structure"][:30])
-                prompt_parts.append(f"\nDirectory structure:\n{struct}")
-            if context.get("readme_excerpt"):
-                excerpt = context["readme_excerpt"][:1000]
-                prompt_parts.append(f"\nREADME excerpt:\n{excerpt}")
-
-            # Include existing team context if available
-            if existing_team and existing_team.agents:
-                prompt_parts.append("")
-                prompt_parts.append("# Current Team Configuration")
-                prompt_parts.append("")
-                prompt_parts.append(
-                    "This repository already has a team configured. "
-                    "Review it and decide whether to keep it as-is, "
-                    "modify roles, or add/remove agents:"
-                )
-                for agent in existing_team.agents:
-                    prompt_parts.append(
-                        f"- {agent.emoji} {agent.name} (role: {agent.role}, "
-                        f"phase: {agent.phase})"
-                    )
-
-            prompt_parts.extend([
-                "",
-                "# Instructions",
-                "",
-                "Determine the ideal team composition for this repository.",
-                "You may create ANY roles that make sense — you are NOT limited to a predefined list.",
-                "Common roles include lead, developer, tester, docs, devops, frontend, backend,",
-                "but you can invent specialized roles like security_engineer, data_scientist,",
-                "api_designer, performance_engineer, etc.",
-                "",
-                "Respond ONLY with a JSON array of objects, each with:",
-                '- "role": short snake_case identifier (e.g. "security_engineer")',
-                '- "name": human-readable name (e.g. "Security Engineer")',
-                '- "emoji": single emoji for display',
-                '- "prompt": system prompt describing the agent\'s expertise and focus',
-                '- "phase": execution order (1=analyze first, 2=build, 3=verify, 4=document)',
-                '- "depends_on": (optional) list of role IDs this agent depends on',
-                '- "subtasks": (optional) list of strings describing parallel work items.',
-                '  When provided, the agent\'s work is split into parallel Fleet tasks —',
-                '  one per subtask — all running within the same phase.',
-                '  Use subtasks when an agent has clearly separable concerns',
-                '  (e.g., a developer handling 3 independent modules).',
-                "",
-                "Rules:",
-                "- Always include a 'lead' role with phase 1",
-                "- Keep the team small (3-5 roles typical)",
-                "- Only include roles clearly needed for THIS specific repository",
-                "- Use depends_on for explicit DAG dependencies when useful.",
-                "- If depends_on is omitted, phase ordering determines dependencies.",
-                "- Subtasks are optional — only add them when work is naturally parallelizable",
-                "- If a current team is shown above, use it as a starting point —"
-                " keep roles that still make sense, remove unnecessary ones, and add new ones if needed",
-                "",
-                "Example response:",
-                '[',
-                '  {"role": "lead", "name": "Lead Architect", "emoji": "🏗️", '
-                '"prompt": "You are the Lead Architect. Analyze the task...", "phase": 1},',
-                '  {"role": "developer", "name": "Developer", "emoji": "🔧", '
-                '"prompt": "You are the Developer. Implement the task...", "phase": 2,',
-                '   "subtasks": ["Core module implementation", "API endpoint handlers"]},',
-                '  {"role": "tester", "name": "Tester", "emoji": "🧪", '
-                '"prompt": "You are the Tester. Write comprehensive tests...", "phase": 3}',
-                ']',
-            ])
-
-            prompt = "\n".join(prompt_parts)
+            prompt = build_repo_analysis_prompt(
+                context,
+                existing_agents=(
+                    [
+                        (agent.emoji, agent.name, agent.role, agent.phase)
+                        for agent in existing_team.agents
+                    ]
+                    if existing_team and existing_team.agents
+                    else None
+                ),
+            )
 
             # Create lightweight config for AI analysis (copy to avoid mutation)
             ai_config = (config or CopexConfig()).model_copy()
@@ -767,10 +723,7 @@ class SquadTeam:
             # Call AI with timeout
             async with CopilotCLI(ai_config) as cli:
                 response = await cli.send(prompt)
-                content = response.content.strip()
-
-                # Robustly extract JSON array from LLM response
-                roles_list = extract_json_array(content)
+                roles_list = parse_repo_analysis_response(response.content)
 
                 # Build agents from AI response
                 agents: list[SquadAgent] = []
@@ -800,6 +753,7 @@ class SquadTeam:
                         )
                         depends_on = _normalize_depends_on_roles(item.get("depends_on", []))
                         retries = _clamp_retries(item.get("retries", 1), fallback=1)
+                        retry_delay = _clamp_retry_delay(item.get("retry_delay"))
                         agents.append(SquadAgent(
                             name=item.get("name", role_str.replace("_", " ").title()),
                             role=role_str,
@@ -813,6 +767,7 @@ class SquadTeam:
                             depends_on=depends_on,
                             subtasks=subtasks,
                             retries=retries,
+                            retry_delay=retry_delay,
                         ))
 
                 # Ensure lead exists

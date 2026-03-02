@@ -1,6 +1,7 @@
 """Tests for copex.json_utils."""
 
 import pytest
+
 from copex.json_utils import extract_json_array
 
 

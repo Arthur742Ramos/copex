@@ -8,7 +8,8 @@ Demonstrates:
 """
 
 import asyncio
-from copex import SquadCoordinator, CopexConfig, Model
+
+from copex import CopexConfig, Model, SquadCoordinator
 
 
 async def squad_simple():
@@ -53,7 +54,7 @@ async def squad_json_output():
 
 async def squad_custom_team():
     """Create a custom squad team with specific agents."""
-    from copex import SquadTeam, SquadAgent, SquadRole
+    from copex import SquadTeam
 
     # Use default team (Lead, Developer, Tester, Docs)
     team = SquadTeam.default()

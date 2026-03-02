@@ -22,7 +22,7 @@ from typing import Any
 
 from copex.backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory
 from copex.client import Response, StreamChunk, StreamingMetrics
-from copex.config import CopexConfig, find_copilot_cli
+from copex.config import COPILOT_CLI_NOT_FOUND_MESSAGE, CopexConfig, find_copilot_cli
 from copex.exceptions import CopexError
 from copex.memory import auto_capture_memory, compose_memory_instructions
 
@@ -38,9 +38,12 @@ class CopilotCLI:
         self._atexit_cleanup: Callable[[], None] = self._cleanup
         self._atexit_registered = False
         self._has_session = False
-        self._cli_path = self.config.cli_path or find_copilot_cli()
+        try:
+            self._cli_path = self.config.cli_path or find_copilot_cli()
+        except (AttributeError, TypeError):
+            raise CopexError(COPILOT_CLI_NOT_FOUND_MESSAGE) from None
         if not self._cli_path:
-            raise CopexError("Copilot CLI not found. Install with: npm i -g @github/copilot")
+            raise CopexError(COPILOT_CLI_NOT_FOUND_MESSAGE)
         self._retry = AdaptiveRetry(
             strategies={
                 ErrorCategory.TRANSIENT: BackoffStrategy(
@@ -176,8 +179,8 @@ class CopilotCLI:
                 cmd.extend(["--available-tools", tool])
 
         # Working directory
-        if self.config.working_directory:
-            cmd.extend(["--add-dir", self.config.working_directory])
+        if self.config.working_directory or self.config.cwd:
+            cmd.extend(["--add-dir", str(self.config.working_dir)])
 
         return cmd
 
@@ -190,7 +193,7 @@ class CopilotCLI:
             if p.exists():
                 base_instructions = p.read_text(encoding="utf-8")
 
-        root = Path(self.config.working_directory or self.config.cwd or Path.cwd())
+        root = self.config.working_dir
         return compose_memory_instructions(base_instructions, root=root)
 
     def _resolve_mcp_config(self) -> str | None:
@@ -224,7 +227,7 @@ class CopilotCLI:
         cmd: list[str],
         on_chunk: Callable[[StreamChunk], None] | None = None,
     ) -> tuple[str, StreamingMetrics]:
-        cwd = self.config.working_directory or None
+        cwd = str(self.config.working_dir) if (self.config.working_directory or self.config.cwd) else None
         metrics = StreamingMetrics(_start_time=time.monotonic())
 
         process = await asyncio.create_subprocess_exec(
@@ -308,7 +311,7 @@ class CopilotCLI:
 
         output, streaming_metrics = await self._retry.execute(_attempt)
 
-        root = Path(self.config.working_directory or self.config.cwd or Path.cwd())
+        root = self.config.working_dir
         try:
             auto_capture_memory(prompt, output, root=root, mode="cli")
         except OSError:

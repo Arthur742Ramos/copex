@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -11,15 +12,11 @@ from copex.fleet import (
     FleetConfig,
     FleetContext,
     FleetCoordinator,
-    FleetEvent,
     FleetEventType,
     FleetMailbox,
-    FleetResult,
     FleetTask,
     _slugify,
 )
-from unittest.mock import AsyncMock, patch
-
 
 # ---------------------------------------------------------------------------
 # TestSlugify

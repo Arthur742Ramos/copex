@@ -17,11 +17,6 @@ from typing import Any
 
 logger = logging.getLogger(__name__)
 
-try:
-    from tree_sitter_languages import get_parser as _get_ts_parser
-except Exception:  # pragma: no cover - optional dependency
-    _get_ts_parser = None
-
 _CACHE_VERSION = 1
 _DEFAULT_CACHE_PATH = Path(".copex") / "repo_map.json"
 
@@ -99,6 +94,8 @@ _JAVA_METHOD_RE = re.compile(
 _CALL_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 _TS_PARSER_CACHE: dict[str, Any] = {}
+_UNSET_TREE_SITTER_PARSER = object()
+_get_ts_parser: Any = _UNSET_TREE_SITTER_PARSER
 
 _CLASS_NODE_TYPES = {
     "class_definition",
@@ -621,10 +618,19 @@ class RepoMap:
 
 
 def _get_tree_sitter_parser(language: str) -> Any | None:
-    if _get_ts_parser is None:
-        return None
     if language in _TS_PARSER_CACHE:
         return _TS_PARSER_CACHE[language]
+    global _get_ts_parser
+    if _get_ts_parser is _UNSET_TREE_SITTER_PARSER:
+        try:
+            from tree_sitter_languages import get_parser as get_ts_parser
+        except Exception:  # pragma: no cover - optional dependency behavior
+            _get_ts_parser = None
+        else:
+            _get_ts_parser = get_ts_parser
+    if _get_ts_parser is None:
+        _TS_PARSER_CACHE[language] = None
+        return None
     try:
         parser = _get_ts_parser(language)
     except Exception:  # pragma: no cover - optional dependency behavior

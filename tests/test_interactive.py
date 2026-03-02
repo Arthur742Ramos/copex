@@ -1,7 +1,8 @@
 """Tests for the new interactive module."""
 
-import pytest
 import time
+
+from rich.console import Console
 
 from copex.approval import ProposedFileChange, build_preview, summarize_changes
 from copex.interactive import (
@@ -15,7 +16,6 @@ from copex.interactive import (
     _build_stats_line,
     prompt_approval_decision,
 )
-from rich.console import Console
 
 
 class TestColors:
@@ -148,7 +148,7 @@ class TestStreamRenderer:
         console = Console(force_terminal=True)
         state = StreamState()
         renderer = StreamRenderer(console, state)
-        
+
         args = {"path": "/some/file.py", "other": "ignored"}
         preview = renderer._format_arg_preview(args)
         assert "path=" in preview
@@ -210,34 +210,37 @@ class TestFormatArgPreview:
     """Test the _format_arg_preview helper."""
 
     def test_with_path(self):
-        from copex.interactive import StreamState, StreamRenderer
         from rich.console import Console
+
+        from copex.interactive import StreamRenderer, StreamState
         console = Console(force_terminal=True)
         state = StreamState()
         renderer = StreamRenderer(console, state)
-        
+
         result = renderer._format_arg_preview({"path": "/test/file.py"})
         assert "path=/test/file.py" in result
 
     def test_with_long_value(self):
-        from copex.interactive import StreamState, StreamRenderer
         from rich.console import Console
+
+        from copex.interactive import StreamRenderer, StreamState
         console = Console(force_terminal=True)
         state = StreamState()
         renderer = StreamRenderer(console, state)
-        
+
         long_path = "/very/long/path/that/exceeds/the/maximum/allowed/length/for/preview"
         result = renderer._format_arg_preview({"path": long_path})
         assert "..." in result
         assert len(result) <= 50
 
     def test_empty_args(self):
-        from copex.interactive import StreamState, StreamRenderer
         from rich.console import Console
+
+        from copex.interactive import StreamRenderer, StreamState
         console = Console(force_terminal=True)
         state = StreamState()
         renderer = StreamRenderer(console, state)
-        
+
         result = renderer._format_arg_preview({})
         assert result == ""
 

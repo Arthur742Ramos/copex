@@ -9,10 +9,13 @@ from __future__ import annotations
 import asyncio
 import json
 import textwrap
+from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
+import copex.fleet as fleet_module
+import copex.squad as squad_module
 from copex.config import CopexConfig
 from copex.fleet import Fleet, FleetConfig, FleetEvent, FleetEventType, FleetMailbox, FleetResult
 from copex.models import Model, ReasoningEffort
@@ -21,6 +24,7 @@ from copex.squad import (
     _ROLE_PROMPTS,
     SquadAgent,
     SquadAgentResult,
+    SquadAggregationStrategy,
     SquadConfigError,
     SquadCoordinator,
     SquadEventType,
@@ -246,6 +250,45 @@ class TestSquadResult:
         assert result.success is False
         d = result.to_dict()
         assert d["success"] is False
+
+    def test_aggregate_content_success_only(self):
+        lead = SquadAgent.default_for_role(SquadRole.LEAD)
+        dev = SquadAgent.default_for_role(SquadRole.DEVELOPER)
+        result = SquadResult(
+            agent_results=[
+                SquadAgentResult(agent=lead, content="Plan", success=True),
+                SquadAgentResult(agent=dev, content="Compile error", success=False),
+            ],
+            success=False,
+        )
+        content = result.aggregate_content(strategy=SquadAggregationStrategy.SUCCESS_ONLY)
+        assert "Lead" in content
+        assert "Developer" not in content
+
+    def test_aggregate_content_failures_only(self):
+        lead = SquadAgent.default_for_role(SquadRole.LEAD)
+        dev = SquadAgent.default_for_role(SquadRole.DEVELOPER)
+        result = SquadResult(
+            agent_results=[
+                SquadAgentResult(agent=lead, content="Plan", success=True),
+                SquadAgentResult(agent=dev, content="Compile error", success=False),
+            ],
+            success=False,
+        )
+        content = result.aggregate_content(strategy="failures_only")
+        assert "Lead" not in content
+        assert "Developer" in content
+
+    def test_aggregate_content_role_filter(self):
+        result = self._make_result()
+        content = result.aggregate_content(roles=["developer"])
+        assert "Lead" not in content
+        assert "Developer" in content
+
+    def test_aggregate_content_rejects_unknown_strategy(self):
+        result = self._make_result()
+        with pytest.raises(ValueError, match="Unsupported squad aggregation strategy"):
+            result.aggregate_content(strategy="bad_strategy")
 
 
 # ===========================================================================
@@ -647,6 +690,15 @@ class TestSquadResultEdgeCases:
         d = result.to_dict()
         assert d["agents"][0]["duration_ms"] == 1000.0
 
+    def test_to_dict_includes_dependency_metadata(self):
+        result = SquadResult(
+            role_dependencies={"developer": ["lead"]},
+            task_dependencies={"developer": ["lead"]},
+        )
+        payload = result.to_dict()
+        assert payload["dependencies"]["roles"]["developer"] == ["lead"]
+        assert payload["dependencies"]["tasks"]["developer"] == ["lead"]
+
 
 # ===========================================================================
 # 12. JSON serialization
@@ -858,6 +910,70 @@ class TestProjectContextPyproject:
 
 
 # ===========================================================================
+# 15b. Squad context helper internals
+# ===========================================================================
+
+
+class TestSquadContextHelpers:
+
+    def test_task_output_ref_regex_is_shared_with_fleet(self):
+        assert squad_module._TASK_OUTPUT_REF_RE is fleet_module._TASK_OUTPUT_REF_RE
+
+    def test_gather_repo_context_caches_by_path(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('ok')", encoding="utf-8")
+
+        squad_module._clear_repo_context_cache()
+        with patch("copex.squad.os.walk", wraps=squad_module.os.walk) as mock_walk:
+            first = squad_module._gather_repo_context(tmp_path)
+            second = squad_module._gather_repo_context(tmp_path)
+
+        assert first == second
+        assert mock_walk.call_count == 1
+
+    def test_gather_repo_context_skips_hidden_dirs_in_extension_scan(self, tmp_path):
+        (tmp_path / ".hidden").mkdir()
+        (tmp_path / ".hidden" / "secret.rs").write_text("fn main() {}", encoding="utf-8")
+        (tmp_path / "vendor").mkdir()
+        (tmp_path / "vendor" / "ignored.go").write_text("package main", encoding="utf-8")
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('ok')", encoding="utf-8")
+
+        squad_module._clear_repo_context_cache()
+        context = squad_module._gather_repo_context(tmp_path)
+
+        assert ".py" in context["source_extensions"]
+        assert ".rs" not in context["source_extensions"]
+        assert ".go" not in context["source_extensions"]
+
+    def test_repo_scan_cache_reuses_single_os_walk_for_source_and_test_detection(self, tmp_path):
+        (tmp_path / "src").mkdir()
+        (tmp_path / "src" / "main.py").write_text("print('ok')", encoding="utf-8")
+        (tmp_path / "tests").mkdir()
+        (tmp_path / "tests" / "test_main.py").write_text("def test_ok(): pass", encoding="utf-8")
+
+        squad_module._clear_repo_context_cache()
+        with patch("copex.squad.os.walk", wraps=squad_module.os.walk) as mock_walk:
+            assert squad_module._has_source_files(tmp_path) is True
+            assert squad_module._has_test_files(tmp_path) is True
+
+        assert mock_walk.call_count == 1
+
+    def test_read_text_tail_reads_tail_without_path_read_text(self, tmp_path, monkeypatch):
+        payload = "0123456789" * 2500
+        path = tmp_path / "knowledge.md"
+        path.write_text(payload, encoding="utf-8")
+
+        def _fail_read_text(*args, **kwargs):
+            raise AssertionError("Path.read_text should not be called")
+
+        monkeypatch.setattr(Path, "read_text", _fail_read_text)
+        tail = squad_module._read_text_tail(path, max_chars=80)
+
+        assert tail == "[Older entries truncated]\n" + payload[-80:]
+
+
+# ===========================================================================
 # 16. _build_result edge case — agent not in team
 # ===========================================================================
 
@@ -932,6 +1048,51 @@ class TestSquadCoordinatorRun:
         result = run(_test())
         assert result.success is False
         assert result.agent_results[1].error == "compile error"
+
+    def test_run_uses_provided_mailbox(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        provided_mailbox = FleetMailbox()
+
+        async def fake_run(self, on_status=None, mailbox=None):
+            assert mailbox is provided_mailbox
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                FleetResult(task_id="developer", success=True, response=Response(content="Code"), duration_ms=200),
+                FleetResult(task_id="tester", success=True, response=Response(content="Tests"), duration_ms=150),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Build something", mailbox=provided_mailbox)
+
+        result = run(_test())
+        assert result.success is True
+
+    def test_run_result_includes_dependency_graphs(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+
+        async def _test():
+            with patch.object(
+                Fleet,
+                "run",
+                new_callable=AsyncMock,
+                return_value=[
+                    FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                    FleetResult(task_id="developer", success=True, response=Response(content="Code"), duration_ms=200),
+                    FleetResult(task_id="tester", success=True, response=Response(content="Tests"), duration_ms=150),
+                    FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+                ],
+            ):
+                return await coord.run("Build something")
+
+        result = run(_test())
+        assert result.role_dependencies["lead"] == []
+        assert result.role_dependencies["developer"] == ["lead"]
+        assert result.task_dependencies["developer"] == ["lead"]
+        assert result.task_dependencies["tester"] == ["lead", "developer"]
 
     def test_run_auto_saves_generated_team_and_reuses_squad_file(
         self,
@@ -1442,6 +1603,67 @@ class TestSquadAdvancedExecutionControls:
         assert developer_result.success is True
         assert "Code fixed on second retry" in developer_result.content
 
+    def test_run_retries_use_exponential_retry_delay(self):
+        config = CopexConfig()
+        team = SquadTeam.default()
+        developer = team.get_agent("developer")
+        assert developer is not None
+        developer.retries = 2
+        developer.retry_delay = 0.5
+        coord = SquadCoordinator(config, team=team)
+        sleep_calls: list[float] = []
+
+        async def fake_run(self, on_status=None):
+            task_ids = [task.id for task in self._tasks]
+            if task_ids == ["developer__retry"]:
+                return [
+                    FleetResult(
+                        task_id="developer__retry",
+                        success=False,
+                        error=RuntimeError("still failing"),
+                        duration_ms=20,
+                    )
+                ]
+            if task_ids == ["developer__retry2"]:
+                return [
+                    FleetResult(
+                        task_id="developer__retry2",
+                        success=True,
+                        response=Response(content="retry success"),
+                        duration_ms=20,
+                    )
+                ]
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                FleetResult(
+                    task_id="developer",
+                    success=False,
+                    error=RuntimeError("compile error"),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed"),
+                    duration_ms=150,
+                ),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+            ]
+
+        async def fake_sleep(delay: float):
+            sleep_calls.append(delay)
+
+        async def _test():
+            with (
+                patch.object(Fleet, "run", new=fake_run),
+                patch.object(squad_module.asyncio, "sleep", new=fake_sleep),
+            ):
+                return await coord.run("Build something")
+
+        result = run(_test())
+        assert result.success is True
+        assert sleep_calls == [0.5, 1.0]
+
     def test_run_does_not_retry_timeout_failures(self):
         config = CopexConfig()
         coord = SquadCoordinator(config, team=SquadTeam.default())
@@ -1619,10 +1841,11 @@ class TestSquadAdvancedExecutionControls:
             SquadAgent.default_for_role("developer"),
         ])
         coord = SquadCoordinator(config, team=team)
+        provided_mailbox = FleetMailbox()
 
         async def fake_run_streaming(self, **kwargs):
             mailbox = kwargs.get("mailbox")
-            assert mailbox is not None
+            assert mailbox is provided_mailbox
             for task in self._tasks:
                 assert await mailbox.send(task.id, {"content": "hello"}, from_task="lead")
 
@@ -1649,10 +1872,17 @@ class TestSquadAdvancedExecutionControls:
 
         async def _test():
             with patch.object(Fleet, "run_streaming", new=fake_run_streaming):
-                return [event async for event in coord.run_streaming("Build something")]
+                return [
+                    event async for event in coord.run_streaming(
+                        "Build something",
+                        mailbox=provided_mailbox,
+                    )
+                ]
 
         events = run(_test())
         assert events[-1].event_type == SquadEventType.SQUAD_COMPLETED
+        assert events[-1].result is not None
+        assert events[-1].result.role_dependencies["developer"] == ["lead"]
 
     def test_build_agent_prompt_includes_persisted_knowledge_and_decisions(
         self,
@@ -2762,11 +2992,13 @@ class TestSquadTomlSupport:
                 system_prompt="Build code.",
                 phase=2,
                 retries=3,
+                retry_delay=2.5,
             ),
         ])
         team.save_squad_file(tmp_path)
         text = (tmp_path / ".squad" / "team.toml").read_text(encoding="utf-8")
         assert "retries = 3" in text
+        assert "retry_delay = 2.5" in text
 
 
 class TestSquadPriorityOverAI:
@@ -2824,6 +3056,32 @@ class TestSquadCLIManagement:
         result = runner.invoke(app, ["squad", "show"])
         assert result.exit_code == 0
         assert "No .squad file found" in result.output
+
+    def test_squad_show_reads_legacy_json(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        legacy_json = tmp_path / ".copex" / "squad.json"
+        legacy_json.parent.mkdir(parents=True, exist_ok=True)
+        legacy_json.write_text(
+            json.dumps(
+                [
+                    {"role": "lead", "name": "Architect", "phase": 1},
+                    {"role": "developer", "name": "Dev", "phase": 2},
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "show", "--json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["exists"] is True
+        assert payload["path"].endswith(".copex/squad.json")
 
     def test_squad_status_shows_team(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
@@ -2957,6 +3215,24 @@ class TestSquadCLIManagement:
 
         assert result.exit_code == 0, result.output
         assert not (tmp_path / ".squad").exists()
+
+    def test_squad_reset_deletes_legacy_json(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        legacy_json = tmp_path / ".copex" / "squad.json"
+        legacy_json.parent.mkdir(parents=True, exist_ok=True)
+        legacy_json.write_text("[]", encoding="utf-8")
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "reset", "--json"])
+
+        assert result.exit_code == 0, result.output
+        payload = json.loads(result.output)
+        assert payload["deleted"] is True
+        assert not legacy_json.exists()
 
     def test_squad_knowledge_show_when_missing(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner

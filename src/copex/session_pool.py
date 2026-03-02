@@ -65,11 +65,8 @@ class SessionPool:
 
     async def _get_model_lock(self, model: str) -> asyncio.Lock:
         """Get or create a per-model lock."""
-        if model not in self._model_locks:
-            async with self._global_lock:
-                if model not in self._model_locks:
-                    self._model_locks[model] = asyncio.Lock()
-        return self._model_locks[model]
+        async with self._global_lock:
+            return self._model_locks.setdefault(model, asyncio.Lock())
 
     async def warm(
         self,
@@ -135,34 +132,38 @@ class SessionPool:
 
     async def _cleanup_loop(self) -> None:
         """Periodically clean up idle sessions."""
-        while True:
-            await asyncio.sleep(60)  # Check every minute
-            await self._evict_idle()
+        try:
+            while True:
+                await asyncio.sleep(60)  # Check every minute
+                await self._evict_idle()
+        except asyncio.CancelledError:
+            return
 
     async def _evict_idle(self) -> None:
         """Evict sessions that have been idle too long."""
         now = time.monotonic()
-        for model in list(self._pools.keys()):
-            lock = await self._get_model_lock(model)
-            async with lock:
-                pool = self._pools.get(model)
-                if pool is None:
-                    continue
-                to_remove = []
-                for ps in pool:
-                    if not ps.in_use and (now - ps.last_used) > self.max_idle_time:
-                        to_remove.append(ps)
+        async with self._global_lock:
+            for model in list(self._pools.keys()):
+                lock = self._model_locks.setdefault(model, asyncio.Lock())
+                async with lock:
+                    pool = self._pools.get(model)
+                    if pool is None:
+                        continue
+                    to_remove = []
+                    for ps in pool:
+                        if not ps.in_use and (now - ps.last_used) > self.max_idle_time:
+                            to_remove.append(ps)
 
-                for ps in to_remove:
-                    pool.remove(ps)
-                    self._evictions += 1
-                    try:
-                        await ps.session.destroy()
-                    except Exception:  # Cleanup: best-effort idle session teardown
-                        logger.debug("Failed to destroy idle session", exc_info=True)
+                    for ps in to_remove:
+                        pool.remove(ps)
+                        self._evictions += 1
+                        try:
+                            await ps.session.destroy()
+                        except Exception:  # Cleanup: best-effort idle session teardown
+                            logger.debug("Failed to destroy idle session", exc_info=True)
 
-                if not pool:
-                    del self._pools[model]
+                    if not pool:
+                        del self._pools[model]
 
     def _evict_lru(self, pool: list[SessionPool._PooledSession]) -> _PooledSession | None:
         """Find the least-recently-used idle session for eviction."""

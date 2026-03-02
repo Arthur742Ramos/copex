@@ -2,11 +2,9 @@
 
 from __future__ import annotations
 
-import asyncio
 import json
-import os
 from pathlib import Path
-from unittest.mock import AsyncMock, MagicMock, patch
+from unittest.mock import AsyncMock, patch
 
 import pytest
 
@@ -105,6 +103,12 @@ class TestInit:
         with patch("copex.cli_client.find_copilot_cli", return_value="/opt/copilot"):
             cli = CopilotCLI(cfg)
             assert cli._cli_path == "/opt/copilot"
+
+    def test_raises_clear_error_when_cli_lookup_raises_type_error(self):
+        cfg = CopexConfig(cli_path=None)
+        with patch("copex.cli_client.find_copilot_cli", side_effect=TypeError("bad lookup")):
+            with pytest.raises(CopexError, match="install with"):
+                CopilotCLI(cfg)
 
 
 # ---------------------------------------------------------------------------

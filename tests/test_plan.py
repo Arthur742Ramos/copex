@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import json
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -11,12 +10,12 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 
 from copex.plan import (
+    PLAN_GENERATION_PROMPT,
+    STEP_EXECUTION_PROMPT,
     Plan,
     PlanExecutor,
     PlanStep,
     StepStatus,
-    PLAN_GENERATION_PROMPT,
-    STEP_EXECUTION_PROMPT,
 )
 
 
@@ -26,7 +25,7 @@ class TestPlanStep:
     def test_default_values(self):
         """Step should have sensible defaults."""
         step = PlanStep(number=1, description="Test step")
-        
+
         assert step.number == 1
         assert step.description == "Test step"
         assert step.status == StepStatus.PENDING
@@ -43,9 +42,9 @@ class TestPlanStep:
             status=StepStatus.COMPLETED,
             result="Done",
         )
-        
+
         data = step.to_dict()
-        
+
         assert data["number"] == 1
         assert data["description"] == "Test step"
         assert data["status"] == "completed"
@@ -59,9 +58,9 @@ class TestPlanStep:
             "status": "failed",
             "error": "Something went wrong",
         }
-        
+
         step = PlanStep.from_dict(data)
-        
+
         assert step.number == 2
         assert step.description == "Another step"
         assert step.status == StepStatus.FAILED
@@ -76,9 +75,9 @@ class TestPlanStep:
             "started_at": now.isoformat(),
             "completed_at": now.isoformat(),
         }
-        
+
         step = PlanStep.from_dict(data)
-        
+
         assert step.started_at is not None
         assert step.completed_at is not None
 
@@ -89,7 +88,7 @@ class TestPlan:
     def test_empty_plan(self):
         """Empty plan should have no steps."""
         plan = Plan(task="Test task")
-        
+
         assert plan.task == "Test task"
         assert plan.steps == []
         assert plan.is_complete
@@ -104,7 +103,7 @@ class TestPlan:
                 PlanStep(number=2, description="Step 2"),
             ],
         )
-        
+
         assert not plan.is_complete
         assert plan.current_step == plan.steps[0]
         assert plan.completed_count == 0
@@ -118,7 +117,7 @@ class TestPlan:
                 PlanStep(number=2, description="Step 2", status=StepStatus.COMPLETED),
             ],
         )
-        
+
         assert plan.is_complete
         assert plan.current_step is None
         assert plan.completed_count == 2
@@ -132,7 +131,7 @@ class TestPlan:
                 PlanStep(number=2, description="Step 2", status=StepStatus.COMPLETED),
             ],
         )
-        
+
         assert plan.is_complete
         assert plan.completed_count == 2
 
@@ -146,7 +145,7 @@ class TestPlan:
                 PlanStep(number=3, description="Step 3", status=StepStatus.FAILED),
             ],
         )
-        
+
         assert plan.failed_count == 2
         assert plan.completed_count == 1
 
@@ -159,10 +158,10 @@ class TestPlan:
                 PlanStep(number=2, description="Step 2", status=StepStatus.COMPLETED),
             ],
         )
-        
+
         json_str = plan.to_json()
         loaded = Plan.from_json(json_str)
-        
+
         assert loaded.task == plan.task
         assert len(loaded.steps) == len(plan.steps)
         assert loaded.steps[0].description == "Step 1"
@@ -174,14 +173,14 @@ class TestPlan:
             task="Test task",
             steps=[PlanStep(number=1, description="Step 1")],
         )
-        
+
         with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as f:
             path = Path(f.name)
-        
+
         try:
             plan.save(path)
             loaded = Plan.load(path)
-            
+
             assert loaded.task == plan.task
             assert len(loaded.steps) == 1
         finally:
@@ -197,9 +196,9 @@ class TestPlan:
                 PlanStep(number=3, description="Step 3", status=StepStatus.FAILED, error="Error!"),
             ],
         )
-        
+
         md = plan.to_markdown()
-        
+
         assert "# Plan: Build app" in md
         assert "✅" in md  # Completed icon
         assert "⬜" in md  # Pending icon
@@ -226,10 +225,10 @@ STEP 2: Write the main module
 STEP 3: Add tests
 STEP 4: Document the code"""
         )
-        
+
         executor = PlanExecutor(mock_client)
         plan = await executor.generate_plan("Build a Python package")
-        
+
         assert len(plan.steps) == 4
         assert plan.steps[0].description == "Create the project structure"
         assert plan.steps[1].description == "Write the main module"
@@ -244,10 +243,10 @@ STEP 4: Document the code"""
 2. Second step
 3. Third step"""
         )
-        
+
         executor = PlanExecutor(mock_client)
         plan = await executor.generate_plan("Test task")
-        
+
         assert len(plan.steps) == 3
         assert plan.steps[0].description == "First step"
 
@@ -255,14 +254,14 @@ STEP 4: Document the code"""
     async def test_generate_plan_callback(self, mock_client):
         """Should call on_plan_generated callback."""
         mock_client.send.return_value = MagicMock(content="STEP 1: Do something")
-        
+
         callback_called = []
         def on_plan_generated(plan):
             callback_called.append(plan)
-        
+
         executor = PlanExecutor(mock_client)
         await executor.generate_plan("Test", on_plan_generated=on_plan_generated)
-        
+
         assert len(callback_called) == 1
         assert callback_called[0].task == "Test"
 
@@ -270,7 +269,7 @@ STEP 4: Document the code"""
     async def test_execute_plan_basic(self, mock_client):
         """Should execute all steps in order."""
         mock_client.send.return_value = MagicMock(content="Step completed")
-        
+
         plan = Plan(
             task="Test task",
             steps=[
@@ -278,10 +277,10 @@ STEP 4: Document the code"""
                 PlanStep(number=2, description="Step 2"),
             ],
         )
-        
+
         executor = PlanExecutor(mock_client)
         result = await executor.execute_plan(plan)
-        
+
         assert result.is_complete
         assert result.steps[0].status == StepStatus.COMPLETED
         assert result.steps[1].status == StepStatus.COMPLETED
@@ -291,7 +290,7 @@ STEP 4: Document the code"""
     async def test_execute_plan_from_step(self, mock_client):
         """Should skip steps before from_step."""
         mock_client.send.return_value = MagicMock(content="Step completed")
-        
+
         plan = Plan(
             task="Test task",
             steps=[
@@ -300,10 +299,10 @@ STEP 4: Document the code"""
                 PlanStep(number=3, description="Step 3"),
             ],
         )
-        
+
         executor = PlanExecutor(mock_client)
         result = await executor.execute_plan(plan, from_step=2)
-        
+
         assert result.steps[0].status == StepStatus.SKIPPED
         assert result.steps[1].status == StepStatus.COMPLETED
         assert result.steps[2].status == StepStatus.COMPLETED
@@ -313,7 +312,7 @@ STEP 4: Document the code"""
     async def test_execute_plan_skips_completed_steps(self, mock_client):
         """Should not re-execute completed steps."""
         mock_client.send.return_value = MagicMock(content="Step completed")
-        
+
         plan = Plan(
             task="Test task",
             steps=[
@@ -321,32 +320,32 @@ STEP 4: Document the code"""
                 PlanStep(number=2, description="Step 2"),
             ],
         )
-        
+
         executor = PlanExecutor(mock_client)
         result = await executor.execute_plan(plan)
-        
+
         assert mock_client.send.call_count == 1  # Only step 2
 
     @pytest.mark.asyncio
     async def test_execute_plan_callbacks(self, mock_client):
         """Should call step callbacks."""
         mock_client.send.return_value = MagicMock(content="Done")
-        
+
         plan = Plan(
             task="Test",
             steps=[PlanStep(number=1, description="Step 1")],
         )
-        
+
         started = []
         completed = []
-        
+
         executor = PlanExecutor(mock_client)
         await executor.execute_plan(
             plan,
             on_step_start=lambda s: started.append(s.number),
             on_step_complete=lambda s: completed.append(s.number),
         )
-        
+
         assert started == [1]
         assert completed == [1]
 
@@ -358,7 +357,7 @@ STEP 4: Document the code"""
             Exception("Error!"),
             MagicMock(content="Done"),
         ]
-        
+
         plan = Plan(
             task="Test",
             steps=[
@@ -367,10 +366,10 @@ STEP 4: Document the code"""
                 PlanStep(number=3, description="Step 3"),
             ],
         )
-        
+
         executor = PlanExecutor(mock_client)
         result = await executor.execute_plan(plan)
-        
+
         assert result.steps[0].status == StepStatus.COMPLETED
         assert result.steps[1].status == StepStatus.FAILED
         assert result.steps[2].status == StepStatus.PENDING
@@ -382,7 +381,7 @@ STEP 4: Document the code"""
             Exception("Error!"),
             MagicMock(content="Done"),
         ]
-        
+
         plan = Plan(
             task="Test",
             steps=[
@@ -390,13 +389,13 @@ STEP 4: Document the code"""
                 PlanStep(number=2, description="Step 2"),
             ],
         )
-        
+
         executor = PlanExecutor(mock_client)
         result = await executor.execute_plan(
             plan,
             on_error=lambda step, e: True,  # Continue
         )
-        
+
         assert result.steps[0].status == StepStatus.FAILED
         assert result.steps[1].status == StepStatus.COMPLETED
 
@@ -404,15 +403,15 @@ STEP 4: Document the code"""
     async def test_execute_plan_sets_timestamps(self, mock_client):
         """Should set started_at and completed_at."""
         mock_client.send.return_value = MagicMock(content="Done")
-        
+
         plan = Plan(
             task="Test",
             steps=[PlanStep(number=1, description="Step 1")],
         )
-        
+
         executor = PlanExecutor(mock_client)
         result = await executor.execute_plan(plan)
-        
+
         assert result.steps[0].started_at is not None
         assert result.steps[0].completed_at is not None
 
@@ -420,7 +419,7 @@ STEP 4: Document the code"""
     async def test_execute_step_single(self, mock_client):
         """Should execute a single step."""
         mock_client.send.return_value = MagicMock(content="Done")
-        
+
         plan = Plan(
             task="Test",
             steps=[
@@ -428,10 +427,10 @@ STEP 4: Document the code"""
                 PlanStep(number=2, description="Step 2"),
             ],
         )
-        
+
         executor = PlanExecutor(mock_client)
         step = await executor.execute_step(plan, 2)
-        
+
         assert step.status == StepStatus.COMPLETED
         assert plan.steps[0].status == StepStatus.SKIPPED
 
@@ -442,9 +441,9 @@ STEP 4: Document the code"""
             task="Test",
             steps=[PlanStep(number=1, description="Step 1")],
         )
-        
+
         executor = PlanExecutor(mock_client)
-        
+
         with pytest.raises(ValueError, match="Step 5 not found"):
             await executor.execute_step(plan, 5)
 
@@ -452,14 +451,14 @@ STEP 4: Document the code"""
     async def test_cancel_execution(self, mock_client):
         """Should stop execution when cancelled."""
         call_count = 0
-        
+
         async def slow_send(*args, **kwargs):
             nonlocal call_count
             call_count += 1
             return MagicMock(content="Done")
-        
+
         mock_client.send = slow_send
-        
+
         plan = Plan(
             task="Test",
             steps=[
@@ -467,14 +466,14 @@ STEP 4: Document the code"""
                 PlanStep(number=2, description="Step 2"),
             ],
         )
-        
+
         executor = PlanExecutor(mock_client)
-        
+
         def on_step_complete(step):
             executor.cancel()
-        
+
         await executor.execute_plan(plan, on_step_complete=on_step_complete)
-        
+
         # Should have stopped after first step
         assert call_count == 1
         assert plan.steps[0].status == StepStatus.COMPLETED
@@ -483,15 +482,15 @@ STEP 4: Document the code"""
     def test_parse_steps_various_formats(self, mock_client):
         """Should handle various step formats."""
         executor = PlanExecutor(mock_client)
-        
+
         # Test STEP X: format
         steps = executor._parse_steps("STEP 1: First\nSTEP 2: Second")
         assert len(steps) == 2
-        
+
         # Test numbered list
         steps = executor._parse_steps("1. First\n2. Second\n3. Third")
         assert len(steps) == 3
-        
+
         # Test with colons
         steps = executor._parse_steps("1: First\n2: Second")
         assert len(steps) == 2
@@ -499,7 +498,7 @@ STEP 4: Document the code"""
     def test_parse_steps_with_parentheses(self, mock_client):
         """Should handle step format with parentheses."""
         executor = PlanExecutor(mock_client)
-        
+
         steps = executor._parse_steps("1) First step\n2) Second step")
         assert len(steps) == 2
         assert steps[0].description == "First step"
@@ -507,22 +506,22 @@ STEP 4: Document the code"""
     def test_parse_steps_empty_content(self, mock_client):
         """Should return empty list for empty content."""
         executor = PlanExecutor(mock_client)
-        
+
         steps = executor._parse_steps("")
         assert steps == []
-        
+
         steps = executor._parse_steps("   \n\n   ")
         assert steps == []
 
     def test_parse_steps_mixed_format(self, mock_client):
         """Should handle mixed formats."""
         executor = PlanExecutor(mock_client)
-        
+
         content = """Here's my plan:
 STEP 1: Do the first thing
 STEP 2: Do the second thing
 STEP 3: Finish up"""
-        
+
         steps = executor._parse_steps(content)
         assert len(steps) == 3
         assert steps[0].description == "Do the first thing"
@@ -541,7 +540,7 @@ class TestPlanEdgeCases:
                 PlanStep(number=3, description="Step 3", status=StepStatus.PENDING),
             ],
         )
-        
+
         assert plan.current_step == plan.steps[2]
 
     def test_plan_not_complete_with_running_step(self):
@@ -553,7 +552,7 @@ class TestPlanEdgeCases:
                 PlanStep(number=2, description="Step 2", status=StepStatus.RUNNING),
             ],
         )
-        
+
         assert not plan.is_complete
 
     def test_plan_json_roundtrip_preserves_all_fields(self):
@@ -579,10 +578,10 @@ class TestPlanEdgeCases:
             ],
             created_at=now,
         )
-        
+
         json_str = plan.to_json()
         loaded = Plan.from_json(json_str)
-        
+
         assert loaded.task == plan.task
         assert loaded.steps[0].result == "Success"
         assert loaded.steps[1].error == "Something broke"
@@ -616,7 +615,7 @@ class TestPromptTemplates:
         assert "{task}" in STEP_EXECUTION_PROMPT
         assert "{completed_steps}" in STEP_EXECUTION_PROMPT
         assert "{current_step}" in STEP_EXECUTION_PROMPT
-        
+
         # Should format without error
         result = STEP_EXECUTION_PROMPT.format(
             step_number=1,
@@ -639,7 +638,7 @@ class TestRalphLoopIntegration:
     def mock_ralph(self):
         """Create a mock RalphWiggum instance."""
         from copex.ralph import RalphState
-        
+
         ralph = MagicMock()
         ralph.loop = AsyncMock(return_value=RalphState(
             prompt="test",
@@ -657,16 +656,16 @@ class TestRalphLoopIntegration:
             task="Build a feature",
             steps=[PlanStep(number=1, description="Create module")],
         )
-        
+
         executor = PlanExecutor(mock_client, ralph=mock_ralph)
         result = await executor.execute_plan(plan)
-        
+
         # Ralph loop should have been called
         mock_ralph.loop.assert_called_once()
         call_args = mock_ralph.loop.call_args
         assert "Create module" in call_args.kwargs.get("prompt", call_args.args[0] if call_args.args else "")
         assert call_args.kwargs.get("completion_promise") == "Step 1 complete"
-        
+
         # Step should be completed with last response from Ralph
         assert result.steps[0].status == StepStatus.COMPLETED
         assert result.steps[0].result == "Step 1 complete"
@@ -675,15 +674,15 @@ class TestRalphLoopIntegration:
     async def test_execute_plan_falls_back_to_client_without_ralph(self, mock_client):
         """Should use client.send when ralph is not provided."""
         mock_client.send = AsyncMock(return_value=MagicMock(content="Done with step"))
-        
+
         plan = Plan(
             task="Test task",
             steps=[PlanStep(number=1, description="Do something")],
         )
-        
+
         executor = PlanExecutor(mock_client)
         result = await executor.execute_plan(plan)
-        
+
         # Should have used client.send directly
         mock_client.send.assert_called_once()
         assert result.steps[0].status == StepStatus.COMPLETED
@@ -696,12 +695,12 @@ class TestRalphLoopIntegration:
             task="Test",
             steps=[PlanStep(number=1, description="Step 1")],
         )
-        
+
         executor = PlanExecutor(mock_client, ralph=mock_ralph)
         executor.max_iterations_per_step = 15
-        
+
         await executor.execute_plan(plan)
-        
+
         call_args = mock_ralph.loop.call_args
         assert call_args.kwargs.get("max_iterations") == 15
 
@@ -709,13 +708,13 @@ class TestRalphLoopIntegration:
     async def test_ralph_uses_step_number_in_completion_promise(self, mock_client, mock_ralph):
         """Completion promise should include step number."""
         from copex.ralph import RalphState
-        
+
         # Return different states for each step
         mock_ralph.loop.side_effect = [
             RalphState(prompt="", completed=True, history=["Step 1 done"]),
             RalphState(prompt="", completed=True, history=["Step 2 done"]),
         ]
-        
+
         plan = Plan(
             task="Multi-step task",
             steps=[
@@ -723,10 +722,10 @@ class TestRalphLoopIntegration:
                 PlanStep(number=2, description="Second"),
             ],
         )
-        
+
         executor = PlanExecutor(mock_client, ralph=mock_ralph)
         await executor.execute_plan(plan)
-        
+
         calls = mock_ralph.loop.call_args_list
         assert calls[0].kwargs.get("completion_promise") == "Step 1 complete"
         assert calls[1].kwargs.get("completion_promise") == "Step 2 complete"
@@ -735,35 +734,35 @@ class TestRalphLoopIntegration:
     async def test_ralph_empty_history_uses_fallback_result(self, mock_client, mock_ralph):
         """Should use fallback result if Ralph history is empty."""
         from copex.ralph import RalphState
-        
+
         mock_ralph.loop.return_value = RalphState(
             prompt="test",
             completed=True,
             history=[],  # Empty history
         )
-        
+
         plan = Plan(
             task="Test",
             steps=[PlanStep(number=1, description="Step 1")],
         )
-        
+
         executor = PlanExecutor(mock_client, ralph=mock_ralph)
         result = await executor.execute_plan(plan)
-        
+
         assert result.steps[0].result == "Step completed"
 
     @pytest.mark.asyncio
     async def test_ralph_error_marks_step_failed(self, mock_client, mock_ralph):
         """Should mark step as failed if Ralph loop raises."""
         mock_ralph.loop.side_effect = Exception("Ralph failed")
-        
+
         plan = Plan(
             task="Test",
             steps=[PlanStep(number=1, description="Step 1")],
         )
-        
+
         executor = PlanExecutor(mock_client, ralph=mock_ralph)
         result = await executor.execute_plan(plan)
-        
+
         assert result.steps[0].status == StepStatus.FAILED
         assert "Ralph failed" in result.steps[0].error

@@ -739,6 +739,7 @@ async def _stream_message(console: Console, client: Copex, prompt: str) -> None:
             return
         finally:
             refresh_stop.set()
+            refresh_task.cancel()
             try:
                 await refresh_task
             except asyncio.CancelledError:

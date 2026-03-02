@@ -4,14 +4,10 @@ from __future__ import annotations
 
 import time
 
-import pytest
-
 from copex.approval import ProposedFileChange, build_preview, summarize_changes
 from copex.ui import (
     ActivityType,
     CopexUI,
-    Theme,
-    ToolCallInfo,
     build_approval_diff_panel,
     build_approval_summary_panel,
 )
@@ -201,16 +197,18 @@ class TestRalphUI:
 
     def test_ralph_ui_creation(self):
         """RalphUI should be creatable."""
-        from copex.ui import RalphUI
         from rich.console import Console
+
+        from copex.ui import RalphUI
 
         ui = RalphUI(Console())
         assert ui is not None
 
     def test_ralph_ui_spinner(self):
         """RalphUI should have spinner functionality."""
-        from copex.ui import RalphUI
         from rich.console import Console
+
+        from copex.ui import RalphUI
 
         ui = RalphUI(Console())
         spinner1 = ui._get_spinner()
@@ -224,16 +222,18 @@ class TestPlanUI:
 
     def test_plan_ui_creation(self):
         """PlanUI should be creatable."""
-        from copex.ui import PlanUI
         from rich.console import Console
+
+        from copex.ui import PlanUI
 
         ui = PlanUI(Console())
         assert ui is not None
 
     def test_plan_ui_spinner(self):
         """PlanUI should have spinner functionality."""
-        from copex.ui import PlanUI
         from rich.console import Console
+
+        from copex.ui import PlanUI
 
         ui = PlanUI(Console())
         spinner1 = ui._get_spinner()

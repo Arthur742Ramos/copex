@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import json
 import logging
+import shlex
 import subprocess
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -152,8 +153,12 @@ def load_campaign_state(path: Path | None = None) -> CampaignState | None:
 def run_discover_command(command: str, cwd: str | None = None) -> list[str]:
     """Run the discovery command and return discovered targets (one per line).
 
+    Security warning:
+        Discovery commands are executed as local subprocesses and should only come
+        from trusted input.
+
     Args:
-        command: Shell command to run.
+        command: Command line to run.
         cwd: Working directory (defaults to current).
 
     Returns:
@@ -163,9 +168,16 @@ def run_discover_command(command: str, cwd: str | None = None) -> list[str]:
         RuntimeError: If the discovery command fails.
     """
     try:
+        argv = shlex.split(command)
+    except ValueError as exc:
+        raise RuntimeError(f"Discovery command is invalid: {command}") from exc
+    if not argv:
+        raise RuntimeError("Discovery command is empty.")
+
+    try:
         result = subprocess.run(
-            command,
-            shell=True,
+            argv,
+            shell=False,
             capture_output=True,
             text=True,
             timeout=120,

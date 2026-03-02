@@ -100,6 +100,7 @@ def find_copilot_cli() -> str | None:
 UI_THEMES = {"default", "midnight", "mono", "sunset"}
 UI_DENSITIES = {"compact", "extended"}
 APPROVAL_MODES = {"auto-approve", "approve", "manual", "deny-all", "policy-based", "dry-run"}
+COPILOT_CLI_NOT_FOUND_MESSAGE = "Copilot CLI not found, install with: npm install -g @github/copilot"
 
 
 class RetryConfig(BaseModel):
@@ -262,6 +263,11 @@ class CopexConfig(BaseModel):
     )
     ui_density: str = Field(default="extended", description="UI density (compact or extended)")
 
+    @property
+    def working_dir(self) -> Path:
+        """Resolve effective working directory once with explicit precedence."""
+        return Path(self.working_directory or self.cwd or Path.cwd())
+
     @field_validator("reasoning_effort", mode="before")
     @classmethod
     def _parse_reasoning_effort_aliases(cls, value: Any) -> Any:
@@ -387,14 +393,17 @@ class CopexConfig(BaseModel):
         }
 
         # Use provided cli_path or auto-detect
-        cli_path = self.cli_path or find_copilot_cli()
+        try:
+            cli_path = self.cli_path or find_copilot_cli()
+        except (AttributeError, TypeError):
+            raise RuntimeError(COPILOT_CLI_NOT_FOUND_MESSAGE) from None
         if cli_path:
             opts["cli_path"] = cli_path
 
         if self.cli_url:
             opts["cli_url"] = self.cli_url
-        if self.cwd:
-            opts["cwd"] = self.cwd
+        if self.cwd or self.working_directory:
+            opts["cwd"] = str(self.working_dir)
 
         if self.github_token:
             opts["github_token"] = self.github_token
@@ -433,8 +442,8 @@ class CopexConfig(BaseModel):
         if self.disabled_skills:
             opts["disabled_skills"] = self.disabled_skills
 
-        # Working directory (defaults to cwd)
-        opts["working_directory"] = self.working_directory or str(Path.cwd())
+        # Working directory (defaults to cwd/Path.cwd)
+        opts["working_directory"] = str(self.working_dir)
 
         # Instructions + persistent project memory
         instructions = self.instructions

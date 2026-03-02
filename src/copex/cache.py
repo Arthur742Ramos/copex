@@ -12,6 +12,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import threading
 import time
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -294,6 +295,7 @@ class StepCache:
 
 # Global cache instance (can be configured)
 _global_cache: StepCache | None = None
+_global_cache_lock = threading.Lock()
 
 
 def get_cache(*, no_cache: bool = False, **kwargs: Any) -> StepCache:
@@ -311,8 +313,9 @@ def get_cache(*, no_cache: bool = False, **kwargs: Any) -> StepCache:
     if no_cache:
         return StepCache(enabled=False)
 
-    if _global_cache is None:
-        _global_cache = StepCache(**kwargs)
+    with _global_cache_lock:
+        if _global_cache is None:
+            _global_cache = StepCache(**kwargs)
 
     return _global_cache
 
@@ -324,6 +327,7 @@ def clear_global_cache() -> int:
         Number of entries cleared
     """
     global _global_cache
-    if _global_cache:
-        return _global_cache.clear()
-    return 0
+    with _global_cache_lock:
+        if _global_cache:
+            return _global_cache.clear()
+        return 0
