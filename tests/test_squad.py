@@ -14,14 +14,17 @@ from unittest.mock import AsyncMock, patch
 import pytest
 
 from copex.config import CopexConfig
-from copex.fleet import Fleet, FleetConfig, FleetResult
+from copex.fleet import Fleet, FleetConfig, FleetEvent, FleetEventType, FleetMailbox, FleetResult
 from copex.models import Model, ReasoningEffort
 from copex.squad import (
     _ROLE_EMOJIS,
     _ROLE_PROMPTS,
     SquadAgent,
     SquadAgentResult,
+    SquadConfigError,
     SquadCoordinator,
+    SquadEventType,
+    SquadExecutionError,
     SquadResult,
     SquadRole,
     SquadTeam,
@@ -302,6 +305,66 @@ class TestSquadCoordinatorTaskBuilding:
         assert "{{task:developer.content}}" in prompt
         assert "{{task:tester.content}}" in prompt
 
+    def test_render_mailbox_refs_valid_role(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config)
+
+        rendered = coord._render_mailbox_refs(
+            "Mailbox:\n{{mail:lead}}",
+            {"lead": ["first", "second"]},
+            known_roles={"lead", "developer"},
+        )
+
+        assert rendered == "Mailbox:\nfirst\n\nsecond"
+
+    def test_render_mailbox_refs_unknown_role_resolves_empty(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config)
+
+        rendered = coord._render_mailbox_refs(
+            "A{{mail:unknown}}B",
+            {"lead": ["first"]},
+            known_roles={"lead", "developer"},
+        )
+
+        assert rendered == "AB"
+
+    def test_render_mailbox_refs_empty_known_role_resolves_empty(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config)
+
+        rendered = coord._render_mailbox_refs(
+            "A{{mail:lead}}B",
+            {},
+            known_roles={"lead", "developer"},
+        )
+
+        assert rendered == "AB"
+
+    def test_collect_mail_for_role_renders_mail_placeholder(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config)
+        mailbox = FleetMailbox()
+        mailbox.create_inbox("lead")
+        mailbox.create_inbox("developer")
+        assert run(mailbox.send("developer", {"content": "from lead"}, from_task="lead"))
+
+        task_ids = {"lead": "lead", "developer": "developer"}
+        task_to_role = coord._task_to_role_map(task_ids)
+        messages = coord._collect_mail_for_role(
+            "developer",
+            task_ids=task_ids,
+            task_to_role=task_to_role,
+            mailbox=mailbox,
+        )
+        rendered = coord._render_mailbox_refs(
+            "Message: {{mail:lead}}",
+            messages,
+            known_roles=set(task_ids),
+        )
+
+        assert rendered == "Message: from lead"
+
     def test_get_dependencies_lead(self):
         config = CopexConfig()
         coord = SquadCoordinator(config)
@@ -531,6 +594,24 @@ class TestSquadCoordinatorAddTasks:
 
         for task in fleet._tasks:
             assert "Build a calculator" in task.prompt
+
+    def test_add_tasks_with_mailbox_creates_inboxes(self):
+        from copex.fleet import Fleet
+
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        fleet = Fleet(config)
+        mailbox = FleetMailbox()
+        task_ids = coord._add_tasks(fleet, "Build an API", mailbox=mailbox)
+
+        all_task_ids = [
+            task_id
+            for task_ids_value in task_ids.values()
+            for task_id in task_ids_value.split("|")
+            if task_id
+        ]
+        for task_id in all_task_ids:
+            assert run(mailbox.send(task_id, {"content": "ping"})) is True
 
 
 # ===========================================================================
@@ -902,6 +983,51 @@ class TestSquadCoordinatorRun:
 
         run(_test())
 
+    def test_run_gathers_repo_context_once_when_team_and_context_needed(
+        self,
+        tmp_path,
+        monkeypatch,
+    ):
+        monkeypatch.chdir(tmp_path)
+
+        async def fake_run(self, on_status=None):
+            results: list[FleetResult] = []
+            for task in self._tasks:
+                content = (
+                    "All tests passed. No issues found."
+                    if task.id == "tester"
+                    else "ok"
+                )
+                results.append(
+                    FleetResult(
+                        task_id=task.id,
+                        success=True,
+                        response=Response(content=content),
+                        duration_ms=1,
+                    )
+                )
+            return results
+
+        async def _test():
+            with (
+                patch(
+                    "copex.squad._gather_repo_context",
+                    return_value={"project_name": "cached"},
+                ) as mock_context,
+                patch.object(
+                    SquadTeam,
+                    "from_repo_ai",
+                    new_callable=AsyncMock,
+                    return_value=SquadTeam.default(),
+                ),
+                patch.object(Fleet, "run", new=fake_run),
+            ):
+                coord = SquadCoordinator(CopexConfig())
+                await coord.run("Build something")
+                assert mock_context.call_count == 1
+
+        run(_test())
+
     def test_run_feedback_loop_retries_until_tester_passes(self):
         config = CopexConfig()
         coord = SquadCoordinator(config, team=SquadTeam.default())
@@ -948,6 +1074,129 @@ class TestSquadCoordinatorRun:
         assert "Issues found: failing tests in auth" in prompts_per_run[1]["developer"]
         tester_result = next(ar for ar in result.agent_results if ar.agent.role == "tester")
         assert "All tests passed" in tester_result.content
+
+
+class TestSquadAdvancedExecutionControls:
+
+    def test_build_agent_prompt_includes_mailbox_section(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config)
+        agent = coord.team.get_agent(SquadRole.DEVELOPER)
+        prompt = coord._build_agent_prompt(agent, "Build X", {"lead": "lead"})
+        assert "## mailbox" in prompt
+        assert "{{mail:role}}" in prompt
+        assert "resolves to an empty string" in prompt
+
+    def test_controlled_run_resolves_mail_placeholders_end_to_end(self):
+        config = CopexConfig()
+        team = SquadTeam(
+            agents=[
+                SquadAgent(name="Lead", role="lead", emoji="🏗️", system_prompt="Lead.", phase=1),
+                SquadAgent(name="Developer", role="developer", emoji="🔧", system_prompt="Build.", phase=2),
+            ]
+        )
+        coord = SquadCoordinator(config, team=team)
+        prompts_by_run: list[dict[str, str]] = []
+
+        async def fake_run(self, on_status=None):
+            prompts_by_run.append({task.id: task.prompt for task in self._tasks})
+            return [
+                FleetResult(
+                    task_id=task.id,
+                    success=True,
+                    response=Response(content="lead mail content" if task.id == "lead" else "dev done"),
+                    duration_ms=1,
+                )
+                for task in self._tasks
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Build something", force=True)
+
+        result = run(_test())
+        assert result.success is True
+        assert len(prompts_by_run) == 2
+        developer_prompt = prompts_by_run[1]["developer"]
+        assert "{{mail:lead}}" not in developer_prompt
+        assert "lead mail content" in developer_prompt
+
+    def test_phase_gate_requires_approval(self):
+        config = CopexConfig()
+        team = SquadTeam(
+            agents=[
+                SquadAgent(name="Lead", role="lead", emoji="🏗️", system_prompt="Lead.", phase=1),
+                SquadAgent(name="Developer", role="developer", emoji="🔧", system_prompt="Build.", phase=2),
+            ],
+            phase_gates={1: True},
+        )
+        coord = SquadCoordinator(config, team=team)
+
+        async def fake_run(self, on_status=None):
+            return [
+                FleetResult(
+                    task_id=task.id,
+                    success=True,
+                    response=Response(content=f"{task.id} ok"),
+                    duration_ms=1,
+                )
+                for task in self._tasks
+            ]
+
+        async def _test():
+            with (
+                patch.object(Fleet, "run", new=fake_run),
+                patch("builtins.input", return_value="n"),
+            ):
+                with pytest.raises(SquadExecutionError, match="not approved"):
+                    await coord.run(
+                        "Build something",
+                        auto_approve_gates=False,
+                        interactive=True,
+                    )
+
+        run(_test())
+
+    def test_incremental_rerun_skips_unchanged_and_force_reruns(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config = CopexConfig()
+        team = SquadTeam(
+            agents=[
+                SquadAgent(name="Lead", role="lead", emoji="🏗️", system_prompt="Lead.", phase=1),
+                SquadAgent(name="Developer", role="developer", emoji="🔧", system_prompt="Build.", phase=2),
+            ]
+        )
+        coord = SquadCoordinator(config, team=team)
+        run_call_count = 0
+
+        async def fake_run(self, on_status=None):
+            nonlocal run_call_count
+            run_call_count += 1
+            return [
+                FleetResult(
+                    task_id=task.id,
+                    success=True,
+                    response=Response(content=f"{task.id} ok"),
+                    duration_ms=1,
+                )
+                for task in self._tasks
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                await coord.run("Build something")
+                first_calls = run_call_count
+                await coord.run("Build something")
+                second_calls = run_call_count
+                await coord.run("Build something", force=True)
+                third_calls = run_call_count
+            return first_calls, second_calls, third_calls
+
+        first_calls, second_calls, third_calls = run(_test())
+        assert first_calls == 1  # baseline single fleet run before state exists
+        assert second_calls == 1  # unchanged rerun skipped all agent executions
+        assert third_calls > second_calls  # --force reran agents
+        assert (tmp_path / ".squad" / "state.json").is_file()
 
     def test_run_feedback_loop_stops_after_max_iterations(self):
         config = CopexConfig()
@@ -1021,6 +1270,178 @@ class TestSquadCoordinatorRun:
         assert developer_result.success is True
         assert "Code fixed on retry" in developer_result.content
 
+    def test_run_retries_failed_agent_uses_role_retry_limit(self):
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role("lead"),
+            SquadAgent(
+                name="Developer",
+                role="developer",
+                emoji="🔧",
+                system_prompt="Build.",
+                phase=2,
+                retries=2,
+            ),
+            SquadAgent.default_for_role("tester"),
+            SquadAgent.default_for_role("docs"),
+        ])
+        coord = SquadCoordinator(config, team=team)
+        run_task_ids: list[list[str]] = []
+
+        async def fake_run(self, on_status=None):
+            task_ids = [task.id for task in self._tasks]
+            run_task_ids.append(task_ids)
+            if task_ids == ["developer__retry"]:
+                return [
+                    FleetResult(
+                        task_id="developer__retry",
+                        success=False,
+                        error=RuntimeError("still failing"),
+                        duration_ms=40,
+                    )
+                ]
+            if task_ids == ["developer__retry2"]:
+                return [
+                    FleetResult(
+                        task_id="developer__retry2",
+                        success=True,
+                        response=Response(content="Code fixed on second retry"),
+                        duration_ms=35,
+                    )
+                ]
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                FleetResult(
+                    task_id="developer",
+                    success=False,
+                    error=RuntimeError("compile error"),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed"),
+                    duration_ms=150,
+                ),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Build something")
+
+        result = run(_test())
+        developer_result = next(ar for ar in result.agent_results if ar.agent.role == "developer")
+        assert len(run_task_ids) == 3
+        assert run_task_ids[1] == ["developer__retry"]
+        assert run_task_ids[2] == ["developer__retry2"]
+        assert developer_result.success is True
+        assert "second retry" in developer_result.content
+
+    def test_run_retry_uses_fleet_context_manager(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+
+        async def fake_run(self, on_status=None):
+            task_ids = [task.id for task in self._tasks]
+            if task_ids == ["developer__retry"]:
+                return [
+                    FleetResult(
+                        task_id="developer__retry",
+                        success=True,
+                        response=Response(content="Code fixed on retry"),
+                        duration_ms=40,
+                    )
+                ]
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                FleetResult(
+                    task_id="developer",
+                    success=False,
+                    error=RuntimeError("compile error"),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed"),
+                    duration_ms=150,
+                ),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+            ]
+
+        async def _test():
+            with (
+                patch.object(Fleet, "run", new=fake_run),
+                patch.object(Fleet, "__aexit__", new_callable=AsyncMock) as mock_exit,
+            ):
+                result = await coord.run("Build something")
+                developer_result = next(
+                    ar for ar in result.agent_results if ar.agent.role == "developer"
+                )
+                assert developer_result.success is True
+                assert mock_exit.await_count == 1
+
+        run(_test())
+
+    def test_run_respects_per_role_retry_config(self):
+        config = CopexConfig()
+        team = SquadTeam.default()
+        developer = team.get_agent("developer")
+        assert developer is not None
+        developer.retries = 2
+        coord = SquadCoordinator(config, team=team)
+        run_task_ids: list[list[str]] = []
+
+        async def fake_run(self, on_status=None):
+            task_ids = [task.id for task in self._tasks]
+            run_task_ids.append(task_ids)
+            if task_ids == ["developer__retry"]:
+                return [
+                    FleetResult(
+                        task_id="developer__retry",
+                        success=False,
+                        error=RuntimeError("still failing"),
+                        duration_ms=20,
+                    )
+                ]
+            if task_ids == ["developer__retry2"]:
+                return [
+                    FleetResult(
+                        task_id="developer__retry2",
+                        success=True,
+                        response=Response(content="Code fixed on second retry"),
+                        duration_ms=20,
+                    )
+                ]
+            return [
+                FleetResult(task_id="lead", success=True, response=Response(content="Plan"), duration_ms=100),
+                FleetResult(
+                    task_id="developer",
+                    success=False,
+                    error=RuntimeError("compile error"),
+                    duration_ms=50,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed"),
+                    duration_ms=150,
+                ),
+                FleetResult(task_id="docs", success=True, response=Response(content="Docs"), duration_ms=80),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                return await coord.run("Build something")
+
+        result = run(_test())
+        developer_result = next(ar for ar in result.agent_results if ar.agent.role == "developer")
+        assert run_task_ids[1] == ["developer__retry"]
+        assert run_task_ids[2] == ["developer__retry2"]
+        assert developer_result.success is True
+        assert "Code fixed on second retry" in developer_result.content
+
     def test_run_does_not_retry_timeout_failures(self):
         config = CopexConfig()
         coord = SquadCoordinator(config, team=SquadTeam.default())
@@ -1056,6 +1477,182 @@ class TestSquadCoordinatorRun:
         developer_result = next(ar for ar in result.agent_results if ar.agent.role == "developer")
         assert len(run_task_ids) == 1
         assert developer_result.success is False
+
+    def test_run_aborts_when_cost_budget_exceeded(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default(), max_cost=0.05)
+
+        async def fake_run(self, on_status=None):
+            return [
+                FleetResult(
+                    task_id="lead",
+                    success=True,
+                    response=Response(content="Plan"),
+                    duration_ms=100,
+                    total_cost=0.02,
+                ),
+                FleetResult(
+                    task_id="developer",
+                    success=True,
+                    response=Response(content="Code"),
+                    duration_ms=100,
+                    total_cost=0.02,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed"),
+                    duration_ms=100,
+                    total_cost=0.02,
+                ),
+                FleetResult(
+                    task_id="docs",
+                    success=True,
+                    response=Response(content="Docs"),
+                    duration_ms=100,
+                    total_cost=0.01,
+                ),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                await coord.run("Build something")
+
+        with pytest.raises(SquadExecutionError, match="Squad cost budget exceeded"):
+            run(_test())
+
+    def test_run_aborts_when_token_budget_exceeded(self):
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default(), max_tokens=200)
+
+        async def fake_run(self, on_status=None):
+            return [
+                FleetResult(
+                    task_id="lead",
+                    success=True,
+                    response=Response(content="Plan"),
+                    duration_ms=100,
+                    prompt_tokens=60,
+                    completion_tokens=10,
+                ),
+                FleetResult(
+                    task_id="developer",
+                    success=True,
+                    response=Response(content="Code"),
+                    duration_ms=100,
+                    prompt_tokens=70,
+                    completion_tokens=20,
+                ),
+                FleetResult(
+                    task_id="tester",
+                    success=True,
+                    response=Response(content="All tests passed"),
+                    duration_ms=100,
+                    prompt_tokens=40,
+                    completion_tokens=10,
+                ),
+                FleetResult(
+                    task_id="docs",
+                    success=True,
+                    response=Response(content="Docs"),
+                    duration_ms=100,
+                    prompt_tokens=20,
+                    completion_tokens=10,
+                ),
+            ]
+
+        async def _test():
+            with patch.object(Fleet, "run", new=fake_run):
+                await coord.run("Build something")
+
+        with pytest.raises(SquadExecutionError, match="Squad token budget exceeded"):
+            run(_test())
+
+    def test_run_streaming_emits_agent_and_phase_events(self):
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role("lead"),
+            SquadAgent.default_for_role("developer"),
+        ])
+        coord = SquadCoordinator(config, team=team)
+
+        async def fake_run_streaming(self, **kwargs):
+            self._last_results = [
+                FleetResult(
+                    task_id="lead",
+                    success=True,
+                    response=Response(content="Plan"),
+                    duration_ms=10,
+                ),
+                FleetResult(
+                    task_id="developer",
+                    success=True,
+                    response=Response(content="Code"),
+                    duration_ms=20,
+                ),
+            ]
+            yield FleetEvent(event_type=FleetEventType.FLEET_START, data={"total_tasks": 2})
+            yield FleetEvent(event_type=FleetEventType.TASK_RUNNING, task_id="lead")
+            yield FleetEvent(event_type=FleetEventType.TASK_DONE, task_id="lead")
+            yield FleetEvent(event_type=FleetEventType.TASK_RUNNING, task_id="developer")
+            yield FleetEvent(event_type=FleetEventType.TASK_DONE, task_id="developer")
+            yield FleetEvent(event_type=FleetEventType.FLEET_COMPLETE, data={"total_tasks": 2})
+
+        async def _test():
+            with patch.object(Fleet, "run_streaming", new=fake_run_streaming):
+                return [event async for event in coord.run_streaming("Build something")]
+
+        events = run(_test())
+        event_types = [event.event_type for event in events]
+        assert SquadEventType.PHASE_STARTED in event_types
+        assert SquadEventType.PHASE_COMPLETED in event_types
+        assert SquadEventType.AGENT_STARTED in event_types
+        assert SquadEventType.AGENT_COMPLETED in event_types
+        assert event_types[-1] == SquadEventType.SQUAD_COMPLETED
+        assert events[-1].result is not None
+        assert events[-1].result.success is True
+
+    def test_run_streaming_passes_mailbox_with_task_inboxes(self):
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role("lead"),
+            SquadAgent.default_for_role("developer"),
+        ])
+        coord = SquadCoordinator(config, team=team)
+
+        async def fake_run_streaming(self, **kwargs):
+            mailbox = kwargs.get("mailbox")
+            assert mailbox is not None
+            for task in self._tasks:
+                assert await mailbox.send(task.id, {"content": "hello"}, from_task="lead")
+
+            self._last_results = [
+                FleetResult(
+                    task_id="lead",
+                    success=True,
+                    response=Response(content="Plan"),
+                    duration_ms=10,
+                ),
+                FleetResult(
+                    task_id="developer",
+                    success=True,
+                    response=Response(content="Code"),
+                    duration_ms=20,
+                ),
+            ]
+            yield FleetEvent(event_type=FleetEventType.FLEET_START, data={"total_tasks": 2})
+            yield FleetEvent(event_type=FleetEventType.TASK_RUNNING, task_id="lead")
+            yield FleetEvent(event_type=FleetEventType.TASK_DONE, task_id="lead")
+            yield FleetEvent(event_type=FleetEventType.TASK_RUNNING, task_id="developer")
+            yield FleetEvent(event_type=FleetEventType.TASK_DONE, task_id="developer")
+            yield FleetEvent(event_type=FleetEventType.FLEET_COMPLETE, data={"total_tasks": 2})
+
+        async def _test():
+            with patch.object(Fleet, "run_streaming", new=fake_run_streaming):
+                return [event async for event in coord.run_streaming("Build something")]
+
+        events = run(_test())
+        assert events[-1].event_type == SquadEventType.SQUAD_COMPLETED
 
     def test_build_agent_prompt_includes_persisted_knowledge_and_decisions(
         self,
@@ -1165,6 +1762,99 @@ class TestSquadCoordinatorRun:
         assert "Lead" in log_text
         assert "Developer" in log_text
 
+    def test_persist_run_artifacts_extracts_knowledge_and_writes_files(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        lead = coord.team.get_agent("lead")
+        developer = coord.team.get_agent("developer")
+        assert lead is not None
+        assert developer is not None
+        result = SquadResult(
+            agent_results=[
+                SquadAgentResult(
+                    agent=lead,
+                    content=(
+                        "Plan\n\n"
+                        "## What I Learned About This Codebase\n"
+                        "- Keep changes small.\n\n"
+                        "## Key Decisions and Trade-offs\n"
+                        "- Use TOML squad config."
+                    ),
+                    success=True,
+                    duration_ms=100,
+                ),
+                SquadAgentResult(
+                    agent=developer,
+                    content=(
+                        "Code\n\n"
+                        "## What I Learned About This Codebase\n"
+                        "- Tests rely on monkeypatch fixtures."
+                    ),
+                    success=True,
+                    duration_ms=80,
+                ),
+            ],
+            total_duration_ms=180,
+            success=True,
+        )
+
+        coord._persist_run_artifacts("Implement persistence", result)
+
+        lead_knowledge = (tmp_path / ".squad" / "knowledge" / "lead.md").read_text(encoding="utf-8")
+        developer_knowledge = (tmp_path / ".squad" / "knowledge" / "developer.md").read_text(encoding="utf-8")
+        decisions = (tmp_path / ".squad" / "decisions.md").read_text(encoding="utf-8")
+        logs = sorted((tmp_path / ".squad" / "log").glob("*.md"))
+
+        assert "Keep changes small." in lead_knowledge
+        assert "Tests rely on monkeypatch fixtures." in developer_knowledge
+        assert "Use TOML squad config." in decisions
+        assert len(logs) == 1
+        assert "Implement persistence" in logs[0].read_text(encoding="utf-8")
+
+    def test_write_session_log_creates_directory_and_expected_content(self, tmp_path, monkeypatch):
+        monkeypatch.chdir(tmp_path)
+        config = CopexConfig()
+        coord = SquadCoordinator(config, team=SquadTeam.default())
+        lead = coord.team.get_agent("lead")
+        tester = coord.team.get_agent("tester")
+        assert lead is not None
+        assert tester is not None
+        result = SquadResult(
+            agent_results=[
+                SquadAgentResult(
+                    agent=lead,
+                    content="Plan complete",
+                    success=True,
+                    duration_ms=1200,
+                ),
+                SquadAgentResult(
+                    agent=tester,
+                    content="One test failed",
+                    success=False,
+                    duration_ms=800,
+                    error="assertion failed",
+                ),
+            ],
+            total_duration_ms=2100,
+            success=False,
+        )
+
+        coord._write_session_log("Verify session logging", result)
+
+        log_dir = tmp_path / ".squad" / "log"
+        logs = sorted(log_dir.glob("*.md"))
+        assert log_dir.is_dir()
+        assert len(logs) == 1
+        log_text = logs[0].read_text(encoding="utf-8")
+        assert "# Squad Session Log" in log_text
+        assert "- Task: Verify session logging" in log_text
+        assert "- Success: no" in log_text
+        assert "## Agents" in log_text
+        assert "## Work Summary" in log_text
+        assert "Lead" in log_text
+        assert "Tester" in log_text
+
     def test_run_migrates_legacy_squad_file_when_persisting(self, tmp_path, monkeypatch):
         monkeypatch.chdir(tmp_path)
         (tmp_path / ".squad").write_text("[squad]\nlead = \"Architect\"\n", encoding="utf-8")
@@ -1262,6 +1952,9 @@ class TestSquadCLIIntegration:
         assert "--json" in plain
         assert "--model" in plain
         assert "--reasoning" in plain
+        assert "--max-cost" in plain
+        assert "--max-tokens" in plain
+        assert "status" in plain
 
     def test_squad_no_prompt_exits_nonzero(self):
         from typer.testing import CliRunner
@@ -1501,6 +2194,110 @@ class TestNewRoleDependencies:
         assert "lead" in deps  # phase 4 depends on all lower phases
 
 
+class TestDagDependencies:
+
+    def test_explicit_depends_on_overrides_phase_fallback(self):
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent(name="Lead", role="lead", emoji="🏗️", system_prompt="Lead.", phase=1),
+            SquadAgent(name="Researcher", role="researcher", emoji="🔎", system_prompt="Research.", phase=2),
+            SquadAgent(
+                name="Developer",
+                role="developer",
+                emoji="🔧",
+                system_prompt="Build.",
+                phase=2,
+                depends_on=["researcher"],
+            ),
+        ])
+        coord = SquadCoordinator(config, team=team)
+        deps = coord._get_dependencies(
+            team.get_agent("developer"),
+            {
+                "lead": "lead",
+                "researcher": "researcher",
+            },
+        )
+        assert deps == ["researcher"]
+
+    def test_load_squad_file_with_depends_on(self, tmp_path):
+        squad_text = textwrap.dedent(
+            """
+            [squad]
+            lead = "Architect"
+
+            [[squad.agents]]
+            name = "Researcher"
+            role = "Investigates approach options"
+            id = "researcher"
+            phase = 2
+
+            [[squad.agents]]
+            name = "Developer"
+            role = "Implements the solution"
+            id = "developer"
+            phase = 3
+            depends_on = ["researcher"]
+            """
+        ).strip()
+        (tmp_path / ".squad").write_text(squad_text, encoding="utf-8")
+
+        team = SquadTeam.load_squad_file(tmp_path)
+        assert team is not None
+        developer = team.get_agent("developer")
+        assert developer is not None
+        assert developer.depends_on == ["researcher"]
+
+    def test_run_rejects_unknown_dependency_role(self):
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent(name="Lead", role="lead", emoji="🏗️", system_prompt="Lead.", phase=1),
+            SquadAgent(
+                name="Developer",
+                role="developer",
+                emoji="🔧",
+                system_prompt="Build.",
+                phase=2,
+                depends_on=["ghost_role"],
+            ),
+        ])
+        coord = SquadCoordinator(config, team=team)
+
+        async def _test():
+            with pytest.raises(SquadConfigError, match="unknown roles"):
+                await coord.run("Build feature")
+
+        run(_test())
+
+    def test_run_rejects_dependency_cycle(self):
+        config = CopexConfig()
+        team = SquadTeam(agents=[
+            SquadAgent(
+                name="Lead",
+                role="lead",
+                emoji="🏗️",
+                system_prompt="Lead.",
+                phase=1,
+                depends_on=["tester"],
+            ),
+            SquadAgent(
+                name="Tester",
+                role="tester",
+                emoji="🧪",
+                system_prompt="Test.",
+                phase=2,
+                depends_on=["lead"],
+            ),
+        ])
+        coord = SquadCoordinator(config, team=team)
+
+        async def _test():
+            with pytest.raises(SquadConfigError, match="Cycle detected"):
+                await coord.run("Validate cycle detection")
+
+        run(_test())
+
+
 class TestFromRepoTestPatterns:
 
     def test_test_prefix_pattern(self, tmp_path):
@@ -1523,6 +2320,13 @@ class TestFromRepoTestPatterns:
         (tmp_path / "CONTRIBUTING.md").write_text("# Contributing")
         team = SquadTeam.from_repo(tmp_path)
         assert SquadRole.DOCS in team.roles
+
+    def test_ignores_test_patterns_in_node_modules(self, tmp_path):
+        (tmp_path / "main.py").write_text("pass")
+        (tmp_path / "node_modules").mkdir()
+        (tmp_path / "node_modules" / "test_main.py").write_text("pass")
+        team = SquadTeam.from_repo(tmp_path)
+        assert SquadRole.TESTER not in team.roles
 
 
 # ===========================================================================
@@ -1599,7 +2403,7 @@ class TestSquadTeamPersistence:
             SquadAgent(name="ML Eng", role="ml_engineer", emoji="🤖",
                        system_prompt="Do ML.", phase=2),
         ])
-        config_path = tmp_path / "squad.json"
+        config_path = tmp_path / ".squad" / "team.toml"
         team.save(config_path)
 
         loaded = SquadTeam.load(config_path)
@@ -1608,8 +2412,8 @@ class TestSquadTeamPersistence:
         assert loaded.agents[0].role == "lead"
         assert loaded.agents[1].role == "ml_engineer"
         assert loaded.agents[1].name == "ML Eng"
-        assert loaded.agents[1].emoji == "🤖"
-        assert loaded.agents[1].system_prompt == "Do ML."
+        assert loaded.agents[1].emoji == _ROLE_EMOJIS.get("ml_engineer", "🔹")
+        assert "Do ML." in loaded.agents[1].system_prompt
         assert loaded.agents[1].phase == 2
 
     def test_load_nonexistent(self, tmp_path):
@@ -1617,7 +2421,8 @@ class TestSquadTeamPersistence:
         assert result is None
 
     def test_load_invalid_json(self, tmp_path):
-        config_path = tmp_path / "squad.json"
+        config_path = tmp_path / ".copex" / "squad.json"
+        config_path.parent.mkdir(parents=True, exist_ok=True)
         config_path.write_text("not json", encoding="utf-8")
         result = SquadTeam.load(config_path)
         assert result is None
@@ -1626,7 +2431,8 @@ class TestSquadTeamPersistence:
         team = SquadTeam.default()
         config_path = tmp_path / "subdir" / "squad.json"
         team.save(config_path)
-        assert config_path.is_file()
+        toml_path = tmp_path / "subdir" / ".squad" / "team.toml"
+        assert toml_path.is_file()
         loaded = SquadTeam.load(config_path)
         assert loaded is not None
         assert len(loaded.agents) == 4
@@ -1734,6 +2540,33 @@ class TestSubtasks:
         assert ar.prompt_tokens == 90
         assert ar.completion_tokens == 50
 
+    def test_build_result_orders_subtasks_by_task_id(self):
+        config = CopexConfig()
+        dev_agent = SquadAgent(
+            name="Dev", role="developer", emoji="🔧",
+            system_prompt="Build.", phase=2,
+            subtasks=["API routes", "Database models"],
+        )
+        team = SquadTeam(agents=[dev_agent])
+        coord = SquadCoordinator(config, team=team)
+
+        task_ids = {"developer": "developer__sub1|developer__sub2"}
+        fleet_results = [
+            FleetResult(
+                task_id="developer__sub2", success=True,
+                response=Response(content="Models done"), duration_ms=80,
+            ),
+            FleetResult(
+                task_id="developer__sub1", success=True,
+                response=Response(content="Routes done"), duration_ms=100,
+            ),
+        ]
+
+        result = coord._build_result(fleet_results, task_ids)
+        ar = result.agent_results[0]
+        assert ar.content.index("### API routes") < ar.content.index("### Database models")
+        assert ar.content.index("Routes done") < ar.content.index("Models done")
+
     def test_build_result_subtask_partial_failure(self):
         """If one subtask fails, the merged result reports failure."""
         config = CopexConfig()
@@ -1772,23 +2605,25 @@ class TestSubtasks:
                 subtasks=["API", "DB", "Auth"],
             ),
         ])
-        config_path = tmp_path / "squad.json"
+        config_path = tmp_path / ".squad" / "team.toml"
         team.save(config_path)
 
         loaded = SquadTeam.load(config_path)
         assert loaded is not None
-        assert loaded.agents[0].subtasks == ["API", "DB", "Auth"]
+        loaded_dev = loaded.get_agent("developer")
+        assert loaded_dev is not None
+        assert loaded_dev.subtasks == ["API", "DB", "Auth"]
 
     def test_subtasks_not_saved_when_empty(self, tmp_path):
-        """Empty subtasks list is omitted from JSON."""
+        """Empty subtasks list is omitted from TOML."""
         team = SquadTeam(agents=[
             SquadAgent.default_for_role("lead"),
         ])
-        config_path = tmp_path / "squad.json"
+        config_path = tmp_path / ".squad" / "team.toml"
         team.save(config_path)
 
-        data = json.loads(config_path.read_text(encoding="utf-8"))
-        assert "subtasks" not in data[0]
+        text = config_path.read_text(encoding="utf-8")
+        assert "subtasks =" not in text
 
     def test_mixed_subtask_and_normal_agents(self):
         """Team with both subtask and normal agents works correctly."""
@@ -1863,6 +2698,76 @@ class TestSquadTomlSupport:
         assert "lead = " in text
         assert "[[squad.agents]]" in text
 
+    def test_load_squad_file_with_phase_gates(self, tmp_path):
+        squad_text = textwrap.dedent(
+            """
+            [squad]
+            lead = "Architect"
+
+            [[squad.phases]]
+            phase = 1
+            gate = true
+
+            [[squad.agents]]
+            name = "Developer"
+            role = "Writes implementation code"
+            phase = 2
+            """
+        ).strip()
+        (tmp_path / ".squad").write_text(squad_text, encoding="utf-8")
+
+        team = SquadTeam.load_squad_file(tmp_path)
+        assert team is not None
+        assert team.phase_gates == {1: True}
+
+    def test_save_squad_file_with_phase_gates(self, tmp_path):
+        team = SquadTeam(
+            agents=SquadTeam.default().agents,
+            phase_gates={1: True, 2: False},
+        )
+        team.save_squad_file(tmp_path)
+        text = (tmp_path / ".squad" / "team.toml").read_text(encoding="utf-8")
+        assert "[[squad.phases]]" in text
+        assert "phase = 1" in text
+        assert "gate = true" in text
+
+    def test_load_squad_file_migrates_legacy_json(self, tmp_path):
+        legacy_json = tmp_path / ".copex" / "squad.json"
+        legacy_json.parent.mkdir(parents=True, exist_ok=True)
+        legacy_json.write_text(
+            json.dumps(
+                [
+                    {"role": "lead", "name": "Architect", "phase": 1},
+                    {"role": "developer", "name": "Dev", "phase": 2, "retries": 2},
+                ]
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.warns(DeprecationWarning):
+            team = SquadTeam.load_squad_file(tmp_path)
+
+        assert team is not None
+        assert team.get_agent("lead").name == "Architect"
+        assert team.get_agent("developer").retries == 2
+        assert (tmp_path / ".squad" / "team.toml").is_file()
+
+    def test_save_squad_file_persists_retries(self, tmp_path):
+        team = SquadTeam(agents=[
+            SquadAgent.default_for_role("lead"),
+            SquadAgent(
+                name="Developer",
+                role="developer",
+                emoji="🔧",
+                system_prompt="Build code.",
+                phase=2,
+                retries=3,
+            ),
+        ])
+        team.save_squad_file(tmp_path)
+        text = (tmp_path / ".squad" / "team.toml").read_text(encoding="utf-8")
+        assert "retries = 3" in text
+
 
 class TestSquadPriorityOverAI:
 
@@ -1919,6 +2824,23 @@ class TestSquadCLIManagement:
         result = runner.invoke(app, ["squad", "show"])
         assert result.exit_code == 0
         assert "No .squad file found" in result.output
+
+    def test_squad_status_shows_team(self, tmp_path, monkeypatch):
+        from typer.testing import CliRunner
+
+        from copex.cli import app
+
+        monkeypatch.chdir(tmp_path)
+        team = SquadTeam.default()
+        team.save_squad_file(tmp_path)
+
+        runner = CliRunner()
+        result = runner.invoke(app, ["squad", "status"])
+
+        assert result.exit_code == 0, result.output
+        assert "Squad Status" in result.output
+        assert "Lead" in result.output
+        assert "developer" in result.output
 
     def test_squad_init_creates_file(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner

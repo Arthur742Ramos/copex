@@ -390,6 +390,36 @@ class TestDependencyTimeout:
 
         assert all(r.success for r in results)
 
+    @pytest.mark.asyncio
+    async def test_dep_timeout_chain_terminates_without_running_dependents(self):
+        """Timed-out dependency chains should complete deterministically."""
+        async def _slow_root(prompt, **kwargs):
+            if prompt == "A":
+                await asyncio.sleep(0.2)
+            return Response(content="ok")
+
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_slow_root)
+
+        config = FleetConfig(dep_timeout=0.05, timeout=10.0)
+        fleet = Fleet(fleet_config=config)
+        fleet.add("A", task_id="a")
+        fleet.add("B", task_id="b", depends_on=["a"])
+        fleet.add("C", task_id="c", depends_on=["b"])
+
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
+            results = await asyncio.wait_for(fleet.run(), timeout=2.0)
+
+        by_id = {result.task_id: result for result in results}
+        assert by_id["a"].success
+        assert not by_id["b"].success
+        assert "timed out waiting for dependency" in str(by_id["b"].error)
+        assert not by_id["c"].success
+        assert "Dependency failed" in str(by_id["c"].error)
+        assert "'b'" in str(by_id["c"].error)
+        assert mock_copex.send.call_count == 1
+
 
 # ---------------------------------------------------------------------------
 # TestPrependSharedContext

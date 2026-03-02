@@ -930,10 +930,11 @@ class FleetCoordinator:
         tasks: list[FleetTask],
         config: FleetConfig | None = None,
         on_status: Callable[[str, str], None] | None = None,
+        mailbox: FleetMailbox | None = None,
     ) -> list[FleetResult]:
         """Execute fleet tasks respecting dependencies.
 
-        Uses a worker-pool pattern with a shared work-stealing deque.
+        Uses an event-driven scheduler with dependency-aware dispatch.
         Tasks are prioritized by dependency depth (shallowest first)
         and prompt length (shortest first) to maximize throughput.
 
@@ -948,6 +949,7 @@ class FleetCoordinator:
             tasks: Tasks to execute.
             config: Fleet configuration.
             on_status: Callback(task_id, status) for progress updates.
+            mailbox: Optional mailbox used to relay task outputs to dependents.
 
         Returns:
             List of FleetResult in the same order as input tasks.
@@ -956,6 +958,9 @@ class FleetCoordinator:
         self._validate_dag(tasks)
 
         results: dict[str, FleetResult] = {}
+        ordered_results: list[FleetResult | None] = [None] * len(tasks)
+        result_index: dict[str, int] = {task.id: idx for idx, task in enumerate(tasks)}
+        finished: dict[str, bool] = {}  # task_id -> success
         cancel_event = asyncio.Event()
 
         # Adaptive concurrency management
@@ -976,13 +981,26 @@ class FleetCoordinator:
 
         # Each task gets an event that is set when it finishes
         done_events: dict[str, asyncio.Event] = {t.id: asyncio.Event() for t in tasks}
-        finished: dict[str, bool] = {}  # task_id -> success
-
-        # Work-stealing deque: workers pop from left, steal from right
         prioritized = self._prioritize_tasks(tasks)
-        work_deque: deque[FleetTask] = deque(prioritized)
-        work_available = asyncio.Event()
-        work_available.set()  # Initial work available
+        priority_index = {task.id: idx for idx, task in enumerate(prioritized)}
+        task_by_id = {task.id: task for task in tasks}
+        remaining_deps: dict[str, int] = {task.id: len(task.depends_on) for task in tasks}
+        dependents: dict[str, list[str]] = {task.id: [] for task in tasks}
+        for task in tasks:
+            for dep in task.depends_on:
+                dependents[dep].append(task.id)
+        if mailbox is not None:
+            for task in tasks:
+                mailbox.create_inbox(task.id)
+        failed_upstreams: dict[str, list[str]] = {task.id: [] for task in tasks}
+        queued_ids: set[str] = set()
+        running_ids: set[str] = set()
+        ready_queue: asyncio.Queue[FleetTask] = asyncio.Queue()
+        scheduler_wakeup = asyncio.Event()
+        timeout_watchers: list[asyncio.Task[None]] = []
+        execution_futures: dict[asyncio.Task[tuple[str, FleetResult]], str] = {}
+        fatal_failures: dict[str, Exception] = {}
+        fail_fast_shutdown = False
 
         # Create shared client and session pool for efficiency (v1.9.0)
         # Skip SDK client when use_cli is set — tasks use CopilotCLI instead
@@ -998,73 +1016,133 @@ class FleetCoordinator:
             await pool.start()
 
         try:
-
-            async def _run_task_once(task: FleetTask, retries_used: int = 0) -> FleetResult:
-                if on_status and retries_used == 0:
-                    on_status(task.id, "queued")
-
-                # Wait for all dependencies to finish
-                dep_policy = _normalize_dep_failure_policy(task.on_dependency_failure)
-                dep_wait_timeout = (
+            def _dependency_wait_timeout(task: FleetTask) -> float:
+                return (
                     config.dep_timeout
                     if config.dep_timeout is not None
                     else (task.timeout_sec if task.timeout_sec is not None else config.timeout)
                 )
-                if task.depends_on:
-                    # Wait for all dependencies concurrently
-                    dep_waiters = [
-                        asyncio.wait_for(done_events[dep].wait(), timeout=dep_wait_timeout)
-                        for dep in task.depends_on
-                    ]
-                    dep_results = await asyncio.gather(*dep_waiters, return_exceptions=True)
-                    timed_out = [
-                        dep for dep, res in zip(task.depends_on, dep_results, strict=False)
-                        if isinstance(res, asyncio.TimeoutError)
-                    ]
-                    if timed_out:
-                        error = RuntimeError(
-                            f"Task '{task.id}' timed out waiting for "
-                            f"{'dependency' if len(timed_out) == 1 else 'dependencies'} "
-                            f"{timed_out!r} after {dep_wait_timeout}s"
-                        )
-                        result = FleetResult(
-                            task_id=task.id,
-                            success=False,
-                            error=error,
-                        )
-                        results[task.id] = result
-                        finished[task.id] = False
-                        done_events[task.id].set()
-                        if on_status:
-                            on_status(task.id, "blocked")
-                        return result
-                failed_deps = [d for d in task.depends_on if not finished.get(d, False)]
-                if failed_deps and dep_policy == DependencyFailurePolicy.BLOCK:
-                    result = FleetResult(
+
+            def _enqueue_ready(task: FleetTask) -> None:
+                if remaining_deps[task.id] != 0:
+                    raise RuntimeError(
+                        f"Internal scheduler error: task '{task.id}' queued before dependencies resolved"
+                    )
+                if task.id in queued_ids or task.id in finished:
+                    return
+                queued_ids.add(task.id)
+                ready_queue.put_nowait(task)
+                scheduler_wakeup.set()
+                if on_status:
+                    on_status(task.id, "queued")
+
+            async def _complete_task(
+                task_id: str,
+                result: FleetResult,
+                *,
+                status: str,
+            ) -> None:
+                if task_id in finished:
+                    return
+
+                try:
+                    results[task_id] = result
+                    ordered_results[result_index[task_id]] = result
+                    finished[task_id] = result.success
+                    if config.fail_fast and not result.success:
+                        cancel_event.set()
+                    if on_status:
+                        on_status(task_id, status)
+                    if mailbox is not None:
+                        payload = {
+                            "task_id": task_id,
+                            "success": result.success,
+                            "content": result.response.content if result.response else "",
+                            "error": str(result.error) if result.error else None,
+                            "duration_ms": result.duration_ms,
+                        }
+                        for dependent_id in dependents.get(task_id, []):
+                            await mailbox.send(
+                                dependent_id,
+                                payload,
+                                from_task=task_id,
+                            )
+
+                    newly_ready: list[FleetTask] = []
+                    for dependent_id in dependents.get(task_id, []):
+                        if dependent_id in finished:
+                            continue
+                        remaining_deps[dependent_id] -= 1
+                        if not result.success:
+                            failed_upstreams[dependent_id].append(task_id)
+
+                        if remaining_deps[dependent_id] != 0:
+                            continue
+
+                        dependent_task = task_by_id[dependent_id]
+                        dep_policy = _normalize_dep_failure_policy(dependent_task.on_dependency_failure)
+                        failed_deps = failed_upstreams.get(dependent_id, [])
+                        if failed_deps and dep_policy == DependencyFailurePolicy.BLOCK:
+                            blocked = FleetResult(
+                                task_id=dependent_id,
+                                success=False,
+                                error=RuntimeError(
+                                    f"Dependency failed for task '{dependent_id}': "
+                                    f"upstream {failed_deps!r} did not succeed"
+                                ),
+                            )
+                            await _complete_task(dependent_id, blocked, status="blocked")
+                            continue
+
+                        if cancel_event.is_set():
+                            cancelled = FleetResult(
+                                task_id=dependent_id,
+                                success=False,
+                                error=asyncio.CancelledError("Fleet cancelled due to fail-fast"),
+                            )
+                            await _complete_task(dependent_id, cancelled, status="failed")
+                            continue
+
+                        newly_ready.append(dependent_task)
+
+                    for ready_task in sorted(newly_ready, key=lambda task: priority_index[task.id]):
+                        _enqueue_ready(ready_task)
+                finally:
+                    done_events[task_id].set()
+                    scheduler_wakeup.set()
+
+            async def _watch_dependency_timeout(task: FleetTask) -> None:
+                if not task.depends_on:
+                    return
+                try:
+                    dep_waiters = [done_events[dep].wait() for dep in task.depends_on]
+                    await asyncio.wait_for(
+                        asyncio.gather(*dep_waiters),
+                        timeout=_dependency_wait_timeout(task),
+                    )
+                except asyncio.TimeoutError:
+                    if task.id in finished:
+                        return
+                    timed_out = [dep for dep in task.depends_on if not done_events[dep].is_set()]
+                    blocked = FleetResult(
                         task_id=task.id,
                         success=False,
                         error=RuntimeError(
-                            f"Dependency failed for task '{task.id}': "
-                            f"upstream {failed_deps!r} did not succeed"
+                            f"Task '{task.id}' timed out waiting for "
+                            f"{'dependency' if len(timed_out) == 1 else 'dependencies'} "
+                            f"{timed_out!r} after {_dependency_wait_timeout(task)}s"
                         ),
                     )
-                    results[task.id] = result
-                    finished[task.id] = False
-                    done_events[task.id].set()
-                    if on_status:
-                        on_status(task.id, "blocked")
-                    return result
+                    await _complete_task(task.id, blocked, status="blocked")
 
+            async def _run_task_once(task: FleetTask, retries_used: int = 0) -> FleetResult:
                 if cancel_event.is_set():
-                    result = FleetResult(
+                    return FleetResult(
                         task_id=task.id,
                         success=False,
                         error=asyncio.CancelledError("Fleet cancelled due to fail-fast"),
+                        retries_used=retries_used,
                     )
-                    results[task.id] = result
-                    finished[task.id] = False
-                    done_events[task.id].set()
-                    return result
 
                 if on_status and retries_used == 0:
                     on_status(task.id, "running")
@@ -1141,51 +1219,152 @@ class FleetCoordinator:
                         retries_used=retries_used,
                     )
                     if config.fail_fast:
+                        fatal_failures[task.id] = exc
                         cancel_event.set()
+                        scheduler_wakeup.set()
 
                 return result
 
-            async def _run_task(task: FleetTask) -> FleetResult:
-                """Run a task with retries, then update shared state."""
+            async def _run_task(task: FleetTask) -> tuple[str, FleetResult]:
                 result = await _run_task_with_retry(
                     task, config, _run_task_once, on_status=on_status, adaptive=adaptive
                 )
+                return task.id, result
 
-                results[task.id] = result
-                finished[task.id] = result.success
-                done_events[task.id].set()
-                if result.success:
-                    if on_status:
-                        on_status(task.id, "done")
-                else:
-                    if on_status:
-                        on_status(task.id, "failed")
-                return result
+            async def _cancel_for_fail_fast() -> None:
+                nonlocal fail_fast_shutdown, timeout_watchers
+                if fail_fast_shutdown:
+                    return
+                fail_fast_shutdown = True
 
-            async def _worker() -> None:
-                """Worker that pulls tasks from the shared deque."""
-                while True:
-                    # Try to steal from left (highest priority) first
-                    task: FleetTask | None = None
+                for watcher in timeout_watchers:
+                    watcher.cancel()
+                if timeout_watchers:
+                    await asyncio.gather(*timeout_watchers, return_exceptions=True)
+                timeout_watchers = []
+
+                inflight = list(execution_futures.items())
+                for fut, _ in inflight:
+                    fut.cancel()
+                if inflight:
+                    await asyncio.gather(
+                        *(future for future, _ in inflight),
+                        return_exceptions=True,
+                    )
+                for fut, task_id in inflight:
+                    execution_futures.pop(fut, None)
+                    running_ids.discard(task_id)
+
+                while not ready_queue.empty():
+                    queued_task = ready_queue.get_nowait()
+                    queued_ids.discard(queued_task.id)
+
+                for task in tasks:
+                    if task.id in finished:
+                        continue
+                    error = fatal_failures.get(task.id) or asyncio.CancelledError(
+                        "Fleet cancelled due to fail-fast"
+                    )
+                    await _complete_task(
+                        task.id,
+                        FleetResult(task_id=task.id, success=False, error=error),
+                        status="failed",
+                    )
+
+            for task in prioritized:
+                if remaining_deps[task.id] == 0:
+                    _enqueue_ready(task)
+
+            timeout_watchers = [
+                asyncio.create_task(_watch_dependency_timeout(task))
+                for task in tasks
+                if task.depends_on
+            ]
+
+            while len(finished) < len(tasks):
+                while not ready_queue.empty():
+                    ready_task = ready_queue.get_nowait()
+                    queued_ids.discard(ready_task.id)
+                    if ready_task.id in finished or ready_task.id in running_ids:
+                        continue
+                    if cancel_event.is_set():
+                        await _complete_task(
+                            ready_task.id,
+                            FleetResult(
+                                task_id=ready_task.id,
+                                success=False,
+                                error=asyncio.CancelledError(
+                                    "Fleet cancelled due to fail-fast"
+                                ),
+                            ),
+                            status="failed",
+                        )
+                        continue
+                    running_ids.add(ready_task.id)
+                    fut = asyncio.create_task(_run_task(ready_task))
+                    execution_futures[fut] = ready_task.id
+
+                if config.fail_fast and cancel_event.is_set():
+                    await _cancel_for_fail_fast()
+                    continue
+
+                if len(finished) >= len(tasks):
+                    break
+
+                wait_targets: set[asyncio.Task[Any]] = set(execution_futures.keys())
+                wake_waiter = asyncio.create_task(scheduler_wakeup.wait())
+                wait_targets.add(wake_waiter)
+                done_waiters, pending_waiters = await asyncio.wait(
+                    wait_targets, return_when=asyncio.FIRST_COMPLETED
+                )
+                if wake_waiter in pending_waiters:
+                    wake_waiter.cancel()
+                    await asyncio.gather(wake_waiter, return_exceptions=True)
+                    pending_waiters.remove(wake_waiter)
+                if wake_waiter in done_waiters:
+                    scheduler_wakeup.clear()
+                    done_waiters.remove(wake_waiter)
+                if not done_waiters:
+                    continue
+
+                for fut in done_waiters:
+                    fallback_task_id = execution_futures.pop(fut)
+                    running_ids.discard(fallback_task_id)
                     try:
-                        task = work_deque.popleft()
-                    except IndexError:
-                        break
-                    await _run_task(task)
-
-            # Launch worker pool sized to concurrency limit
-            n_workers = min(config.max_concurrent, len(tasks))
-            workers = [asyncio.create_task(_worker()) for _ in range(n_workers)]
-            await asyncio.gather(*workers, return_exceptions=True)
+                        task_id, result = fut.result()
+                    except asyncio.CancelledError as exc:
+                        task_id = fallback_task_id
+                        result = FleetResult(task_id=task_id, success=False, error=exc)
+                    except Exception as exc:
+                        task_id = fallback_task_id
+                        result = FleetResult(task_id=task_id, success=False, error=exc)
+                    await _complete_task(
+                        task_id,
+                        result,
+                        status="done" if result.success else "failed",
+                    )
 
         finally:
+            for fut in execution_futures:
+                fut.cancel()
+            if execution_futures:
+                await asyncio.gather(*execution_futures, return_exceptions=True)
+            for watcher in timeout_watchers:
+                watcher.cancel()
+            if timeout_watchers:
+                await asyncio.gather(*timeout_watchers, return_exceptions=True)
             # Clean up shared resources
             if pool is not None:
                 await pool.stop()
             if client is not None:
                 await client.stop()
 
-        return [results[t.id] for t in tasks]
+        missing_ids = [
+            tasks[idx].id for idx, result in enumerate(ordered_results) if result is None
+        ]
+        if missing_ids:
+            raise RuntimeError(f"Missing FleetResult entries for tasks: {missing_ids!r}")
+        return [result for result in ordered_results if result is not None]
 
     def _task_config(self, task: FleetTask, fleet_cfg: FleetConfig) -> CopexConfig:
         """Build a per-task config with overrides applied."""
@@ -1389,6 +1568,7 @@ class Fleet:
         self._config = config or CopexConfig()
         self._fleet_config = fleet_config or FleetConfig()
         self._tasks: list[FleetTask] = []
+        self._last_results: list[FleetResult] = []
         self._coordinator = FleetCoordinator(self._config)
         self._store: FleetStore | None = None
         self._run_id: str | None = None
@@ -1649,6 +1829,7 @@ class Fleet:
     ) -> list[FleetResult]:
         """Execute all tasks and return results."""
         if not self._tasks:
+            self._last_results = []
             return []
 
         self._validate_tasks()
@@ -1684,6 +1865,7 @@ class Fleet:
         # Git finalize: track modified files from successful responses
         _track_git_files(self._git_finalizer, results)
 
+        self._last_results = list(results)
         return results
 
     async def run_streaming(
@@ -1715,6 +1897,7 @@ class Fleet:
                         print(f"{event.task_id} completed!")
         """
         if not self._tasks:
+            self._last_results = []
             yield FleetEvent(event_type=FleetEventType.FLEET_COMPLETE, data={"total_tasks": 0})
             return
 
@@ -2078,6 +2261,7 @@ class Fleet:
 
         # Git finalize: track modified files from successful responses
         _track_git_files(self._git_finalizer, results.values())
+        self._last_results = [results[t.id] for t in tasks]
 
         yield FleetEvent(
             event_type=FleetEventType.FLEET_COMPLETE,
@@ -2093,3 +2277,8 @@ class Fleet:
     def tasks(self) -> list[FleetTask]:
         """Return a copy of the current task list."""
         return list(self._tasks)
+
+    @property
+    def last_results(self) -> list[FleetResult]:
+        """Return results captured by the most recent run/run_streaming call."""
+        return list(self._last_results)

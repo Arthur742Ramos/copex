@@ -332,6 +332,9 @@ def main(
     audit: Annotated[
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
+    ] = False,
 ) -> None:
     """Copilot Extended - Resilient wrapper with auto-retry and Ralph Wiggum loops.
 
@@ -374,7 +377,14 @@ def main(
                     asyncio.run(_run_chat(config, prompt, show_reasoning=True, raw=non_interactive))
                 else:
                     # Squad mode (default): Lead → Developer + Tester
-                    asyncio.run(_run_squad(config, prompt, json_output=non_interactive))
+                    asyncio.run(
+                        _run_squad(
+                            config,
+                            prompt,
+                            json_output=non_interactive,
+                            auto_approve_gates=auto_approve,
+                        )
+                    )
             except typer.BadParameter as e:
                 console.print(f"[red]Error: {e}[/red]")
                 raise typer.Exit(1) from None
@@ -688,6 +698,9 @@ def chat(
     ] = False,
     audit: Annotated[
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
+    ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
     ] = False,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors."""
@@ -4141,7 +4154,7 @@ def _print_agent_turn(turn: Any) -> None:
 def squad_command(
     args: Annotated[
         list[str] | None,
-        typer.Argument(help="Task for the squad, or subcommand (show/init/add/remove/reset/knowledge)"),
+        typer.Argument(help="Task for the squad, or subcommand (status/show/init/add/remove/reset/knowledge)"),
     ] = None,
     model: Annotated[str | None, typer.Option("--model", "-m", help="Model to use")] = None,
     reasoning: Annotated[
@@ -4158,6 +4171,14 @@ def squad_command(
         bool,
         typer.Option("--no-ai", help="Skip AI repo analysis, use pattern matching"),
     ] = False,
+    max_cost: Annotated[
+        float | None,
+        typer.Option("--max-cost", min=0.0, help="Abort if cumulative squad cost exceeds USD limit"),
+    ] = None,
+    max_tokens: Annotated[
+        int | None,
+        typer.Option("--max-tokens", min=1, help="Abort if cumulative squad tokens exceed limit"),
+    ] = None,
     config_file: Annotated[
         Path | None, typer.Option("--config", "-c", help="Config file path")
     ] = None,
@@ -4174,10 +4195,14 @@ def squad_command(
     audit: Annotated[
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
+    force: Annotated[
+        bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
+    ] = False,
 ) -> None:
     """Run a squad or manage the repo .squad file.
 
     Management subcommands:
+      - status: display parsed squad configuration
       - show: display .squad content
       - init: create .squad from AI repo analysis
       - add/remove: apply natural-language edits to .squad using AI
@@ -4188,6 +4213,7 @@ def squad_command(
 
     Examples:
         copex squad "Build a REST API with auth"
+        copex squad status
         copex squad show
         copex squad init
         copex squad add "Add a Security Auditor agent that reviews code for vulnerabilities"
@@ -4198,6 +4224,12 @@ def squad_command(
     """
     raw_args = args or []
     subcommand = raw_args[0].lower() if raw_args else None
+    if subcommand == "status":
+        if len(raw_args) != 1:
+            console.print("[red]Usage: copex squad status[/red]")
+            raise typer.Exit(1) from None
+        _show_squad_status(json_output=json_output)
+        return
     if subcommand == "show":
         if len(raw_args) != 1:
             console.print("[red]Usage: copex squad show[/red]")
@@ -4306,7 +4338,18 @@ def squad_command(
         console.print("[red]No prompt provided[/red]")
         raise typer.Exit(1) from None
 
-    asyncio.run(_run_squad(config, prompt, json_output=json_output, no_ai=no_ai))
+    asyncio.run(
+        _run_squad(
+            config,
+            prompt,
+            json_output=json_output,
+            no_ai=no_ai,
+            max_cost=max_cost,
+            max_tokens=max_tokens,
+            auto_approve_gates=auto_approve,
+            force=force,
+        )
+    )
 
 
 def _squad_dir_path(path: Path | None = None) -> Path:
@@ -4348,6 +4391,70 @@ def _show_squad_file(*, json_output: bool = False) -> None:
     else:
         console.print(f"[cyan]{selected_path}[/cyan]")
         console.print(content)
+
+
+def _show_squad_status(*, json_output: bool = False) -> None:
+    from rich.table import Table
+
+    from copex.squad_team import SquadTeam
+
+    team = SquadTeam.load_squad_file(Path.cwd())
+    squad_path = _squad_file_path()
+    if team is None:
+        if json_output:
+            print(json.dumps({"exists": False, "path": str(squad_path)}), flush=True)
+        else:
+            console.print("[yellow]No .squad/team.toml found.[/yellow]")
+        return
+
+    lead = team.get_agent("lead")
+    agents_payload = []
+    for agent in team.agents:
+        agents_payload.append(
+            {
+                "name": agent.name,
+                "role": agent.role,
+                "phase": agent.phase,
+                "retries": int(agent.retries),
+                "subtasks": list(agent.subtasks),
+            }
+        )
+
+    if json_output:
+        print(
+            json.dumps(
+                {
+                    "exists": True,
+                    "path": str(squad_path),
+                    "lead": lead.name if lead else "Lead",
+                    "agents": agents_payload,
+                },
+                ensure_ascii=False,
+            ),
+            flush=True,
+        )
+        return
+
+    table = Table(title="Squad Status", expand=True)
+    table.add_column("Role", style="cyan", no_wrap=True)
+    table.add_column("Name", style="white")
+    table.add_column("Phase", justify="center")
+    table.add_column("Retries", justify="center")
+    table.add_column("Subtasks", style="dim")
+    for agent in team.agents:
+        subtasks = ", ".join(agent.subtasks) if agent.subtasks else "—"
+        table.add_row(
+            agent.role,
+            agent.name,
+            str(agent.phase),
+            str(int(agent.retries)),
+            subtasks,
+        )
+
+    console.print(f"[cyan]{squad_path}[/cyan]")
+    if lead is not None:
+        console.print(f"[bold]Lead:[/bold] {lead.name}")
+    console.print(table)
 
 
 def _reset_squad_file(*, json_output: bool = False) -> None:
@@ -4447,15 +4554,20 @@ def _serialize_squad_file(team: Any, squad_path: Path) -> dict[str, Any]:
                 "name": agent.name,
                 "role": agent.role,
                 "phase": agent.phase,
+                "depends_on": list(agent.depends_on),
             }
             for agent in team.agents
             if agent.role != "lead"
+        ],
+        "phases": [
+            {"phase": phase, "gate": gate}
+            for phase, gate in sorted(getattr(team, "phase_gates", {}).items())
         ],
     }
 
 
 async def _init_squad_file(config: CopexConfig, *, json_output: bool = False) -> None:
-    from copex.squad import SquadTeam
+    from copex.squad_team import SquadTeam
 
     team = await SquadTeam.from_repo_ai(config=config, path=Path.cwd())
     squad_path = _squad_file_path()
@@ -4473,7 +4585,7 @@ async def _update_squad_file(
     action: str,
     json_output: bool = False,
 ) -> None:
-    from copex.squad import SquadTeam
+    from copex.squad_team import SquadTeam
 
     team = await SquadTeam.update_from_request(
         f"{action}: {request}",
@@ -4494,17 +4606,14 @@ async def _run_squad(
     *,
     json_output: bool = False,
     no_ai: bool = False,
+    max_cost: float | None = None,
+    max_tokens: int | None = None,
+    auto_approve_gates: bool = False,
+    force: bool = False,
 ) -> None:
     """Run the squad coordinator."""
-    from copex.squad import SquadCoordinator, SquadTeam
-
-    def on_status(task_id: str, status: str) -> None:
-        if not json_output:
-            from copex.squad import _ROLE_EMOJIS
-
-            emoji = _ROLE_EMOJIS.get(task_id, "🔹")
-            name = task_id.replace("_", " ").title()
-            console.print(f"  {emoji} {name}: [dim]{status}[/dim]")
+    from copex.squad import SquadCoordinator
+    from copex.squad_team import SquadTeam
 
     try:
         if not json_output:
@@ -4521,15 +4630,82 @@ async def _run_squad(
         if no_ai:
             team = await SquadTeam.from_repo_or_file(config, use_ai=False)
         else:
+            team = SquadTeam.load_squad_file()
             if not json_output:
-                if SquadTeam.load_squad_file() is not None:
+                if team is not None:
                     console.print("📄 Using .squad configuration")
                 else:
                     console.print("🔍 Analyzing repository...")
 
-        coordinator = SquadCoordinator(config, team=team)
+        coordinator = SquadCoordinator(
+            config,
+            team=team,
+            max_cost=max_cost,
+            max_tokens=max_tokens,
+        )
+        result = None
+        stream_progress = (
+            not json_output
+            and not force
+            and not auto_approve_gates
+            and not (team is not None and bool(team.phase_gates))
+        )
         async with coordinator:
-            result = await coordinator.run(prompt, on_status=on_status)
+            if stream_progress:
+                from copex.squad import SquadEventType, _ROLE_EMOJIS
+
+                async for event in coordinator.run_streaming(prompt):
+                    if event.event_type == SquadEventType.PHASE_STARTED and event.phase is not None:
+                        console.print(f"[cyan]▶ Phase {event.phase} started[/cyan]")
+                        continue
+                    if event.event_type == SquadEventType.PHASE_COMPLETED and event.phase is not None:
+                        style = "green" if event.success else "red"
+                        status = "completed" if event.success else "failed"
+                        console.print(f"[{style}]✓ Phase {event.phase} {status}[/{style}]")
+                        continue
+                    if event.event_type == SquadEventType.AGENT_STARTED:
+                        role = (event.role or "").split("__", 1)[0]
+                        agent = event.agent
+                        emoji = agent.emoji if agent is not None else _ROLE_EMOJIS.get(role, "🔹")
+                        name = agent.name if agent is not None else role.replace("_", " ").title()
+                        console.print(f"  {emoji} {name}: [yellow]running[/yellow]")
+                        continue
+                    if event.event_type == SquadEventType.AGENT_COMPLETED:
+                        role = (event.role or "").split("__", 1)[0]
+                        agent = event.agent
+                        emoji = agent.emoji if agent is not None else _ROLE_EMOJIS.get(role, "🔹")
+                        name = agent.name if agent is not None else role.replace("_", " ").title()
+                        success = bool(event.success)
+                        style = "green" if success else "red"
+                        status = "done" if success else "failed"
+                        line = f"  {emoji} {name}: [{style}]{status}[/{style}]"
+                        if event.error and not success:
+                            line += f" [dim]({event.error})[/dim]"
+                        console.print(line)
+                        continue
+                    if event.event_type == SquadEventType.SQUAD_COMPLETED:
+                        result = event.result
+            else:
+                def on_status(task_id: str, status: str) -> None:
+                    if json_output:
+                        return
+                    from copex.squad import _ROLE_EMOJIS
+
+                    role = task_id.split("__", 1)[0]
+                    emoji = _ROLE_EMOJIS.get(role, "🔹")
+                    name = role.replace("_", " ").title()
+                    console.print(f"  {emoji} {name}: [dim]{status}[/dim]")
+
+                result = await coordinator.run(
+                    prompt,
+                    on_status=on_status,
+                    auto_approve_gates=auto_approve_gates,
+                    force=force,
+                    interactive=(sys.stdin.isatty() and sys.stdout.isatty() and not json_output),
+                )
+
+            if result is None:
+                raise typer.Exit(1) from None
 
             # Show team composition after analysis
             if not json_output and coordinator.team.agents:

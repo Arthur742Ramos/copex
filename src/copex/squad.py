@@ -18,24 +18,29 @@ Usage::
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import logging
+import os
 import re
 import time
+from collections.abc import AsyncIterator
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
 from pathlib import Path
 from typing import Any
 
-try:
-    import tomllib
-except ImportError:  # pragma: no cover - Python < 3.11
-    import tomli as tomllib  # type: ignore
-
 from copex.config import CopexConfig
-from copex.fleet import Fleet, FleetConfig, FleetResult
-from copex.json_utils import extract_json_array
+from copex.fleet import (
+    Fleet,
+    FleetConfig,
+    FleetEventType,
+    FleetMailbox,
+    FleetResult,
+    _TASK_OUTPUT_REF_RE,
+)
+from copex.streaming import Response
 
 logger = logging.getLogger(__name__)
 
@@ -54,6 +59,26 @@ class SquadRole(str, Enum):
     DEVOPS = "devops"
     FRONTEND = "frontend"
     BACKEND = "backend"
+
+
+class SquadError(Exception):
+    """Base class for squad-specific failures."""
+
+
+class SquadConfigError(SquadError):
+    """Raised when squad configuration is invalid."""
+
+
+class SquadExecutionError(SquadError):
+    """Raised when squad execution fails."""
+
+
+class SquadTimeoutError(SquadExecutionError):
+    """Raised when a squad task times out."""
+
+
+class SquadDependencyError(SquadExecutionError):
+    """Raised when a squad dependency fails."""
 
 
 _ROLE_PROMPTS: dict[str, str] = {
@@ -105,6 +130,7 @@ _ROLE_EMOJIS: dict[str, str] = {
 _SOURCE_EXTENSIONS = frozenset({
     ".py", ".js", ".ts", ".go", ".rs", ".java", ".c", ".cpp",
 })
+_SCAN_SKIP_DIRS = frozenset({"node_modules", "vendor", ".git", "__pycache__"})
 
 _FRONTEND_DIRS = frozenset({
     "frontend", "web", "ui", "app", "pages", "components",
@@ -113,12 +139,6 @@ _FRONTEND_DIRS = frozenset({
 _BACKEND_DIRS = frozenset({
     "api", "server", "backend", "services",
 })
-
-_TASK_OUTPUT_REF_RE = re.compile(
-    r"\{\{\s*task:(?P<task_id>[a-zA-Z0-9_.-]+)\.(?P<field>"
-    r"content|reasoning|success|error|duration_ms|prompt_tokens|completion_tokens"
-    r")\s*\}\}"
-)
 
 _REASONING_TIMEOUTS: dict[str, float] = {
     "xhigh": 1800.0,
@@ -133,12 +153,14 @@ _SQUAD_TEAM_FILE_NAME = "team.toml"
 _SQUAD_KNOWLEDGE_DIR_NAME = "knowledge"
 _SQUAD_LOG_DIR_NAME = "log"
 _SQUAD_DECISIONS_FILE_NAME = "decisions.md"
+_SQUAD_STATE_FILE_NAME = "state.json"
 
 _KNOWLEDGE_SECTION_HEADING = "What I Learned About This Codebase"
 _DECISIONS_SECTION_HEADING = "Key Decisions and Trade-offs"
 _MAX_PERSISTED_CONTEXT_CHARS = 4000
 _MAX_PERSISTED_ITEM_CHARS = 280
 _MAX_PERSISTED_ITEMS = 8
+_MAIL_REF_RE = re.compile(r"\{\{\s*mail:(?P<role>[a-zA-Z0-9_.-]+)\s*\}\}")
 
 
 def _now_iso_utc() -> str:
@@ -233,12 +255,17 @@ def _read_text_tail(path: Path, *, max_chars: int = _MAX_PERSISTED_CONTEXT_CHARS
 
 def _has_source_files(root: Path) -> bool:
     """Check for source code files (shallow scan, fast exit)."""
-    for ext in _SOURCE_EXTENSIONS:
-        try:
-            if next(root.rglob(f"*{ext}"), None) is not None:
-                return True
-        except OSError:
-            pass
+    try:
+        for _, dirs, files in os.walk(root, topdown=True):
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".") and d not in _SCAN_SKIP_DIRS
+            ]
+            for file_name in files:
+                if Path(file_name).suffix.lower() in _SOURCE_EXTENSIONS:
+                    return True
+    except OSError:
+        pass
     return False
 
 
@@ -247,13 +274,22 @@ def _has_test_files(root: Path) -> bool:
     for name in ("tests", "test"):
         if (root / name).is_dir():
             return True
-    test_patterns = ("*_test.*", "test_*.*", "*.spec.*")
-    for pat in test_patterns:
-        try:
-            if next(root.rglob(pat), None) is not None:
-                return True
-        except OSError:
-            pass
+    try:
+        for _, dirs, files in os.walk(root, topdown=True):
+            dirs[:] = [
+                d for d in dirs
+                if not d.startswith(".") and d not in _SCAN_SKIP_DIRS
+            ]
+            for file_name in files:
+                lower_name = file_name.lower()
+                if lower_name.startswith("test_") and "." in lower_name:
+                    return True
+                if "." in lower_name and lower_name.rsplit(".", 1)[0].endswith("_test"):
+                    return True
+                if ".spec." in lower_name:
+                    return True
+    except OSError:
+        pass
     return False
 
 
@@ -400,6 +436,21 @@ def _normalize_role_identifier(name: str) -> str:
     return normalized or "agent"
 
 
+def _normalize_depends_on_roles(value: Any) -> list[str]:
+    if isinstance(value, str):
+        value = [value]
+    if not isinstance(value, list):
+        return []
+    normalized: list[str] = []
+    seen: set[str] = set()
+    for item in value:
+        role = _normalize_role_identifier(str(item))
+        if role and role not in seen:
+            seen.add(role)
+            normalized.append(role)
+    return normalized
+
+
 def _squad_dir_path(path: Path | None = None) -> Path:
     return (path or Path.cwd()) / _SQUAD_DIR_NAME
 
@@ -419,6 +470,10 @@ def _squad_knowledge_path(role: str, path: Path | None = None) -> Path:
 
 def _squad_decisions_path(path: Path | None = None) -> Path:
     return _squad_dir_path(path) / _SQUAD_DECISIONS_FILE_NAME
+
+
+def _squad_state_path(path: Path | None = None) -> Path:
+    return _squad_dir_path(path) / _SQUAD_STATE_FILE_NAME
 
 
 def _squad_log_dir_path(path: Path | None = None) -> Path:
@@ -458,7 +513,9 @@ class SquadAgent:
     emoji: str
     system_prompt: str
     phase: int = 2
+    depends_on: list[str] = field(default_factory=list)
     subtasks: list[str] = field(default_factory=list)
+    retries: int = 1
 
     @classmethod
     def default_for_role(cls, role: SquadRole | str) -> SquadAgent:
@@ -482,686 +539,7 @@ class SquadAgent:
         )
 
 
-@dataclass
-class SquadTeam:
-    """A team of squad agents."""
-
-    agents: list[SquadAgent] = field(default_factory=list)
-    SQUAD_FILE = Path(_SQUAD_DIR_NAME)
-    SQUAD_TEAM_FILE = Path(_SQUAD_DIR_NAME) / _SQUAD_TEAM_FILE_NAME
-
-    @classmethod
-    def default(cls) -> SquadTeam:
-        """Create the default team: Lead, Developer, Tester, Docs."""
-        return cls(
-            agents=[
-                SquadAgent.default_for_role(SquadRole.LEAD),
-                SquadAgent.default_for_role(SquadRole.DEVELOPER),
-                SquadAgent.default_for_role(SquadRole.TESTER),
-                SquadAgent.default_for_role(SquadRole.DOCS),
-            ]
-        )
-
-    @classmethod
-    def from_repo(cls, path: Path | None = None) -> SquadTeam:
-        """Create a team adapted to the repo structure at path.
-
-        Scans the directory for signals (source files, tests, docs, Docker,
-        frontend/backend dirs) and builds a team with matching roles.
-        Always includes LEAD. Falls back to Lead + Developer minimum.
-        """
-        root = path or Path.cwd()
-        roles: list[SquadRole] = [SquadRole.LEAD]
-
-        has_source = _has_source_files(root)
-        has_tests = _has_test_files(root)
-        has_docs = _has_docs(root)
-        has_devops = _has_devops(root)
-        has_src = (root / "src").is_dir()
-        has_frontend = has_src and _has_frontend(root)
-        has_backend = has_src and _has_backend(root)
-
-        if has_source:
-            roles.append(SquadRole.DEVELOPER)
-        if has_tests:
-            roles.append(SquadRole.TESTER)
-        if has_docs:
-            roles.append(SquadRole.DOCS)
-        if has_devops:
-            roles.append(SquadRole.DEVOPS)
-        if has_frontend:
-            roles.append(SquadRole.FRONTEND)
-        if has_backend:
-            roles.append(SquadRole.BACKEND)
-
-        # Minimum viable team: Lead + Developer
-        if SquadRole.DEVELOPER not in roles:
-            roles.append(SquadRole.DEVELOPER)
-
-        return cls(agents=[SquadAgent.default_for_role(r) for r in roles])
-
-    @classmethod
-    def _resolve_squad_file_path(cls, path: Path | None = None) -> Path:
-        if path is None:
-            return cls.SQUAD_TEAM_FILE
-        if path.suffix == ".toml":
-            return path
-        if path.name == _SQUAD_DIR_NAME:
-            if path.is_file():
-                return path
-            return path / _SQUAD_TEAM_FILE_NAME
-        return path / cls.SQUAD_TEAM_FILE
-
-    @classmethod
-    def _resolve_legacy_squad_file_path(cls, path: Path | None = None) -> Path:
-        if path is None:
-            return cls.SQUAD_FILE
-        if path.name == _SQUAD_DIR_NAME:
-            return path
-        if path.suffix == ".toml":
-            if path.parent.name == _SQUAD_DIR_NAME:
-                return path.parent.parent / _SQUAD_DIR_NAME
-            return path.with_name(_SQUAD_DIR_NAME)
-        return path / _SQUAD_DIR_NAME
-
-    @staticmethod
-    def _squad_role_description(agent: SquadAgent) -> str:
-        known = _ROLE_DESCRIPTIONS.get(agent.role)
-        if known:
-            return known
-        prefix = f"You are the {agent.name}. "
-        if agent.system_prompt.startswith(prefix):
-            description = agent.system_prompt[len(prefix):].strip()
-            if description:
-                return description
-        text = agent.system_prompt.strip()
-        if text:
-            return text
-        return f"Handles {agent.name} responsibilities"
-
-    @classmethod
-    def _from_squad_payload(cls, data: dict[str, Any]) -> SquadTeam | None:
-        squad = data.get("squad")
-        if not isinstance(squad, dict):
-            return None
-
-        lead_name_raw = squad.get("lead", "Lead")
-        lead_name = str(lead_name_raw).strip() if lead_name_raw is not None else "Lead"
-        if not lead_name:
-            lead_name = "Lead"
-
-        lead_prompt = f"You are {lead_name}. {_ROLE_PROMPTS['lead']}"
-        agents: list[SquadAgent] = [
-            SquadAgent(
-                name=lead_name,
-                role=SquadRole.LEAD.value,
-                emoji=_ROLE_EMOJIS.get(SquadRole.LEAD.value, "🏗️"),
-                system_prompt=lead_prompt,
-                phase=1,
-            )
-        ]
-
-        raw_agents = squad.get("agents", [])
-        if not isinstance(raw_agents, list):
-            raw_agents = []
-
-        seen_roles: set[str] = {SquadRole.LEAD.value}
-        for item in raw_agents:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name", "")).strip()
-            if not name:
-                continue
-
-            role_id_raw = str(item.get("id", "")).strip().lower()
-            role_id = role_id_raw or _normalize_role_identifier(name)
-            if not role_id or role_id in seen_roles:
-                continue
-            seen_roles.add(role_id)
-
-            role_description = str(item.get("role", "")).strip()
-            prompt_override = str(item.get("prompt", "")).strip()
-            if prompt_override:
-                system_prompt = prompt_override
-            elif role_description:
-                system_prompt = f"You are the {name}. {role_description}"
-            else:
-                system_prompt = _ROLE_PROMPTS.get(
-                    role_id,
-                    f"You are the {name}. Focus on your area of expertise for this task.",
-                )
-
-            phase = _clamp_phase(
-                item.get("phase", _KNOWN_ROLE_PHASES.get(role_id, 2)),
-                fallback=_KNOWN_ROLE_PHASES.get(role_id, 2),
-            )
-            subtasks_raw = item.get("subtasks", [])
-            subtasks = (
-                [str(s).strip() for s in subtasks_raw if str(s).strip()]
-                if isinstance(subtasks_raw, list)
-                else []
-            )
-
-            emoji_raw = str(item.get("emoji", "")).strip()
-            agents.append(
-                SquadAgent(
-                    name=name,
-                    role=role_id,
-                    emoji=emoji_raw or _ROLE_EMOJIS.get(role_id, "🔹"),
-                    system_prompt=system_prompt,
-                    phase=phase,
-                    subtasks=subtasks,
-                )
-            )
-
-        return cls(agents=agents)
-
-    def _to_squad_payload(self) -> dict[str, Any]:
-        lead_agent = self.get_agent(SquadRole.LEAD.value)
-        lead_name = lead_agent.name if lead_agent is not None else "Lead"
-        serialized_agents: list[dict[str, Any]] = []
-        for agent in self.agents:
-            if agent.role == SquadRole.LEAD.value:
-                continue
-            item: dict[str, Any] = {
-                "name": agent.name,
-                "role": self._squad_role_description(agent),
-                "phase": agent.phase,
-            }
-            normalized_name_role = _normalize_role_identifier(agent.name)
-            if normalized_name_role != agent.role:
-                item["id"] = agent.role
-            if agent.subtasks:
-                item["subtasks"] = agent.subtasks
-            serialized_agents.append(item)
-        return {
-            "squad": {
-                "lead": lead_name,
-                "agents": serialized_agents,
-            }
-        }
-
-    @classmethod
-    def load_squad_file(cls, path: Path | None = None) -> SquadTeam | None:
-        """Load team composition from .squad TOML."""
-        primary = cls._resolve_squad_file_path(path)
-        legacy = cls._resolve_legacy_squad_file_path(path)
-        candidates = [primary]
-        if legacy not in candidates:
-            candidates.append(legacy)
-        for config_path in candidates:
-            if not config_path.is_file():
-                continue
-            try:
-                with open(config_path, "rb") as f:
-                    data = tomllib.load(f)
-                if not isinstance(data, dict):
-                    continue
-                team = cls._from_squad_payload(data)
-                if team and team.agents:
-                    logger.info(f"Loaded squad team from {config_path}: {[a.role for a in team.agents]}")
-                    return team
-            except Exception as e:
-                logger.warning(f"Failed to load .squad file from {config_path}: {e}")
-        return None
-
-    def save_squad_file(self, path: Path | None = None) -> None:
-        """Save team composition to .squad TOML."""
-        workspace_root: Path | None = None
-        if path is None:
-            workspace_root = Path.cwd()
-        elif path.suffix == ".toml":
-            if path.parent.name == _SQUAD_DIR_NAME:
-                workspace_root = path.parent.parent
-        elif path.name == _SQUAD_DIR_NAME:
-            workspace_root = path.parent
-        else:
-            workspace_root = path
-
-        if workspace_root is not None:
-            _ensure_squad_workspace(workspace_root)
-
-        config_path = self._resolve_squad_file_path(path or workspace_root)
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = self._to_squad_payload().get("squad", {})
-        lead_name = str(payload.get("lead", "Lead"))
-        agents = payload.get("agents", [])
-
-        lines = [
-            "[squad]",
-            f"lead = {json.dumps(lead_name, ensure_ascii=False)}",
-        ]
-        if isinstance(agents, list):
-            for item in agents:
-                if not isinstance(item, dict):
-                    continue
-                name = str(item.get("name", "")).strip()
-                role_desc = str(item.get("role", "")).strip()
-                if not name or not role_desc:
-                    continue
-                lines.append("")
-                lines.append("[[squad.agents]]")
-                lines.append(f"name = {json.dumps(name, ensure_ascii=False)}")
-                lines.append(f"role = {json.dumps(role_desc, ensure_ascii=False)}")
-                lines.append(f"phase = {_clamp_phase(item.get('phase', 2), fallback=2)}")
-
-                role_id = str(item.get("id", "")).strip().lower()
-                if role_id:
-                    lines.append(f"id = {json.dumps(role_id, ensure_ascii=False)}")
-
-                subtasks = item.get("subtasks")
-                if isinstance(subtasks, list):
-                    normalized = [str(subtask).strip() for subtask in subtasks if str(subtask).strip()]
-                    if normalized:
-                        subtasks_str = ", ".join(
-                            json.dumps(subtask, ensure_ascii=False) for subtask in normalized
-                        )
-                        lines.append(f"subtasks = [{subtasks_str}]")
-
-        config_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
-        logger.info(f"Squad team saved to {config_path}")
-
-    @classmethod
-    async def from_repo_or_file(
-        cls,
-        config: CopexConfig | None = None,
-        path: Path | None = None,
-        *,
-        use_ai: bool = True,
-    ) -> SquadTeam:
-        """Prefer .squad file, then AI analysis (or pattern matching fallback)."""
-        root = path or Path.cwd()
-        from_file = cls.load_squad_file(root)
-        if from_file is not None:
-            return from_file
-        if not use_ai:
-            return cls.from_repo(root)
-        return await cls.from_repo_ai(config=config, path=root)
-
-    @classmethod
-    async def update_from_request(
-        cls,
-        request: str,
-        *,
-        config: CopexConfig | None = None,
-        path: Path | None = None,
-    ) -> SquadTeam:
-        """Use AI to apply a natural-language edit request to a squad definition."""
-        # Lazy import to avoid circular dependency
-        from copex.cli_client import CopilotCLI
-        from copex.models import Model, ReasoningEffort
-
-        root = path or Path.cwd()
-        current_team = cls.load_squad_file(root)
-        if current_team is None:
-            current_team = await cls.from_repo_ai(config=config, path=root)
-
-        current_payload = current_team._to_squad_payload()
-        squad_payload = current_payload.get("squad", {})
-        current_agents = squad_payload.get("agents", [])
-        lead_name = squad_payload.get("lead", "Lead")
-
-        prompt_parts = [
-            "You update a squad configuration from a natural-language request.",
-            "",
-            "Current configuration:",
-            f"Lead: {lead_name}",
-            json.dumps(current_agents, indent=2, ensure_ascii=False),
-            "",
-            f"Request: {request}",
-            "",
-            "Return ONLY a JSON array of objects with:",
-            '- "name": agent display name',
-            '- "role": short responsibility sentence',
-            '- "phase": integer 1-4',
-            '- "id": optional snake_case role identifier',
-            '- "lead": optional boolean (true for lead entry)',
-            "",
-            "Rules:",
-            "- Include exactly one lead entry (lead=true or phase=1).",
-            "- Keep unaffected agents unless the request removes them.",
-            "- Use unique names.",
-            "- Keep team compact (typically 3-6 agents).",
-        ]
-        prompt = "\n".join(prompt_parts)
-
-        ai_config = (config or CopexConfig()).model_copy()
-        ai_config.model = Model.CLAUDE_OPUS_4_6_FAST
-        ai_config.reasoning_effort = ReasoningEffort.LOW
-        ai_config.streaming = False
-        ai_config.use_cli = True
-
-        async with CopilotCLI(ai_config) as cli:
-            response = await cli.send(prompt)
-
-        parsed_agents = extract_json_array(response.content.strip())
-        if not parsed_agents:
-            raise ValueError("AI returned an empty squad configuration")
-
-        updated_lead = str(lead_name).strip() or "Lead"
-        updated_agents: list[dict[str, Any]] = []
-        seen_names: set[str] = set()
-
-        for item in parsed_agents:
-            if not isinstance(item, dict):
-                continue
-            name = str(item.get("name", "")).strip()
-            if not name:
-                continue
-            name_key = name.casefold()
-            if name_key in seen_names:
-                continue
-            seen_names.add(name_key)
-
-            phase = _clamp_phase(item.get("phase", 2), fallback=2)
-            if bool(item.get("lead")) or phase == 1:
-                updated_lead = name
-                continue
-
-            role_description = str(item.get("role", "")).strip()
-            role_id = str(item.get("id", "")).strip().lower()
-            agent_entry: dict[str, Any] = {
-                "name": name,
-                "role": role_description or f"Handles {name} responsibilities",
-                "phase": phase,
-            }
-            if role_id:
-                agent_entry["id"] = role_id
-            subtasks = item.get("subtasks")
-            if isinstance(subtasks, list):
-                normalized_subtasks = [
-                    str(subtask).strip() for subtask in subtasks if str(subtask).strip()
-                ]
-                if normalized_subtasks:
-                    agent_entry["subtasks"] = normalized_subtasks
-            updated_agents.append(agent_entry)
-
-        updated_payload = {"squad": {"lead": updated_lead, "agents": updated_agents}}
-        team = cls._from_squad_payload(updated_payload)
-        if team is None:
-            raise ValueError("AI returned an invalid squad definition")
-        return team
-
-    @classmethod
-    async def from_repo_ai(
-        cls,
-        config: CopexConfig | None = None,
-        path: Path | None = None,
-        existing_team: SquadTeam | None = None,
-    ) -> SquadTeam:
-        """Create a team by using AI to analyze the repository.
-
-        Uses CopilotCLI with claude-opus-4.6-fast to intelligently analyze
-        the repo structure, README, and config files. Falls back to from_repo()
-        (pattern matching) on any failure.
-
-        If an existing_team is provided (e.g., from .copex/squad.json), the AI
-        sees the current team and can keep, modify, or expand it.
-
-        Args:
-            config: Optional CopexConfig (creates lightweight config if None).
-            path: Optional path to repository (defaults to cwd).
-            existing_team: Optional existing team for the AI to consider.
-
-        Returns:
-            SquadTeam with AI-determined roles, or fallback to from_repo().
-        """
-        try:
-            # Lazy import to avoid circular dependency
-            from copex.cli_client import CopilotCLI
-            from copex.models import Model, ReasoningEffort
-
-            # Gather repo context
-            context = _gather_repo_context(path)
-            if not context:
-                logger.warning("No repo context found, falling back to pattern matching")
-                return cls.from_repo(path)
-
-            # Check for existing team (from config or .copex/squad.json)
-            if existing_team is None:
-                existing_team = cls.load(
-                    (path or Path.cwd()) / ".copex" / "squad.json"
-                )
-
-            # Build prompt for AI
-            prompt_parts = [
-                "Analyze this repository and determine what development team roles are needed.",
-                "",
-                "# Repository Context",
-            ]
-
-            if context.get("project_name"):
-                prompt_parts.append(f"Project: {context['project_name']}")
-            if context.get("description"):
-                prompt_parts.append(f"Description: {context['description']}")
-            if context.get("source_extensions"):
-                prompt_parts.append(f"Languages: {', '.join(context['source_extensions'])}")
-            if context.get("dependencies"):
-                deps = context["dependencies"]
-                prompt_parts.append(f"Dependencies: {', '.join(deps[:5])}")
-            if context.get("directory_structure"):
-                struct = "\n".join(context["directory_structure"][:30])
-                prompt_parts.append(f"\nDirectory structure:\n{struct}")
-            if context.get("readme_excerpt"):
-                excerpt = context["readme_excerpt"][:1000]
-                prompt_parts.append(f"\nREADME excerpt:\n{excerpt}")
-
-            # Include existing team context if available
-            if existing_team and existing_team.agents:
-                prompt_parts.append("")
-                prompt_parts.append("# Current Team Configuration")
-                prompt_parts.append("")
-                prompt_parts.append(
-                    "This repository already has a team configured. "
-                    "Review it and decide whether to keep it as-is, "
-                    "modify roles, or add/remove agents:"
-                )
-                for agent in existing_team.agents:
-                    prompt_parts.append(
-                        f"- {agent.emoji} {agent.name} (role: {agent.role}, "
-                        f"phase: {agent.phase})"
-                    )
-
-            prompt_parts.extend([
-                "",
-                "# Instructions",
-                "",
-                "Determine the ideal team composition for this repository.",
-                "You may create ANY roles that make sense — you are NOT limited to a predefined list.",
-                "Common roles include lead, developer, tester, docs, devops, frontend, backend,",
-                "but you can invent specialized roles like security_engineer, data_scientist,",
-                "api_designer, performance_engineer, etc.",
-                "",
-                "Respond ONLY with a JSON array of objects, each with:",
-                '- "role": short snake_case identifier (e.g. "security_engineer")',
-                '- "name": human-readable name (e.g. "Security Engineer")',
-                '- "emoji": single emoji for display',
-                '- "prompt": system prompt describing the agent\'s expertise and focus',
-                '- "phase": execution order (1=analyze first, 2=build, 3=verify, 4=document)',
-                '- "subtasks": (optional) list of strings describing parallel work items.',
-                '  When provided, the agent\'s work is split into parallel Fleet tasks —',
-                '  one per subtask — all running within the same phase.',
-                '  Use subtasks when an agent has clearly separable concerns',
-                '  (e.g., a developer handling 3 independent modules).',
-                "",
-                "Rules:",
-                "- Always include a 'lead' role with phase 1",
-                "- Keep the team small (3-5 roles typical)",
-                "- Only include roles clearly needed for THIS specific repository",
-                "- Phase ordering determines dependencies (phase 2 waits for phase 1, etc.)",
-                "- Subtasks are optional — only add them when work is naturally parallelizable",
-                "- If a current team is shown above, use it as a starting point —"
-                " keep roles that still make sense, remove unnecessary ones, and add new ones if needed",
-                "",
-                "Example response:",
-                '[',
-                '  {"role": "lead", "name": "Lead Architect", "emoji": "🏗️", '
-                '"prompt": "You are the Lead Architect. Analyze the task...", "phase": 1},',
-                '  {"role": "developer", "name": "Developer", "emoji": "🔧", '
-                '"prompt": "You are the Developer. Implement the task...", "phase": 2,',
-                '   "subtasks": ["Core module implementation", "API endpoint handlers"]},',
-                '  {"role": "tester", "name": "Tester", "emoji": "🧪", '
-                '"prompt": "You are the Tester. Write comprehensive tests...", "phase": 3}',
-                ']',
-            ])
-
-            prompt = "\n".join(prompt_parts)
-
-            # Create lightweight config for AI analysis (copy to avoid mutation)
-            ai_config = (config or CopexConfig()).model_copy()
-            ai_config.model = Model.CLAUDE_OPUS_4_6_FAST
-            ai_config.reasoning_effort = ReasoningEffort.LOW
-            ai_config.streaming = False
-            ai_config.use_cli = True
-
-            # Call AI with timeout
-            async with CopilotCLI(ai_config) as cli:
-                response = await cli.send(prompt)
-                content = response.content.strip()
-
-                # Robustly extract JSON array from LLM response
-                roles_list = extract_json_array(content)
-
-                # Build agents from AI response
-                agents: list[SquadAgent] = []
-                seen_roles: set[str] = set()
-                for item in roles_list:
-                    if isinstance(item, str):
-                        # Legacy format: plain role string
-                        role_str = item.lower()
-                        if role_str not in seen_roles:
-                            seen_roles.add(role_str)
-                            agents.append(SquadAgent.default_for_role(role_str))
-                    elif isinstance(item, dict):
-                        role_str = item.get("role", "").lower()
-                        if not role_str or role_str in seen_roles:
-                            continue
-                        seen_roles.add(role_str)
-                        phase = item.get("phase", _KNOWN_ROLE_PHASES.get(role_str, 2))
-                        try:
-                            phase = int(phase)
-                        except (TypeError, ValueError):
-                            phase = 2
-                        subtasks_raw = item.get("subtasks", [])
-                        subtasks = (
-                            [str(s) for s in subtasks_raw]
-                            if isinstance(subtasks_raw, list)
-                            else []
-                        )
-                        agents.append(SquadAgent(
-                            name=item.get("name", role_str.replace("_", " ").title()),
-                            role=role_str,
-                            emoji=item.get("emoji", _ROLE_EMOJIS.get(role_str, "🔹")),
-                            system_prompt=item.get("prompt", _ROLE_PROMPTS.get(
-                                role_str,
-                                f"You are the {role_str.replace('_', ' ').title()}. "
-                                f"Focus on your area of expertise for this task.",
-                            )),
-                            phase=max(1, min(4, phase)),
-                            subtasks=subtasks,
-                        ))
-
-                # Ensure lead exists
-                if "lead" not in seen_roles:
-                    agents.insert(0, SquadAgent.default_for_role("lead"))
-
-                logger.info(f"AI analysis completed: {[a.role for a in agents]}")
-                team = cls(agents=agents)
-                # Persist for future runs
-                try:
-                    team.save(
-                        (path or Path.cwd()) / ".copex" / "squad.json"
-                    )
-                except Exception:
-                    pass  # Non-critical
-                return team
-
-        except Exception as e:
-            logger.warning(f"AI repo analysis failed ({e}), falling back to pattern matching")
-            return cls.from_repo(path)
-
-    SQUAD_CONFIG = Path(".copex") / "squad.json"
-
-    def save(self, path: Path | None = None) -> None:
-        """Save team configuration to .copex/squad.json."""
-        config_path = path or self.SQUAD_CONFIG
-        config_path.parent.mkdir(parents=True, exist_ok=True)
-        data = [
-            {
-                "role": a.role,
-                "name": a.name,
-                "emoji": a.emoji,
-                "prompt": a.system_prompt,
-                "phase": a.phase,
-                **({"subtasks": a.subtasks} if a.subtasks else {}),
-            }
-            for a in self.agents
-        ]
-        config_path.write_text(
-            json.dumps(data, indent=2, ensure_ascii=False), encoding="utf-8"
-        )
-        logger.info(f"Squad team saved to {config_path}")
-
-    @classmethod
-    def load(cls, path: Path | None = None) -> SquadTeam | None:
-        """Load team configuration from .copex/squad.json.
-
-        Returns None if file doesn't exist.
-        """
-        config_path = path or cls.SQUAD_CONFIG
-        if not config_path.is_file():
-            return None
-        try:
-            data = json.loads(config_path.read_text(encoding="utf-8"))
-            if not isinstance(data, list):
-                return None
-            agents = []
-            for item in data:
-                if not isinstance(item, dict) or not item.get("role"):
-                    continue
-                role_str = item["role"].lower()
-                phase = item.get("phase", _KNOWN_ROLE_PHASES.get(role_str, 2))
-                try:
-                    phase = int(phase)
-                except (TypeError, ValueError):
-                    phase = 2
-                subtasks_raw = item.get("subtasks", [])
-                subtasks = (
-                    [str(s) for s in subtasks_raw]
-                    if isinstance(subtasks_raw, list)
-                    else []
-                )
-                agents.append(SquadAgent(
-                    name=item.get("name", role_str.replace("_", " ").title()),
-                    role=role_str,
-                    emoji=item.get("emoji", _ROLE_EMOJIS.get(role_str, "🔹")),
-                    system_prompt=item.get("prompt", _ROLE_PROMPTS.get(
-                        role_str,
-                        f"You are the {role_str.replace('_', ' ').title()}. "
-                        f"Focus on your area of expertise for this task.",
-                    )),
-                    phase=max(1, min(4, phase)),
-                    subtasks=subtasks,
-                ))
-            if agents:
-                logger.info(f"Loaded squad team from {config_path}: {[a.role for a in agents]}")
-                return cls(agents=agents)
-        except Exception as e:
-            logger.warning(f"Failed to load squad config from {config_path}: {e}")
-        return None
-
-    def get_agent(self, role: SquadRole | str) -> SquadAgent | None:
-        """Get agent by role."""
-        role_str = role.value if isinstance(role, SquadRole) else role.lower()
-        for a in self.agents:
-            if a.role == role_str:
-                return a
-        return None
-
-    @property
-    def roles(self) -> list[str]:
-        """List roles present in the team."""
-        return [a.role for a in self.agents]
+from .squad_team import SquadTeam
 
 
 @dataclass
@@ -1219,6 +597,31 @@ class SquadResult:
         return json.dumps(self.to_dict(), indent=indent, ensure_ascii=False)
 
 
+class SquadEventType(str, Enum):
+    """Types of squad-level progress events."""
+
+    PHASE_STARTED = "phase_started"
+    PHASE_COMPLETED = "phase_completed"
+    AGENT_STARTED = "agent_started"
+    AGENT_COMPLETED = "agent_completed"
+    SQUAD_COMPLETED = "squad_completed"
+
+
+@dataclass
+class SquadEvent:
+    """Progress event emitted by ``SquadCoordinator.run_streaming``."""
+
+    event_type: SquadEventType
+    role: str | None = None
+    phase: int | None = None
+    agent: SquadAgent | None = None
+    status: str | None = None
+    success: bool | None = None
+    iteration: int = 1
+    error: str | None = None
+    result: SquadResult | None = None
+
+
 class SquadCoordinator:
     """Orchestrates a team of agents using Fleet for parallel execution.
 
@@ -1248,6 +651,8 @@ class SquadCoordinator:
         *,
         team: SquadTeam | None = None,
         fleet_config: FleetConfig | None = None,
+        max_cost: float | None = None,
+        max_tokens: int | None = None,
     ) -> None:
         self._config = config
         self._team = team  # Can be None for lazy init
@@ -1255,8 +660,11 @@ class SquadCoordinator:
             max_concurrent=3,
             timeout=self._default_timeout_from_reasoning(config.reasoning_effort),
         )
+        self._max_cost = max_cost
+        self._max_tokens = max_tokens
         self._project_context: str | None = None
         self._repo_map: Any | None = None
+        self._has_local_state = False
 
     @property
     def team(self) -> SquadTeam:
@@ -1278,12 +686,18 @@ class SquadCoordinator:
         prompt: str,
         *,
         on_status: Any | None = None,
+        auto_approve_gates: bool | None = None,
+        force: bool = False,
+        interactive: bool | None = None,
     ) -> SquadResult:
         """Run the squad on a task.
 
         Args:
             prompt: The task to accomplish.
             on_status: Optional callback(task_id, status) for progress.
+            auto_approve_gates: Skip phase gate prompts when True.
+            force: Force rerun of all tasks and ignore incremental cache.
+            interactive: Override whether gate prompts should be interactive.
 
         Returns:
             SquadResult with results from all agents.
@@ -1291,15 +705,24 @@ class SquadCoordinator:
         start_time = time.monotonic()
 
         # Lazy init: prefer .squad, then AI repo analysis
+        repo_context: dict[str, Any] | None = None
+        if self._project_context is None:
+            repo_context = _gather_repo_context()
+
         if self._team is None:
-            self._team = await SquadTeam.from_repo_or_file(self._config)
+            self._team = await SquadTeam.from_repo_or_file(
+                self._config,
+                repo_context=repo_context,
+            )
             team_path = SquadTeam._resolve_squad_file_path()
             if not team_path.is_file():
                 self._team.save_squad_file()
                 logger.info("Squad team auto-saved to %s", team_path)
 
         if self._project_context is None:
-            self._project_context = self._discover_project_context()
+            self._project_context = self._discover_project_context(
+                repo_context=repo_context
+            )
         if self._repo_map is None:
             try:
                 from copex.repo_map import RepoMap
@@ -1310,22 +733,61 @@ class SquadCoordinator:
                 logger.info("Repo map unavailable for squad context: %s", exc)
                 self._repo_map = None
 
+        self._validate_team_dependency_graph()
+        interactive_mode = self._is_interactive_tty() if interactive is None else interactive
+        gate_auto_approve = (not interactive_mode) if auto_approve_gates is None else (
+            auto_approve_gates or not interactive_mode
+        )
+        use_controlled_execution = (
+            bool(self.team.phase_gates)
+            or force
+            or (self._has_local_state and _squad_state_path().is_file())
+        )
+
         max_feedback_iterations = 3
         feedback_iteration = 0
         current_prompt = prompt
+        cumulative_cost = 0.0
+        cumulative_tokens = 0
+        mailbox = FleetMailbox()
 
         final_result: SquadResult | None = None
         while True:
-            fleet = Fleet(self._config, fleet_config=self._fleet_config)
             task_prompts: dict[str, str] = {}
-            task_ids = self._add_tasks(fleet, current_prompt, task_prompts=task_prompts)
-            fleet_results = await fleet.run(on_status=on_status)
-            fleet_results = await self._retry_failed_agents(
-                fleet_results,
-                task_prompts,
-                on_status=on_status,
+            if use_controlled_execution:
+                fleet_results, task_ids = await self._run_iteration_with_controls(
+                    current_prompt,
+                    on_status=on_status,
+                    auto_approve_gates=gate_auto_approve,
+                    interactive=interactive_mode,
+                    force=force,
+                )
+            else:
+                fleet = Fleet(self._config, fleet_config=self._fleet_config)
+                task_ids = self._add_tasks(
+                    fleet,
+                    current_prompt,
+                    task_prompts=task_prompts,
+                    mailbox=mailbox,
+                )
+                fleet_results = await fleet.run(on_status=on_status)
+                fleet_results = await self._retry_failed_agents(
+                    fleet_results,
+                    task_prompts,
+                    on_status=on_status,
+                    mailbox=mailbox,
+                )
+                self._persist_state_from_results(
+                    task_ids=task_ids,
+                    task_prompts=task_prompts,
+                    fleet_results=fleet_results,
+                )
+            cumulative_cost += sum(fr.total_cost for fr in fleet_results)
+            cumulative_tokens += sum(
+                fr.prompt_tokens + fr.completion_tokens
+                for fr in fleet_results
             )
-
+            self._enforce_budget(cumulative_cost, cumulative_tokens)
             iteration_result = self._build_result(fleet_results, task_ids)
             tester_results = [
                 ar
@@ -1363,12 +825,754 @@ class SquadCoordinator:
             logger.warning("Failed to persist squad knowledge artifacts: %s", exc)
         return final_result
 
+    async def run_streaming(
+        self,
+        prompt: str,
+        *,
+        on_status: Any | None = None,
+    ) -> AsyncIterator[SquadEvent]:
+        """Run the squad while emitting real-time squad-level progress events."""
+        start_time = time.monotonic()
+
+        repo_context: dict[str, Any] | None = None
+        if self._project_context is None:
+            repo_context = _gather_repo_context()
+
+        if self._team is None:
+            self._team = await SquadTeam.from_repo_or_file(
+                self._config,
+                repo_context=repo_context,
+            )
+            team_path = SquadTeam._resolve_squad_file_path()
+            if not team_path.is_file():
+                self._team.save_squad_file()
+                logger.info("Squad team auto-saved to %s", team_path)
+
+        if self._project_context is None:
+            self._project_context = self._discover_project_context(
+                repo_context=repo_context
+            )
+        if self._repo_map is None:
+            try:
+                from copex.repo_map import RepoMap
+
+                self._repo_map = RepoMap(Path.cwd())
+                self._repo_map.refresh(force=False)
+            except Exception as exc:
+                logger.info("Repo map unavailable for squad context: %s", exc)
+                self._repo_map = None
+
+        self._validate_team_dependency_graph()
+
+        max_feedback_iterations = 3
+        feedback_iteration = 0
+        current_prompt = prompt
+        cumulative_cost = 0.0
+        cumulative_tokens = 0
+        mailbox = FleetMailbox()
+
+        final_result: SquadResult | None = None
+        while True:
+            fleet = Fleet(self._config, fleet_config=self._fleet_config)
+            task_prompts: dict[str, str] = {}
+            task_ids = self._add_tasks(
+                fleet,
+                current_prompt,
+                task_prompts=task_prompts,
+                mailbox=mailbox,
+            )
+            task_to_role = self._task_to_role_map(task_ids)
+            role_to_task_ids = {
+                role: [tid for tid in tid_value.split("|") if tid]
+                for role, tid_value in task_ids.items()
+            }
+            role_to_agent = {agent.role: agent for agent in self.team.agents}
+            phase_to_task_ids: dict[int, set[str]] = {}
+            for role, role_task_ids in role_to_task_ids.items():
+                agent = role_to_agent.get(role)
+                phase = agent.phase if agent is not None else 2
+                phase_to_task_ids.setdefault(phase, set()).update(role_task_ids)
+
+            started_phases: set[int] = set()
+            completed_phases: set[int] = set()
+            started_roles: set[str] = set()
+            completed_roles: set[str] = set()
+            completed_tasks: set[str] = set()
+            task_success: dict[str, bool] = {}
+
+            async with fleet:
+                async for event in fleet.run_streaming(mailbox=mailbox):
+                    task_id = event.task_id
+                    if task_id is None:
+                        continue
+                    role = task_to_role.get(task_id)
+                    if role is None:
+                        continue
+                    agent = role_to_agent.get(role)
+                    phase = agent.phase if agent is not None else 2
+
+                    if event.event_type == FleetEventType.TASK_RUNNING:
+                        if phase not in started_phases:
+                            started_phases.add(phase)
+                            yield SquadEvent(
+                                event_type=SquadEventType.PHASE_STARTED,
+                                phase=phase,
+                                status="running",
+                                iteration=feedback_iteration + 1,
+                            )
+                        if role not in started_roles:
+                            started_roles.add(role)
+                            if on_status:
+                                on_status(role, "running")
+                            yield SquadEvent(
+                                event_type=SquadEventType.AGENT_STARTED,
+                                role=role,
+                                phase=phase,
+                                agent=agent,
+                                status="running",
+                                iteration=feedback_iteration + 1,
+                            )
+                        continue
+
+                    if event.event_type not in {
+                        FleetEventType.TASK_DONE,
+                        FleetEventType.TASK_FAILED,
+                        FleetEventType.TASK_BLOCKED,
+                        FleetEventType.TASK_CANCELLED,
+                    }:
+                        continue
+
+                    completed_tasks.add(task_id)
+                    task_success[task_id] = event.event_type == FleetEventType.TASK_DONE
+
+                    role_task_ids = role_to_task_ids.get(role, [])
+                    if role not in completed_roles and all(
+                        task in completed_tasks for task in role_task_ids
+                    ):
+                        completed_roles.add(role)
+                        role_success = all(task_success.get(task, False) for task in role_task_ids)
+                        status = "done" if role_success else "failed"
+                        if on_status:
+                            on_status(role, status)
+                        yield SquadEvent(
+                            event_type=SquadEventType.AGENT_COMPLETED,
+                            role=role,
+                            phase=phase,
+                            agent=agent,
+                            status=status,
+                            success=role_success,
+                            error=event.error,
+                            iteration=feedback_iteration + 1,
+                        )
+
+                    phase_task_ids = phase_to_task_ids.get(phase, set())
+                    if phase in completed_phases or not phase_task_ids:
+                        continue
+                    if not phase_task_ids.issubset(completed_tasks):
+                        continue
+                    completed_phases.add(phase)
+                    phase_success = all(task_success.get(task, False) for task in phase_task_ids)
+                    yield SquadEvent(
+                        event_type=SquadEventType.PHASE_COMPLETED,
+                        phase=phase,
+                        status="done" if phase_success else "failed",
+                        success=phase_success,
+                        iteration=feedback_iteration + 1,
+                    )
+
+            fleet_results = fleet.last_results
+            if not fleet_results:
+                raise SquadExecutionError("Squad execution produced no fleet results")
+
+            fleet_results = await self._retry_failed_agents(
+                fleet_results,
+                task_prompts,
+                on_status=on_status,
+                mailbox=mailbox,
+            )
+            cumulative_cost += sum(fr.total_cost for fr in fleet_results)
+            cumulative_tokens += sum(
+                fr.prompt_tokens + fr.completion_tokens
+                for fr in fleet_results
+            )
+            self._enforce_budget(cumulative_cost, cumulative_tokens)
+            self._persist_state_from_results(
+                task_ids=task_ids,
+                task_prompts=task_prompts,
+                fleet_results=fleet_results,
+            )
+
+            iteration_result = self._build_result(fleet_results, task_ids)
+            tester_results = [
+                ar
+                for ar in iteration_result.agent_results
+                if ar.agent.role == SquadRole.TESTER.value
+            ]
+            tester_needs_feedback = any(
+                (
+                    (not ar.success and not self._is_timeout_error(ar.error))
+                    or self._tester_reported_issues(ar.content)
+                )
+                for ar in tester_results
+            )
+
+            if (
+                not tester_results
+                or not tester_needs_feedback
+                or feedback_iteration >= max_feedback_iterations
+            ):
+                final_result = iteration_result
+                break
+
+            feedback_iteration += 1
+            current_prompt = self._build_feedback_iteration_prompt(
+                prompt,
+                tester_results,
+                feedback_iteration,
+            )
+
+        assert final_result is not None  # noqa: S101
+        final_result.total_duration_ms = (time.monotonic() - start_time) * 1000
+        try:
+            self._persist_run_artifacts(prompt, final_result)
+        except OSError as exc:
+            logger.warning("Failed to persist squad knowledge artifacts: %s", exc)
+        yield SquadEvent(
+            event_type=SquadEventType.SQUAD_COMPLETED,
+            status="done" if final_result.success else "failed",
+            success=final_result.success,
+            result=final_result,
+            iteration=feedback_iteration + 1,
+        )
+
+    @staticmethod
+    def _task_to_role_map(task_ids: dict[str, str]) -> dict[str, str]:
+        mapping: dict[str, str] = {}
+        for role, tid_value in task_ids.items():
+            for task_id in tid_value.split("|"):
+                if task_id:
+                    mapping[task_id] = role
+        return mapping
+
+    def _validate_team_dependency_graph(self) -> None:
+        role_ids = [agent.role for agent in self.team.agents]
+        role_set = set(role_ids)
+        missing: list[str] = []
+        for agent in self.team.agents:
+            for dep_role in self._dependency_roles(agent):
+                if dep_role not in role_set:
+                    missing.append(f"{agent.role} -> {dep_role}")
+        if missing:
+            raise SquadConfigError(
+                "Squad dependency graph references unknown roles: " + ", ".join(sorted(missing))
+            )
+
+        in_degree: dict[str, int] = {role: 0 for role in role_ids}
+        adjacency: dict[str, list[str]] = {role: [] for role in role_ids}
+        for agent in self.team.agents:
+            for dep_role in self._dependency_roles(agent):
+                adjacency[dep_role].append(agent.role)
+                in_degree[agent.role] += 1
+
+        queue: list[str] = [role for role, degree in in_degree.items() if degree == 0]
+        visited = 0
+        while queue:
+            role = queue.pop(0)
+            visited += 1
+            for dependent in adjacency[role]:
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+
+        if visited != len(role_ids):
+            cycle_roles = sorted(role for role, degree in in_degree.items() if degree > 0)
+            raise SquadConfigError(
+                "Cycle detected in squad dependencies: " + ", ".join(cycle_roles)
+            )
+
+    @staticmethod
+    def _stable_json(payload: Any) -> str:
+        return json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False)
+
+    def _build_task_id_map(self) -> dict[str, str]:
+        task_ids: dict[str, str] = {}
+        for agent in self.team.agents:
+            if agent.subtasks:
+                task_ids[agent.role] = "|".join(
+                    f"{agent.role}__sub{i + 1}" for i in range(len(agent.subtasks))
+                )
+            else:
+                task_ids[agent.role] = agent.role
+        return task_ids
+
+    def _compute_execution_levels(self) -> dict[str, int]:
+        role_ids = [agent.role for agent in self.team.agents]
+        in_degree: dict[str, int] = {role: 0 for role in role_ids}
+        adjacency: dict[str, list[str]] = {role: [] for role in role_ids}
+        levels: dict[str, int] = {role: 1 for role in role_ids}
+        order_index = {role: idx for idx, role in enumerate(role_ids)}
+
+        for agent in self.team.agents:
+            for dep_role in self._dependency_roles(agent):
+                adjacency[dep_role].append(agent.role)
+                in_degree[agent.role] += 1
+
+        queue = sorted(
+            [role for role, degree in in_degree.items() if degree == 0],
+            key=lambda role: order_index[role],
+        )
+        while queue:
+            role = queue.pop(0)
+            for dependent in sorted(adjacency[role], key=lambda dep: order_index[dep]):
+                levels[dependent] = max(levels.get(dependent, 1), levels[role] + 1)
+                in_degree[dependent] -= 1
+                if in_degree[dependent] == 0:
+                    queue.append(dependent)
+        return levels
+
+    def _load_squad_state(self) -> dict[str, Any]:
+        path = _squad_state_path()
+        if not path.is_file():
+            return {}
+        try:
+            data = json.loads(path.read_text(encoding="utf-8"))
+            return data if isinstance(data, dict) else {}
+        except Exception:
+            return {}
+
+    def _save_squad_state(self, state: dict[str, Any]) -> None:
+        _ensure_squad_workspace()
+        path = _squad_state_path()
+        path.write_text(json.dumps(state, indent=2, ensure_ascii=False), encoding="utf-8")
+
+    def _task_input_hash(
+        self,
+        *,
+        task_id: str,
+        rendered_prompt: str,
+        dependency_hashes: dict[str, str],
+    ) -> str:
+        payload = {
+            "task_id": task_id,
+            "prompt": rendered_prompt,
+            "dependency_hashes": dependency_hashes,
+        }
+        return hashlib.sha256(self._stable_json(payload).encode("utf-8")).hexdigest()
+
+    def _render_mailbox_refs(
+        self,
+        prompt: str,
+        messages_by_sender: dict[str, list[str]],
+        *,
+        known_roles: set[str] | None = None,
+    ) -> str:
+        if "{{mail:" not in prompt:
+            return prompt
+
+        normalized_known_roles = {
+            _normalize_role_identifier(role)
+            for role in (known_roles or {agent.role for agent in self.team.agents})
+        }
+
+        def _replace(match: re.Match[str]) -> str:
+            sender_role = _normalize_role_identifier(match.group("role"))
+            if sender_role not in normalized_known_roles and sender_role not in messages_by_sender:
+                return ""
+            messages = messages_by_sender.get(sender_role, [])
+            if not messages:
+                return ""
+            return "\n\n".join(messages)
+
+        return _MAIL_REF_RE.sub(_replace, prompt)
+
+    def _collect_mail_for_role(
+        self,
+        role: str,
+        *,
+        task_ids: dict[str, str],
+        task_to_role: dict[str, str],
+        mailbox: FleetMailbox,
+    ) -> dict[str, list[str]]:
+        messages_by_sender: dict[str, list[str]] = {}
+        role_task_ids = [tid for tid in task_ids.get(role, "").split("|") if tid]
+        for task_id in role_task_ids:
+            while True:
+                envelope = mailbox.try_receive(task_id)
+                if envelope is None:
+                    break
+                from_task = str(envelope.get("from") or "")
+                sender_role = task_to_role.get(from_task, _normalize_role_identifier(from_task))
+                payload = envelope.get("payload")
+                text = ""
+                if isinstance(payload, dict):
+                    text = str(payload.get("content", "")).strip()
+                elif payload is not None:
+                    text = str(payload).strip()
+                if text:
+                    messages_by_sender.setdefault(sender_role, []).append(text)
+        return messages_by_sender
+
+    async def _relay_mailbox_messages(
+        self,
+        *,
+        mailbox: FleetMailbox,
+        task_ids: dict[str, str],
+        task_to_role: dict[str, str],
+        phase_results: list[FleetResult],
+    ) -> None:
+        dependents_by_role: dict[str, list[str]] = {agent.role: [] for agent in self.team.agents}
+        for agent in self.team.agents:
+            for dep_role in self._dependency_roles(agent):
+                dependents_by_role.setdefault(dep_role, []).append(agent.role)
+
+        for result in phase_results:
+            sender_role = task_to_role.get(result.task_id)
+            if sender_role is None:
+                continue
+            content = (result.response.content if result.response else "").strip()
+            if not content:
+                continue
+            targets = dependents_by_role.get(sender_role, [])
+            for target_role in targets:
+                for target_task_id in [tid for tid in task_ids.get(target_role, "").split("|") if tid]:
+                    await mailbox.send(
+                        target_task_id,
+                        {"content": content},
+                        from_task=result.task_id,
+                    )
+
+    def _is_interactive_tty(self) -> bool:
+        try:
+            return os.isatty(0) and os.isatty(1)
+        except Exception:
+            return False
+
+    def _should_gate_phase(self, phase: int) -> bool:
+        return bool(getattr(self.team, "phase_gates", {}).get(phase, False))
+
+    def _approve_phase_gate(
+        self,
+        *,
+        phase: int,
+        phase_result: SquadResult,
+        auto_approve: bool,
+        interactive: bool,
+    ) -> bool:
+        if not self._should_gate_phase(phase):
+            return True
+        if auto_approve or not interactive:
+            return True
+
+        print(f"\nPhase {phase} completed. Review results before continuing:")
+        for agent_result in phase_result.agent_results:
+            status = "ok" if agent_result.success else "failed"
+            print(f"- {agent_result.agent.name} ({agent_result.agent.role}): {status}")
+        try:
+            decision = input("Approve next phase? [y/N]: ").strip().lower()
+        except EOFError:
+            return False
+        return decision in {"y", "yes"}
+
+    async def _run_iteration_with_controls(
+        self,
+        prompt: str,
+        *,
+        on_status: Any | None,
+        auto_approve_gates: bool,
+        interactive: bool,
+        force: bool,
+    ) -> tuple[list[FleetResult], dict[str, str]]:
+        task_ids = self._build_task_id_map()
+        known_roles = set(task_ids)
+        task_to_role = self._task_to_role_map(task_ids)
+        levels = self._compute_execution_levels()
+        agents_by_level: dict[int, list[SquadAgent]] = {}
+        for agent in self.team.agents:
+            level = levels.get(agent.role, max(1, agent.phase))
+            agents_by_level.setdefault(level, []).append(agent)
+
+        mailbox = FleetMailbox()
+        for tid_value in task_ids.values():
+            for task_id in tid_value.split("|"):
+                if task_id:
+                    mailbox.create_inbox(task_id)
+
+        state = {} if force else self._load_squad_state()
+        state_tasks = state.get("tasks", {}) if isinstance(state.get("tasks"), dict) else {}
+        next_state_tasks: dict[str, Any] = {}
+        results_by_task_id: dict[str, FleetResult] = {}
+        input_hashes: dict[str, str] = {}
+
+        for level in sorted(agents_by_level):
+            phase_agents = agents_by_level[level]
+            fleet = Fleet(self._config, fleet_config=self._fleet_config)
+            task_prompts: dict[str, str] = {}
+            phase_hashes: dict[str, str] = {}
+            cached_results: dict[str, FleetResult] = {}
+
+            for agent in phase_agents:
+                dep_task_ids = self._get_dependencies(agent, task_ids)
+                dep_hashes = {
+                    dep_id: input_hashes.get(dep_id, "")
+                    for dep_id in dep_task_ids
+                }
+                mail_messages = self._collect_mail_for_role(
+                    agent.role,
+                    task_ids=task_ids,
+                    task_to_role=task_to_role,
+                    mailbox=mailbox,
+                )
+
+                if agent.subtasks:
+                    for i, subtask_desc in enumerate(agent.subtasks):
+                        task_id = f"{agent.role}__sub{i + 1}"
+                        sub_prompt = self._build_agent_prompt(
+                            agent,
+                            f"{prompt}\n\n## Subtask ({i + 1}/{len(agent.subtasks)})"
+                            f"\n\nFocus on: {subtask_desc}",
+                            task_ids,
+                        )
+                        prompt_with_mail = self._render_mailbox_refs(
+                            sub_prompt,
+                            mail_messages,
+                            known_roles=known_roles,
+                        )
+                        rendered_prompt = self._materialize_prompt(prompt_with_mail, results_by_task_id)
+                        input_hash = self._task_input_hash(
+                            task_id=task_id,
+                            rendered_prompt=rendered_prompt,
+                            dependency_hashes=dep_hashes,
+                        )
+                        phase_hashes[task_id] = input_hash
+                        prior = state_tasks.get(task_id) if isinstance(state_tasks, dict) else None
+                        if (
+                            not force
+                            and isinstance(prior, dict)
+                            and prior.get("input_hash") == input_hash
+                            and bool(prior.get("success", False))
+                        ):
+                            content = str(prior.get("content", ""))
+                            cached = FleetResult(
+                                task_id=task_id,
+                                success=True,
+                                response=Response(content=content),
+                                duration_ms=float(prior.get("duration_ms", 0.0)),
+                                prompt_tokens=int(prior.get("prompt_tokens", 0)),
+                                completion_tokens=int(prior.get("completion_tokens", 0)),
+                                total_cost=float(prior.get("total_cost", 0.0)),
+                            )
+                            cached_results[task_id] = cached
+                            results_by_task_id[task_id] = cached
+                            input_hashes[task_id] = input_hash
+                            continue
+
+                        tid = fleet.add(
+                            rendered_prompt,
+                            task_id=task_id,
+                            depends_on=[],
+                            model=self._config.model,
+                            retries=0,
+                        )
+                        task_prompts[tid] = rendered_prompt
+                else:
+                    task_id = agent.role
+                    agent_prompt = self._build_agent_prompt(agent, prompt, task_ids)
+                    prompt_with_mail = self._render_mailbox_refs(
+                        agent_prompt,
+                        mail_messages,
+                        known_roles=known_roles,
+                    )
+                    rendered_prompt = self._materialize_prompt(prompt_with_mail, results_by_task_id)
+                    input_hash = self._task_input_hash(
+                        task_id=task_id,
+                        rendered_prompt=rendered_prompt,
+                        dependency_hashes=dep_hashes,
+                    )
+                    phase_hashes[task_id] = input_hash
+                    prior = state_tasks.get(task_id) if isinstance(state_tasks, dict) else None
+                    if (
+                        not force
+                        and isinstance(prior, dict)
+                        and prior.get("input_hash") == input_hash
+                        and bool(prior.get("success", False))
+                    ):
+                        content = str(prior.get("content", ""))
+                        cached = FleetResult(
+                            task_id=task_id,
+                            success=True,
+                            response=Response(content=content),
+                            duration_ms=float(prior.get("duration_ms", 0.0)),
+                            prompt_tokens=int(prior.get("prompt_tokens", 0)),
+                            completion_tokens=int(prior.get("completion_tokens", 0)),
+                            total_cost=float(prior.get("total_cost", 0.0)),
+                        )
+                        cached_results[task_id] = cached
+                        results_by_task_id[task_id] = cached
+                        input_hashes[task_id] = input_hash
+                        continue
+
+                    tid = fleet.add(
+                        rendered_prompt,
+                        task_id=task_id,
+                        depends_on=[],
+                        model=self._config.model,
+                        retries=0,
+                    )
+                    task_prompts[tid] = rendered_prompt
+
+            run_results = await fleet.run(on_status=on_status) if fleet.tasks else []
+            run_results = await self._retry_failed_agents(
+                run_results,
+                task_prompts,
+                on_status=on_status,
+                mailbox=mailbox,
+            )
+            run_results_by_id = {result.task_id: result for result in run_results}
+
+            phase_task_order = [
+                tid
+                for agent in phase_agents
+                for tid in task_ids.get(agent.role, "").split("|")
+                if tid
+            ]
+            phase_results: list[FleetResult] = []
+            for task_id in phase_task_order:
+                result = run_results_by_id.get(task_id) or cached_results.get(task_id)
+                if result is None:
+                    continue
+                phase_results.append(result)
+                results_by_task_id[task_id] = result
+                input_hashes[task_id] = phase_hashes.get(task_id, input_hashes.get(task_id, ""))
+                next_state_tasks[task_id] = {
+                    "role": task_to_role.get(task_id, ""),
+                    "input_hash": input_hashes.get(task_id, ""),
+                    "success": result.success,
+                    "content": result.response.content if result.response else "",
+                    "error": str(result.error) if result.error else None,
+                    "duration_ms": result.duration_ms,
+                    "prompt_tokens": result.prompt_tokens,
+                    "completion_tokens": result.completion_tokens,
+                    "total_cost": result.total_cost,
+                    "updated_at": _now_iso_utc(),
+                }
+
+            await self._relay_mailbox_messages(
+                mailbox=mailbox,
+                task_ids=task_ids,
+                task_to_role=task_to_role,
+                phase_results=phase_results,
+            )
+
+            if self._should_gate_phase(level):
+                phase_task_ids = {agent.role: task_ids[agent.role] for agent in phase_agents}
+                phase_result = self._build_result(phase_results, phase_task_ids)
+                approved = self._approve_phase_gate(
+                    phase=level,
+                    phase_result=phase_result,
+                    auto_approve=auto_approve_gates,
+                    interactive=interactive,
+                )
+                if not approved:
+                    raise SquadExecutionError(f"Execution stopped: phase {level} was not approved.")
+
+        self._save_squad_state(
+            {
+                "version": 1,
+                "updated_at": _now_iso_utc(),
+                "tasks": next_state_tasks,
+            }
+        )
+        self._has_local_state = True
+
+        ordered_task_ids = [
+            tid
+            for agent in self.team.agents
+            for tid in task_ids.get(agent.role, "").split("|")
+            if tid
+        ]
+        ordered_results = [
+            results_by_task_id[task_id]
+            for task_id in ordered_task_ids
+            if task_id in results_by_task_id
+        ]
+        return ordered_results, task_ids
+
+    def _persist_state_from_results(
+        self,
+        *,
+        task_ids: dict[str, str],
+        task_prompts: dict[str, str],
+        fleet_results: list[FleetResult],
+    ) -> None:
+        if not fleet_results:
+            return
+        known_roles = set(task_ids)
+        result_map = {result.task_id: result for result in fleet_results}
+        task_to_role = self._task_to_role_map(task_ids)
+        input_hashes: dict[str, str] = {}
+        state_tasks: dict[str, Any] = {}
+
+        for agent in self.team.agents:
+            dep_task_ids = self._get_dependencies(agent, task_ids)
+            dep_hashes = {dep: input_hashes.get(dep, "") for dep in dep_task_ids}
+            for task_id in [tid for tid in task_ids.get(agent.role, "").split("|") if tid]:
+                prompt_template = task_prompts.get(task_id, "")
+                mail_messages: dict[str, list[str]] = {}
+                for dep_task_id in dep_task_ids:
+                    dep_result = result_map.get(dep_task_id)
+                    if dep_result is None or dep_result.response is None:
+                        continue
+                    dep_content = dep_result.response.content.strip()
+                    if not dep_content:
+                        continue
+                    dep_role = task_to_role.get(dep_task_id, "")
+                    if dep_role:
+                        mail_messages.setdefault(dep_role, []).append(dep_content)
+                prompt_with_mail = self._render_mailbox_refs(
+                    prompt_template,
+                    mail_messages,
+                    known_roles=known_roles,
+                )
+                rendered_prompt = self._materialize_prompt(prompt_with_mail, result_map)
+                input_hash = self._task_input_hash(
+                    task_id=task_id,
+                    rendered_prompt=rendered_prompt,
+                    dependency_hashes=dep_hashes,
+                )
+                input_hashes[task_id] = input_hash
+                result = result_map.get(task_id)
+                if result is None:
+                    continue
+                role = task_to_role.get(task_id, agent.role)
+                state_tasks[task_id] = {
+                    "role": role,
+                    "input_hash": input_hash,
+                    "success": result.success,
+                    "content": result.response.content if result.response else "",
+                    "error": str(result.error) if result.error else None,
+                    "duration_ms": result.duration_ms,
+                    "prompt_tokens": result.prompt_tokens,
+                    "completion_tokens": result.completion_tokens,
+                    "total_cost": result.total_cost,
+                    "updated_at": _now_iso_utc(),
+                }
+
+        self._save_squad_state(
+            {
+                "version": 1,
+                "updated_at": _now_iso_utc(),
+                "tasks": state_tasks,
+            }
+        )
+        self._has_local_state = True
+
     def _add_tasks(
         self,
         fleet: Fleet,
         prompt: str,
         *,
         task_prompts: dict[str, str] | None = None,
+        mailbox: FleetMailbox | None = None,
     ) -> dict[str, str]:
         """Add fleet tasks for each agent.
 
@@ -1401,6 +1605,8 @@ class SquadCoordinator:
                     )
                     if task_prompts is not None:
                         task_prompts[tid] = sub_prompt
+                    if mailbox is not None:
+                        mailbox.create_inbox(tid)
                     sub_ids.append(tid)
                 # Store pipe-joined subtask IDs so deps and result mapping work
                 task_ids[agent.role] = "|".join(sub_ids)
@@ -1415,6 +1621,8 @@ class SquadCoordinator:
                 )
                 if task_prompts is not None:
                     task_prompts[tid] = agent_prompt
+                if mailbox is not None:
+                    mailbox.create_inbox(tid)
                 task_ids[agent.role] = tid
 
         return task_ids
@@ -1422,26 +1630,35 @@ class SquadCoordinator:
     def _get_dependencies(
         self, agent: SquadAgent, task_ids: dict[str, str]
     ) -> list[str]:
-        """Get dependency task IDs for an agent based on phase ordering.
+        """Get dependency task IDs from explicit DAG deps or phase fallback."""
+        deps: list[str] = []
+        for role in self._dependency_roles(agent):
+            tid = task_ids.get(role)
+            if tid:
+                deps.extend(tid.split("|"))
+        return deps
 
-        Phase 1 (analyze): no dependencies
-        Phase 2 (build): depends on all phase 1 agents
-        Phase 3 (verify): depends on all phase 2 agents
-        Phase 4 (document): depends on all phase 2 and 3 agents
+    def _dependency_roles(self, agent: SquadAgent) -> list[str]:
+        """Get dependency roles for an agent from DAG config or phase fallback."""
+        if agent.depends_on:
+            deps: list[str] = []
+            seen: set[str] = set()
+            for dep in agent.depends_on:
+                dep_role = _normalize_role_identifier(dep)
+                if dep_role and dep_role != agent.role and dep_role not in seen:
+                    seen.add(dep_role)
+                    deps.append(dep_role)
+            return deps
 
-        When a dependency agent has subtasks, all its subtask IDs are
-        included (the dependent agent waits for all subtasks to finish).
-        """
         if agent.phase <= 1:
             return []
+
         deps = []
         for other in self.team.agents:
             if other.role == agent.role:
                 continue
-            tid = task_ids.get(other.role)
-            if tid and other.phase < agent.phase:
-                # Expand pipe-joined subtask IDs
-                deps.extend(tid.split("|"))
+            if other.phase < agent.phase:
+                deps.append(other.role)
         return deps
 
     def _build_agent_prompt(
@@ -1489,20 +1706,29 @@ class SquadCoordinator:
         parts.append("")
         parts.append(f"## Task\n\n{user_prompt}")
 
-        # Add references to all completed prior-phase outputs
-        prior_phase_refs: list[tuple[SquadAgent, list[str]]] = []
+        parts.append("")
+        parts.append("## mailbox")
+        parts.append(
+            "Read inter-agent messages with {{mail:role}} (for example {{mail:lead}}). "
+            "Messages are delivered after dependency tasks complete. "
+            "If a role has no messages yet, {{mail:role}} resolves to an empty string."
+        )
+
+        # Add references to dependency outputs
+        dependency_roles = set(self._dependency_roles(agent))
+        dependency_refs: list[tuple[SquadAgent, list[str]]] = []
         for other in self.team.agents:
-            if other.role == agent.role or other.phase >= agent.phase:
+            if other.role == agent.role or other.role not in dependency_roles:
                 continue
             other_task_ids = task_ids.get(other.role)
             if not other_task_ids:
                 continue
-            prior_phase_refs.append((other, other_task_ids.split("|")))
+            dependency_refs.append((other, other_task_ids.split("|")))
 
-        if prior_phase_refs:
+        if dependency_refs:
             parts.append("")
-            parts.append("## Prior Phase Outputs")
-            for other, ref_ids in prior_phase_refs:
+            parts.append("## Dependency Outputs")
+            for other, ref_ids in dependency_refs:
                 parts.append("")
                 parts.append(f"### {other.name}")
                 if len(ref_ids) == 1:
@@ -1645,8 +1871,9 @@ class SquadCoordinator:
         task_prompts: dict[str, str],
         *,
         on_status: Any | None = None,
+        mailbox: FleetMailbox | None = None,
     ) -> list[FleetResult]:
-        """Retry each failed non-timeout agent task once."""
+        """Retry each failed non-timeout agent task based on per-role limits."""
         if not fleet_results:
             return fleet_results
 
@@ -1654,47 +1881,76 @@ class SquadCoordinator:
         ordered_ids = [fr.task_id for fr in fleet_results]
 
         for task_id in ordered_ids:
-            current = results_by_id.get(task_id)
-            if current is None or current.success or current.error is None:
-                continue
-            if self._is_timeout_error(current.error):
-                continue
             prompt_template = task_prompts.get(task_id)
             if not prompt_template:
                 continue
-
-            retry_prompt = self._materialize_prompt(prompt_template, results_by_id)
-            retry_task_id = f"{task_id}__retry"
-            retry_fleet = Fleet(self._config, fleet_config=self._fleet_config)
-            retry_fleet.add(
-                retry_prompt,
-                task_id=retry_task_id,
-                model=self._config.model,
-                retries=0,
-            )
-            retry_results = await retry_fleet.run(on_status=on_status)
-            retry_result = next(
-                (result for result in retry_results if result.task_id == retry_task_id),
-                None,
-            )
-            if retry_result is None:
+            retry_limit = self._retry_limit_for_task(task_id)
+            if retry_limit <= 0:
                 continue
 
-            results_by_id[task_id] = FleetResult(
-                task_id=task_id,
-                success=retry_result.success,
-                response=retry_result.response,
-                error=retry_result.error,
-                duration_ms=current.duration_ms + retry_result.duration_ms,
-                prompt_tokens=current.prompt_tokens + retry_result.prompt_tokens,
-                completion_tokens=(
-                    current.completion_tokens + retry_result.completion_tokens
-                ),
-                total_cost=current.total_cost + retry_result.total_cost,
-                retries_used=current.retries_used + 1,
-            )
+            for attempt in range(retry_limit):
+                current = results_by_id.get(task_id)
+                if current is None or current.success or current.error is None:
+                    break
+                if self._is_timeout_error(current.error):
+                    break
+
+                retry_prompt = self._materialize_prompt(prompt_template, results_by_id)
+                retry_task_id = f"{task_id}__retry" if attempt == 0 else f"{task_id}__retry{attempt + 1}"
+                async with Fleet(self._config, fleet_config=self._fleet_config) as retry_fleet:
+                    if mailbox is not None:
+                        mailbox.create_inbox(retry_task_id)
+                    retry_fleet.add(
+                        retry_prompt,
+                        task_id=retry_task_id,
+                        model=self._config.model,
+                        retries=0,
+                    )
+                    retry_results = await retry_fleet.run(on_status=on_status)
+                retry_result = next(
+                    (result for result in retry_results if result.task_id == retry_task_id),
+                    None,
+                )
+                if retry_result is None:
+                    break
+
+                results_by_id[task_id] = FleetResult(
+                    task_id=task_id,
+                    success=retry_result.success,
+                    response=retry_result.response,
+                    error=retry_result.error,
+                    duration_ms=current.duration_ms + retry_result.duration_ms,
+                    prompt_tokens=current.prompt_tokens + retry_result.prompt_tokens,
+                    completion_tokens=(
+                        current.completion_tokens + retry_result.completion_tokens
+                    ),
+                    total_cost=current.total_cost + retry_result.total_cost,
+                    retries_used=current.retries_used + 1,
+                )
 
         return [results_by_id[task_id] for task_id in ordered_ids]
+
+    def _retry_limit_for_task(self, task_id: str) -> int:
+        role = task_id.split("__", 1)[0]
+        agent = self.team.get_agent(role)
+        if agent is None:
+            return 1
+        try:
+            return max(0, int(agent.retries))
+        except (TypeError, ValueError):
+            return 1
+
+    def _enforce_budget(self, cumulative_cost: float, cumulative_tokens: int) -> None:
+        if self._max_cost is not None and cumulative_cost > self._max_cost:
+            raise SquadExecutionError(
+                "Squad cost budget exceeded: "
+                f"spent ${cumulative_cost:.4f} so far (limit ${self._max_cost:.4f})."
+            )
+        if self._max_tokens is not None and cumulative_tokens > self._max_tokens:
+            raise SquadExecutionError(
+                "Squad token budget exceeded: "
+                f"used {cumulative_tokens:,} tokens so far (limit {self._max_tokens:,})."
+            )
 
     def _build_feedback_iteration_prompt(
         self,
@@ -1783,6 +2039,20 @@ class SquadCoordinator:
         return "timed out" in text or "timeout" in text
 
     @staticmethod
+    def _as_squad_execution_error(error: Any) -> SquadExecutionError:
+        if isinstance(error, SquadExecutionError):
+            return error
+        if error is None:
+            return SquadExecutionError("Unknown squad execution error")
+        text = str(error)
+        lowered = text.lower()
+        if "dependency" in lowered or "upstream" in lowered or "blocked" in lowered:
+            return SquadDependencyError(text)
+        if "timed out" in lowered or "timeout" in lowered:
+            return SquadTimeoutError(text)
+        return SquadExecutionError(text)
+
+    @staticmethod
     def _materialize_prompt(
         prompt: str,
         results: dict[str, FleetResult],
@@ -1818,13 +2088,16 @@ class SquadCoordinator:
 
         return _TASK_OUTPUT_REF_RE.sub(_replace, prompt)
 
-    def _discover_project_context(self) -> str:
+    def _discover_project_context(
+        self,
+        repo_context: dict[str, Any] | None = None,
+    ) -> str:
         """Auto-discover project context from the current working directory.
 
         Reads README.md (first 2000 chars), pyproject.toml name/description,
         and top-level directory listing. Returns empty string if nothing found.
         """
-        context = _gather_repo_context()
+        context = repo_context if repo_context is not None else _gather_repo_context()
         if not context:
             return ""
 
@@ -1878,6 +2151,15 @@ class SquadCoordinator:
             if not results:
                 continue
 
+            if len(results) > 1:
+                def _subtask_sort_key(result: FleetResult) -> tuple[int, int]:
+                    match = re.search(r"__sub(?P<index>\d+)$", result.task_id)
+                    if match is None:
+                        return (1, 0)
+                    return (0, int(match.group("index")))
+
+                results = sorted(results, key=_subtask_sort_key)
+
             if len(results) == 1:
                 # Single task (no subtasks) — same as before
                 fr = results[0]
@@ -1887,7 +2169,7 @@ class SquadCoordinator:
                     content=content,
                     success=fr.success,
                     duration_ms=fr.duration_ms,
-                    error=str(fr.error) if fr.error else None,
+                    error=str(self._as_squad_execution_error(fr.error)) if fr.error else None,
                     prompt_tokens=fr.prompt_tokens,
                     completion_tokens=fr.completion_tokens,
                 )
@@ -1915,7 +2197,7 @@ class SquadCoordinator:
                     if not fr.success:
                         sub_success = False
                         if fr.error:
-                            errors.append(str(fr.error))
+                            errors.append(str(self._as_squad_execution_error(fr.error)))
 
                 ar = SquadAgentResult(
                     agent=agent,

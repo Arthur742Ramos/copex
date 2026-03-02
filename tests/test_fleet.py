@@ -149,6 +149,56 @@ class TestFleetCoordinator:
         assert execution_order.index("first") < execution_order.index("second")
 
     @pytest.mark.asyncio
+    async def test_coordinator_relays_mailbox_messages_to_dependents(self):
+        async def _send(prompt, **kwargs):
+            return Response(content=f"{prompt}-content")
+
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_send)
+        tasks = [
+            FleetTask(id="sender", prompt="sender"),
+            FleetTask(id="receiver", prompt="receiver", depends_on=["sender"]),
+        ]
+        coord = FleetCoordinator(CopexConfig())
+        mailbox = FleetMailbox()
+
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
+            results = await coord.run(tasks, mailbox=mailbox)
+
+        assert all(result.success for result in results)
+        envelope = await mailbox.receive("receiver", timeout=0.1)
+        assert envelope is not None
+        assert envelope["from"] == "sender"
+        assert envelope["to"] == "receiver"
+        assert envelope["payload"]["task_id"] == "sender"
+        assert envelope["payload"]["success"] is True
+        assert envelope["payload"]["content"] == "sender-content"
+
+    @pytest.mark.asyncio
+    async def test_results_preserve_input_order(self):
+        async def _staggered_send(prompt, **kwargs):
+            if prompt == "slow":
+                await asyncio.sleep(0.05)
+            return Response(content=prompt)
+
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_staggered_send)
+
+        tasks = [
+            FleetTask(id="slow-task", prompt="slow"),
+            FleetTask(id="fast-task", prompt="fast"),
+        ]
+        coord = FleetCoordinator(CopexConfig())
+
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
+            results = await coord.run(tasks, config=FleetConfig(max_concurrent=2))
+
+        assert [result.task_id for result in results] == ["slow-task", "fast-task"]
+        assert all(result.success for result in results)
+
+    @pytest.mark.asyncio
     async def test_fail_fast_cancels_remaining(self):
         call_count = 0
 
@@ -175,6 +225,37 @@ class TestFleetCoordinator:
 
         assert not results[0].success
         assert not results[1].success
+
+    @pytest.mark.asyncio
+    async def test_fail_fast_cancels_inflight_without_hanging(self):
+        async def _fail_and_sleep(prompt, **kwargs):
+            if prompt == "fail-me":
+                raise RuntimeError("boom")
+            await asyncio.sleep(5)
+            return Response(content="ok")
+
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_fail_and_sleep)
+
+        tasks = [
+            FleetTask(id="fail-task", prompt="fail-me"),
+            FleetTask(id="slow-task", prompt="slow"),
+        ]
+        coord = FleetCoordinator(CopexConfig())
+        config = FleetConfig(
+            fail_fast=True,
+            max_concurrent=2,
+            default_retries=3,
+            default_retry_delay=1.0,
+        )
+
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
+            results = await asyncio.wait_for(coord.run(tasks, config=config), timeout=1.0)
+
+        by_id = {result.task_id: result for result in results}
+        assert not by_id["fail-task"].success
+        assert not by_id["slow-task"].success
 
     @pytest.mark.asyncio
     async def test_blocked_tasks_get_error(self):
@@ -221,6 +302,73 @@ class TestFleetCoordinator:
         assert "queued" in task_statuses
         assert "running" in task_statuses
         assert "done" in task_statuses
+
+    @pytest.mark.asyncio
+    async def test_scheduler_dispatches_only_ready_tasks(self):
+        call_order: list[str] = []
+
+        async def _tracking_send(prompt, **kwargs):
+            call_order.append(prompt)
+            if prompt == "root":
+                await asyncio.sleep(0.05)
+            return Response(content="ok")
+
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_tracking_send)
+        coord = FleetCoordinator(CopexConfig())
+        config = FleetConfig(max_concurrent=2)
+        tasks = [FleetTask(id="root", prompt="root")] + [
+            FleetTask(id=f"child-{i}", prompt=f"child-{i}", depends_on=["root"])
+            for i in range(6)
+        ]
+
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
+            results = await coord.run(tasks, config=config)
+
+        assert all(result.success for result in results)
+        assert call_order[0] == "root"
+
+    @pytest.mark.asyncio
+    async def test_dependent_waits_for_all_prereqs_and_runs_once(self):
+        dep_a_done = asyncio.Event()
+        dep_b_done = asyncio.Event()
+        call_counts: dict[str, int] = {"a": 0, "b": 0, "child": 0}
+
+        async def _tracking_send(prompt, **kwargs):
+            if prompt == "a":
+                call_counts["a"] += 1
+                await asyncio.sleep(0.05)
+                dep_a_done.set()
+                return Response(content="ok-a")
+            if prompt == "b":
+                call_counts["b"] += 1
+                await asyncio.sleep(0.01)
+                dep_b_done.set()
+                return Response(content="ok-b")
+            if prompt == "child":
+                call_counts["child"] += 1
+                assert dep_a_done.is_set()
+                assert dep_b_done.is_set()
+                return Response(content="ok-child")
+            raise AssertionError(f"unexpected prompt: {prompt}")
+
+        mock_copex = _make_mock_copex()
+        mock_copex.send = AsyncMock(side_effect=_tracking_send)
+        coord = FleetCoordinator(CopexConfig())
+        config = FleetConfig(max_concurrent=3)
+        tasks = [
+            FleetTask(id="a", prompt="a"),
+            FleetTask(id="b", prompt="b"),
+            FleetTask(id="child", prompt="child", depends_on=["a", "b"]),
+        ]
+
+        with patch("copex.fleet.CopilotClient", None), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
+            results = await coord.run(tasks, config=config)
+
+        assert all(result.success for result in results)
+        assert call_counts["child"] == 1
 
 
 # ---------------------------------------------------------------------------
