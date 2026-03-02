@@ -14,11 +14,13 @@ from typing import TYPE_CHECKING, Annotated, Any
 import typer
 from pydantic import BaseModel, ConfigDict, Field, ValidationError, field_validator
 from rich.console import Console
+from rich.live import Live
 from rich.panel import Panel
 
+from copex.cli import _apply_approval_flags
 from copex.config import CopexConfig
 from copex.fleet import FleetTask
-from copex.models import Model, ReasoningEffort, parse_reasoning_effort
+from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
 
 if TYPE_CHECKING:
     pass
