@@ -17,15 +17,15 @@ except ImportError:  # pragma: no cover - Python < 3.11
 from copex.config import CopexConfig
 from copex.json_utils import extract_json_array
 from copex.squad import (
-    SquadAgent,
-    SquadConfigError,
-    SquadRole,
     _KNOWN_ROLE_PHASES,
     _ROLE_DESCRIPTIONS,
     _ROLE_EMOJIS,
     _ROLE_PROMPTS,
     _SQUAD_DIR_NAME,
     _SQUAD_TEAM_FILE_NAME,
+    SquadAgent,
+    SquadConfigError,
+    SquadRole,
     _clamp_phase,
     _ensure_squad_workspace,
     _gather_repo_context,

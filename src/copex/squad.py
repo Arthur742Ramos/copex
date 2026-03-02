@@ -33,12 +33,12 @@ from typing import Any
 
 from copex.config import CopexConfig
 from copex.fleet import (
+    _TASK_OUTPUT_REF_RE,
     Fleet,
     FleetConfig,
     FleetEventType,
     FleetMailbox,
     FleetResult,
-    _TASK_OUTPUT_REF_RE,
 )
 from copex.streaming import Response
 
@@ -539,7 +539,7 @@ class SquadAgent:
         )
 
 
-from .squad_team import SquadTeam
+from .squad_team import SquadTeam  # noqa: E402
 
 
 @dataclass
