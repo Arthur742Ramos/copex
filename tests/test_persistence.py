@@ -57,6 +57,37 @@ class TestSessionStore:
         with pytest.raises(ValueError, match="too large"):
             store.load("large")
 
+    def test_load_rejects_invalid_json_with_clear_error(self, tmp_path):
+        store = SessionStore(base_dir=tmp_path)
+        path = store._session_path("bad-json")
+        path.write_text("{not-json", encoding="utf-8")
+
+        with pytest.raises(ValueError, match=r"Invalid session JSON in bad-json\.json:"):
+            store.load("bad-json")
+
+    def test_load_rejects_invalid_payload_with_clear_error(self, tmp_path):
+        store = SessionStore(base_dir=tmp_path)
+        path = store._session_path("bad-payload")
+        path.write_text(
+            json.dumps(
+                {
+                    "id": "bad-payload",
+                    "created_at": "2024-01-01T00:00:00",
+                    "updated_at": "2024-01-01T00:00:00",
+                    "model": "m",
+                    "reasoning_effort": "low",
+                    "messages": "not-a-list",
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        with pytest.raises(
+            ValueError,
+            match=r"Invalid session payload in bad-payload\.json: messages must be a list",
+        ):
+            store.load("bad-payload")
+
     def test_list_sessions_skips_corruption_and_sorts_by_updated_at(self, tmp_path):
         store = SessionStore(base_dir=tmp_path)
         newer = {

@@ -65,7 +65,59 @@ class SessionData:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> SessionData:
         """Create from dictionary."""
-        messages = [Message(**m) for m in data.get("messages", [])]
+        if not isinstance(data, dict):
+            raise TypeError("session payload must be a dictionary")
+
+        required_fields = ("id", "created_at", "updated_at", "model", "reasoning_effort")
+        missing = [field for field in required_fields if field not in data]
+        if missing:
+            raise KeyError(missing[0])
+
+        string_fields = ("id", "created_at", "updated_at", "model", "reasoning_effort")
+        for field_name in string_fields:
+            value = data[field_name]
+            if not isinstance(value, str):
+                raise TypeError(f"{field_name} must be a string")
+
+        messages_raw = data.get("messages", [])
+        if not isinstance(messages_raw, list):
+            raise TypeError("messages must be a list")
+
+        messages: list[Message] = []
+        for index, item in enumerate(messages_raw):
+            if not isinstance(item, dict):
+                raise TypeError(f"messages[{index}] must be an object")
+            role = item.get("role")
+            content = item.get("content")
+            if not isinstance(role, str):
+                raise TypeError(f"messages[{index}].role must be a string")
+            if not isinstance(content, str):
+                raise TypeError(f"messages[{index}].content must be a string")
+            timestamp = item.get("timestamp")
+            if timestamp is None:
+                timestamp = datetime.now().isoformat()
+            if not isinstance(timestamp, str):
+                raise TypeError(f"messages[{index}].timestamp must be a string")
+            metadata = item.get("metadata", {})
+            if metadata is None:
+                metadata = {}
+            if not isinstance(metadata, dict):
+                raise TypeError(f"messages[{index}].metadata must be an object")
+            messages.append(
+                Message(
+                    role=role,
+                    content=content,
+                    timestamp=timestamp,
+                    metadata=metadata,
+                )
+            )
+
+        metadata = data.get("metadata", {})
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            raise TypeError("metadata must be an object")
+
         return cls(
             id=data["id"],
             created_at=data["created_at"],
@@ -73,7 +125,7 @@ class SessionData:
             model=data["model"],
             reasoning_effort=data["reasoning_effort"],
             messages=messages,
-            metadata=data.get("metadata", {}),
+            metadata=metadata,
         )
 
 
@@ -172,10 +224,16 @@ class SessionStore:
                 f"Session file too large ({file_size} bytes, max {_MAX_SESSION_FILE_SIZE})"
             )
 
-        with open(path, encoding="utf-8") as f:
-            data = json.load(f)
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(f"Invalid session JSON in {path.name}: {exc}") from exc
 
-        return SessionData.from_dict(data)
+        try:
+            return SessionData.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            raise ValueError(f"Invalid session payload in {path.name}: {exc}") from exc
 
     def delete(self, session_id: str) -> bool:
         """Delete a session."""
