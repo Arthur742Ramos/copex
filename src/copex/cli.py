@@ -365,6 +365,7 @@ configure_fleet_cli(
     resolve_cli_model=_resolve_cli_model,
     parse_exclude_tools=_parse_exclude_tools,
     format_duration=_format_duration,
+    apply_approval_flags=_apply_approval_flags,
 )
 configure_squad_cli(
     shared_console=console,

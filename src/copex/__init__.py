@@ -1,5 +1,7 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
+# ruff: noqa: F401
+
 from typing import TYPE_CHECKING, Any
 
 __version__ = "2.18.0"

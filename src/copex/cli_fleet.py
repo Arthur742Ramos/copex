@@ -20,7 +20,12 @@ from rich.panel import Panel
 from copex.cli_utils import apply_approval_flags as _apply_approval_flags
 from copex.config import CopexConfig
 from copex.fleet import FleetTask
-from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
+from copex.models import (
+    Model,
+    ReasoningEffort,
+    normalize_reasoning_effort,
+    parse_reasoning_effort,
+)
 
 if TYPE_CHECKING:
     pass
@@ -30,6 +35,7 @@ _DEFAULT_MODEL = Model.CLAUDE_OPUS_4_5
 _resolve_cli_model: Callable[[str], Model | str] | None = None
 _parse_exclude_tools: Callable[[str | None], list[str]] | None = None
 _format_duration: Callable[[float], str] | None = None
+_apply_approval_flags: Callable[..., None] | None = None
 
 
 def configure_fleet_cli(
@@ -39,6 +45,7 @@ def configure_fleet_cli(
     resolve_cli_model: Callable[[str], Model | str],
     parse_exclude_tools: Callable[[str | None], list[str]],
     format_duration: Callable[[float], str],
+    apply_approval_flags: Callable[..., None],
 ) -> None:
     """Configure shared dependencies used by fleet/council CLI handlers.
 
@@ -48,16 +55,19 @@ def configure_fleet_cli(
         resolve_cli_model: Resolver for CLI model strings.
         parse_exclude_tools: Parser for ``--exclude-tools`` option values.
         format_duration: Formatter for elapsed durations displayed in output.
+        apply_approval_flags: Callback to apply approval-mode flags to config.
 
     Returns:
         None: Module-level configuration is updated in place.
     """
     global console, _DEFAULT_MODEL, _resolve_cli_model, _parse_exclude_tools, _format_duration
+    global _apply_approval_flags
     console = shared_console
     _DEFAULT_MODEL = default_model
     _resolve_cli_model = resolve_cli_model
     _parse_exclude_tools = parse_exclude_tools
     _format_duration = format_duration
+    _apply_approval_flags = apply_approval_flags
 
 
 def register_fleet_commands(app: typer.Typer) -> None:
@@ -434,7 +444,7 @@ def fleet_command(
 
     effective_model = model or _DEFAULT_MODEL.value
     try:
-        if _resolve_cli_model is None:
+        if _resolve_cli_model is None or _apply_approval_flags is None:
             raise RuntimeError("Fleet CLI not configured")
         model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
@@ -767,6 +777,9 @@ def council_command(
     Returns:
         None: Command result.
     """
+    if _resolve_cli_model is None:
+        console.print("[red]Error: Fleet CLI not configured[/red]")
+        raise typer.Exit(1) from None
 
     # Parse model options
     def parse_model(m: str | None) -> Model | str | None:
