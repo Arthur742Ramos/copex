@@ -91,3 +91,13 @@ def test_smart_boundary_keeps_code_fences_balanced() -> None:
 
     # Boundary after the first turn would leave an unclosed fence.
     assert smart_boundary_cutoff(turns, 1) == 2
+
+
+def test_smart_boundary_advances_until_fences_are_balanced() -> None:
+    turns = [
+        ConversationTurn(1, "Start block\n```python\nx = 1", "Still open", 10, 10),
+        ConversationTurn(2, "Discuss output", "No fence yet", 10, 10),
+        ConversationTurn(3, "Wrap up", "```\nDone", 10, 10),
+    ]
+
+    assert smart_boundary_cutoff(turns, 1) == 3

@@ -204,10 +204,11 @@ def smart_boundary_cutoff(turns: Sequence[ConversationTurn], cutoff: int) -> int
                 adjusted += 2
 
     # Keep code fences intact across the summarized chunk.
+    fence_count = sum(t.code_fence_count for t in turns[:adjusted])
     while adjusted < len(turns):
-        fence_count = sum(t.code_fence_count for t in turns[:adjusted])
         if fence_count % 2 == 0:
             break
+        fence_count += turns[adjusted].code_fence_count
         adjusted += 1
 
     return min(adjusted, len(turns))
