@@ -35,7 +35,6 @@ _DEFAULT_MODEL = Model.CLAUDE_OPUS_4_5
 _resolve_cli_model: Callable[[str], Model | str] | None = None
 _parse_exclude_tools: Callable[[str | None], list[str]] | None = None
 _format_duration: Callable[[float], str] | None = None
-_apply_approval_flags: Callable[..., None] | None = None
 
 
 def configure_fleet_cli(
