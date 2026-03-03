@@ -1136,7 +1136,7 @@ class TestSquadCoordinatorRun:
                     first = SquadCoordinator(CopexConfig())
                     await first.run("Build something")
                     assert (tmp_path / ".squad" / "team.toml").is_file()
-                    assert "Squad team auto-saved to .squad/team.toml" in caplog.text
+                    assert "Squad team auto-saved to .squad/team.toml" in caplog.text.replace("\\", "/")
 
                     second = SquadCoordinator(CopexConfig())
                     await second.run("Build something else")
@@ -3081,7 +3081,7 @@ class TestSquadCLIManagement:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["exists"] is True
-        assert payload["path"].endswith(".copex/squad.json")
+        assert payload["path"].replace("\\", "/").endswith(".copex/squad.json")
 
     def test_squad_status_shows_team(self, tmp_path, monkeypatch):
         from typer.testing import CliRunner
@@ -3346,5 +3346,6 @@ class TestSquadCLIManagement:
         assert result.exit_code == 0, result.output
         payload = json.loads(result.output)
         assert payload["deleted"] is True
-        assert any(path.endswith("/.squad/knowledge") for path in payload["paths"])
-        assert any(path.endswith("/.squad/decisions.md") for path in payload["paths"])
+        normalized_paths = [path.replace("\\", "/") for path in payload["paths"]]
+        assert any(path.endswith("/.squad/knowledge") for path in normalized_paths)
+        assert any(path.endswith("/.squad/decisions.md") for path in normalized_paths)

@@ -248,7 +248,7 @@ class TestBuildCommand:
         cli = _make_cli(working_directory="/tmp/work")
         cmd = cli._build_command("prompt")
         assert "--add-dir" in cmd
-        assert cmd[cmd.index("--add-dir") + 1] == "/tmp/work"
+        assert Path(cmd[cmd.index("--add-dir") + 1]) == Path("/tmp/work")
         cli._cleanup()
 
     def test_instructions_prepended(self):

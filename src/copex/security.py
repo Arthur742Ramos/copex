@@ -11,7 +11,7 @@ import os
 import re
 import shlex
 from collections.abc import Mapping, Sequence
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from typing import Any
 
 from copex.exceptions import SecurityError
@@ -217,21 +217,24 @@ def validate_path(
         SecurityError: If path validation fails
     """
     path = Path(path)
+    raw_path = str(path)
 
     # Check for null bytes (path traversal via null byte injection)
-    if "\x00" in str(path):
+    if "\x00" in raw_path:
         raise SecurityError(
             "Null byte in path not allowed",
             violation_type="path_injection",
-            context={"path": str(path)[:100]},
+            context={"path": raw_path[:100]},
         )
 
     # Check for absolute paths if not allowed
-    if not allow_absolute and path.is_absolute():
+    has_root_prefix = raw_path.startswith(("/", "\\"))
+    windows_absolute = PureWindowsPath(raw_path).is_absolute()
+    if not allow_absolute and (path.is_absolute() or has_root_prefix or windows_absolute):
         raise SecurityError(
             "Absolute paths not allowed",
             violation_type="absolute_path",
-            context={"path": str(path)},
+            context={"path": raw_path},
         )
 
     # Resolve to absolute path for traversal check

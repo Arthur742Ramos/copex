@@ -119,9 +119,13 @@ class TestValidatePath:
             validate_path("/tmp/test\x00.txt")
         assert exc_info.value.violation_type == "path_injection"
 
-    def test_absolute_path_rejected(self):
+    @pytest.mark.parametrize(
+        "absolute_path",
+        ["/etc/passwd", r"C:\Windows\System32\drivers\etc\hosts"],
+    )
+    def test_absolute_path_rejected(self, absolute_path):
         with pytest.raises(SecurityError) as exc_info:
-            validate_path("/etc/passwd", allow_absolute=False)
+            validate_path(absolute_path, allow_absolute=False)
         assert exc_info.value.violation_type == "absolute_path"
 
     def test_path_traversal_rejected(self, tmp_path):
