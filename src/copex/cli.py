@@ -14,7 +14,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
 if TYPE_CHECKING:
-    pass
+    from prompt_toolkit.completion import CompleteEvent
+    from prompt_toolkit.document import Document
 
 import typer
 from prompt_toolkit import PromptSession
@@ -593,7 +594,7 @@ class SlashCompleter(Completer):
     def __init__(self, commands: list[str]) -> None:
         self.commands = commands
 
-    def get_completions(self, document, complete_event):
+    def get_completions(self, document: Document, complete_event: CompleteEvent):
         text = document.text_before_cursor.lstrip()
         if not text.startswith("/"):
             return

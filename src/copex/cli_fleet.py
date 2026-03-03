@@ -1055,7 +1055,9 @@ async def _run_fleet(
             if relevant_context:
                 task.prompt = f"{relevant_context}\n\n{base_prompt}"
     except Exception as exc:
-        console.print(f"[dim]Repo map unavailable for fleet: {exc}[/dim]")
+        console.print(
+            f"[dim]Repo map unavailable for fleet ({type(exc).__name__}): {exc}[/dim]"
+        )
 
     # Track statuses for live display
     statuses: dict[str, str] = {t.id: "pending" for t in tasks}

@@ -33,6 +33,9 @@ from rich.text import Text
 from copex.ui import print_approval_diff, print_approval_summary
 
 if TYPE_CHECKING:
+    from prompt_toolkit.completion import CompleteEvent
+    from prompt_toolkit.document import Document
+
     from copex.approval import ChangePreview, ChangeStatistics
     from copex.client import Copex, StreamChunk
     from copex.config import CopexConfig
@@ -433,7 +436,7 @@ class SlashCompleter(Completer):
         "quit",
     ]
 
-    def get_completions(self, document, complete_event):
+    def get_completions(self, document: Document, complete_event: CompleteEvent):
         text = document.text_before_cursor.lstrip()
         if not text.startswith("/") and text not in ("exit", "quit", "ex", "qu"):
             return

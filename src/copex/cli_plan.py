@@ -271,7 +271,9 @@ async def _run_plan(
             repo_map = RepoMap(Path.cwd())
             repo_map.refresh(force=False)
         except Exception as exc:
-            console.print(f"[dim]Repo map unavailable for plan: {exc}[/dim]")
+            console.print(
+                f"[dim]Repo map unavailable for plan ({type(exc).__name__}): {exc}[/dim]"
+            )
             repo_map = None
 
         # Check for resume from checkpoint
@@ -423,7 +425,10 @@ async def _run_plan(
         console.print("\n[yellow]Cancelled[/yellow]")
         console.print("[dim]Checkpoint saved. Resume with: copex plan --resume[/dim]")
     except Exception as e:  # Catch-all: top-level CLI error handler
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Plan failed ({type(e).__name__}): {e}[/red]")
+        console.print(
+            "[dim]Run without --execute to inspect steps, or use --resume after fixing the issue.[/dim]"
+        )
         raise typer.Exit(1) from None
     finally:
         await client.stop()

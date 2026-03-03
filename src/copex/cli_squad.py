@@ -703,5 +703,6 @@ async def _run_squad(
             error_obj = {"success": False, "error": str(e), "agents": []}
             print(json.dumps(error_obj), flush=True)
         else:
-            console.print(f"[red]Squad error: {e}[/red]")
+            console.print(f"[red]Squad failed ({type(e).__name__}): {e}[/red]")
+            console.print("[dim]Tip: run with --json for structured error output.[/dim]")
         raise typer.Exit(1) from None

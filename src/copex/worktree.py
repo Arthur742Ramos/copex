@@ -11,6 +11,7 @@ import asyncio
 import logging
 import subprocess
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -414,7 +415,7 @@ class WorktreeManager:
 async def run_task_in_worktree(
     repo_root: Path,
     task_id: str,
-    run_fn,
+    run_fn: Callable[[Path], Awaitable[None]],
     *,
     commit_message: str | None = None,
 ) -> tuple[WorktreeManager, WorktreeResult | None]:
