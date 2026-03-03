@@ -145,6 +145,28 @@ class TestSquadTeamPersistenceAndNormalization:
         assert team.get_agent("developer").retries == 3
         assert (tmp_path / ".squad" / "team.toml").is_file()
 
+    def test_load_squad_file_skips_invalid_toml(self, tmp_path, caplog):
+        team_path = tmp_path / ".squad" / "team.toml"
+        team_path.parent.mkdir(parents=True, exist_ok=True)
+        team_path.write_text("[squad\nlead = 'Lead'", encoding="utf-8")
+
+        with caplog.at_level("WARNING"):
+            team = SquadTeam.load_squad_file(tmp_path)
+
+        assert team is None
+        assert any("Failed to load .squad file" in message for message in caplog.messages)
+
+    def test_load_squad_file_skips_invalid_legacy_json(self, tmp_path, caplog):
+        legacy_path = tmp_path / ".copex" / "squad.json"
+        legacy_path.parent.mkdir(parents=True, exist_ok=True)
+        legacy_path.write_text("{not-valid-json", encoding="utf-8")
+
+        with caplog.at_level("WARNING"):
+            team = SquadTeam.load_squad_file(tmp_path)
+
+        assert team is None
+        assert any("Failed to load legacy squad config" in message for message in caplog.messages)
+
 
 class TestSquadTeamAIModes:
     def test_from_repo_ai_with_mocked_ai(self, tmp_path):
@@ -217,6 +239,34 @@ class TestSquadTeamAIModes:
 
         assert "lead" in team.roles
         assert "developer" in team.roles
+
+    def test_from_repo_ai_logs_non_fatal_persist_error(self, tmp_path, caplog):
+        ai_response = json.dumps(
+            [
+                {"role": "lead", "name": "Lead Architect", "phase": 1},
+                {"role": "developer", "name": "Developer", "phase": 2},
+                {"role": "tester", "name": "Tester", "phase": 3},
+            ]
+        )
+        repo_context = {"project_name": "demo"}
+
+        with (
+            patch("copex.cli_client.CopilotCLI", new=_fake_cli_class(ai_response)),
+            patch.object(SquadTeam, "save_squad_file", side_effect=OSError("disk full")),
+            caplog.at_level("WARNING"),
+        ):
+            team = run(
+                SquadTeam.from_repo_ai(
+                    config=CopexConfig(),
+                    path=tmp_path,
+                    repo_context=repo_context,
+                )
+            )
+
+        assert team.get_agent("tester") is not None
+        assert any(
+            "Unable to persist AI-generated squad team" in message for message in caplog.messages
+        )
 
     def test_update_from_request_normalizes_roles_and_phase(self, tmp_path):
         SquadTeam.default().save_squad_file(tmp_path)

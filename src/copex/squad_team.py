@@ -346,8 +346,13 @@ class SquadTeam:
             return None
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
-        except Exception as exc:
-            logger.warning("Failed to load legacy squad config from %s: %s", path, exc)
+        except (OSError, json.JSONDecodeError, TypeError, ValueError) as exc:
+            logger.warning(
+                "Failed to load legacy squad config from %s (%s): %s",
+                path,
+                type(exc).__name__,
+                exc,
+            )
             return None
 
         team = cls._from_legacy_json_payload(data)
@@ -420,8 +425,13 @@ class SquadTeam:
                 if team and team.agents:
                     logger.info(f"Loaded squad team from {config_path}: {[a.role for a in team.agents]}")
                     return team
-            except Exception as e:
-                logger.warning(f"Failed to load .squad file from {config_path}: {e}")
+            except (OSError, tomllib.TOMLDecodeError, TypeError, ValueError) as exc:
+                logger.warning(
+                    "Failed to load .squad file from %s (%s): %s",
+                    config_path,
+                    type(exc).__name__,
+                    exc,
+                )
 
         legacy_json = cls._resolve_legacy_json_file_path(path)
         if not primary.is_file() and legacy_json.is_file():
@@ -779,12 +789,21 @@ class SquadTeam:
                 # Persist for future runs
                 try:
                     team.save_squad_file(path or Path.cwd())
-                except Exception:
-                    pass  # Non-critical
+                except OSError as exc:
+                    logger.warning(
+                        "Unable to persist AI-generated squad team to %s (%s): %s",
+                        path or Path.cwd(),
+                        type(exc).__name__,
+                        exc,
+                    )
                 return team
 
         except Exception as e:
-            logger.warning(f"AI repo analysis failed ({e}), falling back to pattern matching")
+            logger.warning(
+                "AI repo analysis failed (%s: %s), falling back to pattern matching",
+                type(e).__name__,
+                e,
+            )
             return cls.from_repo(path)
 
     SQUAD_CONFIG = Path(_SQUAD_DIR_NAME) / _SQUAD_TEAM_FILE_NAME
