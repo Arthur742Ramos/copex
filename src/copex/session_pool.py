@@ -142,6 +142,7 @@ class SessionPool:
     async def _evict_idle(self) -> None:
         """Evict sessions that have been idle too long."""
         now = time.monotonic()
+        to_destroy: list[Any] = []
         async with self._global_lock:
             for model in list(self._pools.keys()):
                 lock = self._model_locks.setdefault(model, asyncio.Lock())
@@ -157,13 +158,15 @@ class SessionPool:
                     for ps in to_remove:
                         pool.remove(ps)
                         self._evictions += 1
-                        try:
-                            await ps.session.destroy()
-                        except Exception:  # Cleanup: best-effort idle session teardown
-                            logger.debug("Failed to destroy idle session", exc_info=True)
+                        to_destroy.append(ps.session)
 
                     if not pool:
                         del self._pools[model]
+        for session in to_destroy:
+            try:
+                await session.destroy()
+            except Exception:  # Cleanup: best-effort idle session teardown
+                logger.debug("Failed to destroy idle session", exc_info=True)
 
     def _evict_lru(self, pool: list[SessionPool._PooledSession]) -> _PooledSession | None:
         """Find the least-recently-used idle session for eviction."""
@@ -217,6 +220,7 @@ class SessionPool:
 
         # No available session - create new one
         is_pooled = False
+        evicted_session: Any | None = None
         if session is None:
             session = await client.create_session(config.to_session_options())
             pooled = SessionPool._PooledSession(
@@ -240,12 +244,7 @@ class SessionPool:
                         self._evictions += 1
                         pool.append(pooled)
                         is_pooled = True
-                        try:
-                            await lru.session.destroy()
-                        except Exception:  # Cleanup: best-effort evicted session teardown
-                            logger.debug(
-                                "Failed to destroy evicted session", exc_info=True
-                            )
+                        evicted_session = lru.session
                     else:
                         # All sessions in use and pool full — cannot pool this session
                         logger.debug(
@@ -254,6 +253,13 @@ class SessionPool:
                             model,
                             self.max_sessions,
                         )
+            if evicted_session is not None:
+                try:
+                    await evicted_session.destroy()
+                except Exception:  # Cleanup: best-effort evicted session teardown
+                    logger.debug(
+                        "Failed to destroy evicted session", exc_info=True
+                    )
         else:
             is_pooled = True
 

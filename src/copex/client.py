@@ -125,6 +125,7 @@ class Copex:
             self.config.model.value,
             context_budget=self.config.context_budget,
         )
+        self._adaptive_retry = AdaptiveRetry()
 
     async def start(self) -> None:
         """Start the Copilot client."""
@@ -298,8 +299,7 @@ class Copex:
         # Get error-specific strategy if available
         if error is not None:
             category = categorize_error(error)
-            retry = AdaptiveRetry()
-            strategy = retry.get_strategy(category)
+            strategy = self._adaptive_retry.get_strategy(category)
             return strategy.compute_delay(attempt + 1)  # +1 because BackoffStrategy is 1-indexed
 
         # Fallback to config-based calculation with jitter

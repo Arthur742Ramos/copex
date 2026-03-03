@@ -1106,43 +1106,59 @@ async def _run_fleet(
     if progress:
         cwd = config.working_dir
 
-        def _snapshot_files(root: Path) -> dict[Path, tuple[float, int]]:
-            """Return {path: (mtime, line_count)} for tracked files."""
-            snap: dict[Path, tuple[float, int]] = {}
+        def _count_lines(path: Path) -> int:
+            try:
+                with open(path, encoding="utf-8", errors="replace") as f:
+                    return sum(1 for _ in f)
+            except (OSError, UnicodeDecodeError):
+                return 0
+
+        def _snapshot_files(
+            root: Path,
+            *,
+            include_line_counts: bool,
+        ) -> dict[Path, tuple[float, int, int | None]]:
+            """Return {path: (mtime, size, line_count?)} for tracked files."""
+            snap: dict[Path, tuple[float, int, int | None]] = {}
             for p in root.rglob("*"):
                 if p.is_file() and ".git" not in p.parts and not p.name.startswith("."):
                     try:
                         st = p.stat()
-                        with open(p, encoding="utf-8", errors="replace") as f:
-                            line_count = sum(1 for _ in f)
-                        snap[p] = (st.st_mtime, line_count)
+                        line_count = _count_lines(p) if include_line_counts else None
+                        snap[p] = (st.st_mtime, st.st_size, line_count)
                     except (OSError, UnicodeDecodeError):
                         pass
             return snap
 
-        _baseline = _snapshot_files(cwd)
+        _baseline = _snapshot_files(cwd, include_line_counts=True)
 
         def _progress_worker() -> None:
             while not _progress_stop.wait(timeout=3.0):
                 elapsed = time.time() - start_time
                 mins, secs = divmod(int(elapsed), 60)
-                current = _snapshot_files(cwd)
-                for p, (mtime, lines) in current.items():
+                current = _snapshot_files(cwd, include_line_counts=False)
+                for p, (mtime, size, _) in current.items():
                     base = _baseline.get(p)
                     if base is None:
+                        lines = _count_lines(p)
                         rel = p.relative_to(cwd)
                         console.print(
                             f"  [dim][{mins}m {secs:02d}s] Created: {rel} (+{lines} lines)[/dim]"
                         )
-                        _baseline[p] = (mtime, lines)
-                    elif mtime > base[0]:
-                        diff = lines - base[1]
+                        _baseline[p] = (mtime, size, lines)
+                    else:
+                        base_mtime, base_size, base_lines = base
+                        if mtime <= base_mtime and size == base_size:
+                            continue
+                        lines = _count_lines(p)
+                        previous_lines = base_lines or 0
+                        diff = lines - previous_lines
                         sign = "+" if diff >= 0 else ""
                         rel = p.relative_to(cwd)
                         console.print(
                             f"  [dim][{mins}m {secs:02d}s] Modified: {rel} ({sign}{diff} lines)[/dim]"
                         )
-                        _baseline[p] = (mtime, lines)
+                        _baseline[p] = (mtime, size, lines)
 
         _progress_thread = threading.Thread(target=_progress_worker, daemon=True)
         _progress_thread.start()
