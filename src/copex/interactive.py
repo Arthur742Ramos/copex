@@ -15,7 +15,7 @@ from __future__ import annotations
 
 import asyncio
 import time
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
@@ -436,7 +436,9 @@ class SlashCompleter(Completer):
         "quit",
     ]
 
-    def get_completions(self, document: Document, complete_event: CompleteEvent):
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterator[Completion]:
         text = document.text_before_cursor.lstrip()
         if not text.startswith("/") and text not in ("exit", "quit", "ex", "qu"):
             return

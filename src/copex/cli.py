@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import time
+from collections.abc import Iterator
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Any
 
@@ -594,7 +595,9 @@ class SlashCompleter(Completer):
     def __init__(self, commands: list[str]) -> None:
         self.commands = commands
 
-    def get_completions(self, document: Document, complete_event: CompleteEvent):
+    def get_completions(
+        self, document: Document, complete_event: CompleteEvent
+    ) -> Iterator[Completion]:
         text = document.text_before_cursor.lstrip()
         if not text.startswith("/"):
             return
@@ -1036,7 +1039,7 @@ async def _run_chat(
         elif template:
             # Jinja2 template formatting
             try:
-                from jinja2 import Template
+                from jinja2 import Template, TemplateError
             except ImportError:
                 console.print("[red]Jinja2 not installed. Run: pip install jinja2[/red]")
                 raise typer.Exit(1) from None
@@ -1060,7 +1063,7 @@ async def _run_chat(
             try:
                 tmpl = Template(template)
                 output_text = tmpl.render(**template_ctx)
-            except Exception as e:
+            except TemplateError as e:
                 console.print(f"[red]Template error: {e}[/red]")
                 raise typer.Exit(1) from None
 
@@ -1114,7 +1117,8 @@ async def _run_chat(
     except KeyboardInterrupt:
         console.print("\n[yellow]Interrupted[/yellow]")
     except Exception as e:  # Catch-all: top-level CLI error handler
-        console.print(f"[red]Error: {e}[/red]")
+        console.print(f"[red]Chat failed ({type(e).__name__}): {e}[/red]")
+        console.print("[dim]Tip: retry with --json or --quiet for easier automation.[/dim]")
         raise typer.Exit(1) from None
     finally:
         await client.stop()

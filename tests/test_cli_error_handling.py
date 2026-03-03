@@ -9,6 +9,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import pytest
 import typer
 
+import copex.cli as cli
 import copex.cli_plan as cli_plan
 import copex.cli_squad as cli_squad
 from copex.config import CopexConfig
@@ -89,3 +90,29 @@ def test_run_squad_returns_machine_readable_json_error(capsys):
         "error": "broken squad state",
         "agents": [],
     }
+
+
+def test_run_chat_reports_actionable_error_and_stops_client(monkeypatch, capsys):
+    """Chat mode should surface typed errors and still stop the client."""
+    client = MagicMock()
+    client.start = AsyncMock()
+    client.stop = AsyncMock()
+    client.send = AsyncMock(side_effect=RuntimeError("chat exploded"))
+    monkeypatch.setattr(cli, "make_client", lambda _config: client)
+    config = CopexConfig()
+    config.streaming = False
+
+    with pytest.raises(typer.Exit):
+        asyncio.run(
+            cli._run_chat(
+                config=config,
+                prompt="hello",
+                show_reasoning=False,
+                raw=False,
+            )
+        )
+
+    output = capsys.readouterr().out
+    assert "Chat failed (RuntimeError): chat exploded" in output
+    assert "Tip: retry with --json or --quiet for easier automation." in output
+    client.stop.assert_awaited_once()
