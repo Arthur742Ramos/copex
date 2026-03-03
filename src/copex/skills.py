@@ -2,9 +2,12 @@
 
 from __future__ import annotations
 
+import logging
 import subprocess
 from dataclasses import dataclass, field
 from pathlib import Path
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass
@@ -42,8 +45,13 @@ class SkillInfo:
                             break
                         if line.startswith("name:"):
                             name = line.split(":", 1)[1].strip().strip("\"'")
-        except (OSError, ValueError):
-            pass
+        except (OSError, ValueError) as exc:
+            logger.debug(
+                "Failed to parse skill metadata from %s (%s): %s",
+                skill_file,
+                type(exc).__name__,
+                exc,
+            )
 
         return cls(name=name, path=skill_dir, description=description, source=source)
 
@@ -76,7 +84,7 @@ class SkillDiscovery:
             if result.returncode == 0:
                 return Path(result.stdout.strip())
         except (OSError, subprocess.SubprocessError):
-            pass
+            logger.debug("Failed to resolve git root from %s", start_dir, exc_info=True)
         return None
 
     def discover_skill_directories(self) -> list[Path]:
@@ -128,10 +136,30 @@ class SkillDiscovery:
             if not skill_dir_root.is_dir():
                 continue
 
-            for entry in skill_dir_root.iterdir():
-                if not entry.is_dir():
-                    continue
+            try:
+                entries = sorted(skill_dir_root.iterdir(), key=lambda path: path.name.casefold())
+            except OSError as exc:
+                logger.warning(
+                    "Skipping unreadable skill directory %s (%s): %s",
+                    skill_dir_root,
+                    type(exc).__name__,
+                    exc,
+                )
+                continue
+
+            for entry in entries:
                 if entry.name.startswith("."):
+                    continue
+                try:
+                    if not entry.is_dir():
+                        continue
+                except OSError as exc:
+                    logger.debug(
+                        "Skipping unreadable skill candidate %s (%s): %s",
+                        entry,
+                        type(exc).__name__,
+                        exc,
+                    )
                     continue
 
                 skill_info = SkillInfo.from_directory(entry, source=source)
@@ -204,5 +232,14 @@ def get_skill_content(skill_name: str, skill_directories: list[str] | None = Non
             if not skill_file.exists():
                 skill_file = skill.path / "skill.md"
             if skill_file.exists():
-                return skill_file.read_text(encoding="utf-8")
+                try:
+                    return skill_file.read_text(encoding="utf-8")
+                except OSError as exc:
+                    logger.warning(
+                        "Failed to read skill content from %s (%s): %s",
+                        skill_file,
+                        type(exc).__name__,
+                        exc,
+                    )
+                    return None
     return None

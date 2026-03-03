@@ -110,6 +110,50 @@ class TestSkillDiscovery:
         assert "enabled" in names
         assert "disabled" not in names
 
+    def test_discover_skills_skips_unreadable_directory(self, tmp_path: Path, monkeypatch, caplog):
+        """Test discovery continues when a skill root cannot be read."""
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+
+        original_iterdir = Path.iterdir
+
+        def _iterdir_with_failure(path_obj: Path):
+            if path_obj == skills_root:
+                raise OSError("permission denied")
+            return original_iterdir(path_obj)
+
+        monkeypatch.setattr(Path, "iterdir", _iterdir_with_failure)
+
+        discovery = SkillDiscovery(
+            explicit_dirs=[skills_root],
+            auto_discover=False,
+        )
+
+        with caplog.at_level("WARNING"):
+            skills = discovery.discover_skills()
+
+        assert skills == []
+        assert any("Skipping unreadable skill directory" in message for message in caplog.messages)
+
+    def test_discover_skills_returns_deterministic_order(self, tmp_path: Path) -> None:
+        """Test discovery order is deterministic by directory name."""
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+
+        for name in ["z-last", "a-first", "m-middle"]:
+            skill = skills_root / name
+            skill.mkdir()
+            (skill / "SKILL.md").write_text(f"# {name}")
+
+        discovery = SkillDiscovery(
+            explicit_dirs=[skills_root],
+            auto_discover=False,
+        )
+
+        skills = discovery.discover_skills()
+        names = [s.name for s in skills]
+        assert names == ["a-first", "m-middle", "z-last"]
+
     def test_get_skill_directories_for_sdk(self, tmp_path: Path) -> None:
         """Test getting skill directories as strings for SDK."""
         skills_root = tmp_path / "skills"
@@ -175,3 +219,27 @@ class TestGetSkillContent:
         """Test getting content of non-existent skill returns None."""
         result = get_skill_content("nonexistent", skill_directories=[str(tmp_path)])
         assert result is None
+
+    def test_get_skill_content_handles_read_error(self, tmp_path: Path, monkeypatch, caplog) -> None:
+        """Test read errors are non-fatal and return None."""
+        skills_root = tmp_path / "skills"
+        skills_root.mkdir()
+        skill = skills_root / "my-skill"
+        skill.mkdir()
+        skill_file = skill / "SKILL.md"
+        skill_file.write_text("# content")
+
+        original_read_text = Path.read_text
+
+        def _read_text_with_failure(path_obj: Path, *args, **kwargs):
+            if path_obj == skill_file:
+                raise OSError("read blocked")
+            return original_read_text(path_obj, *args, **kwargs)
+
+        monkeypatch.setattr(Path, "read_text", _read_text_with_failure)
+
+        with caplog.at_level("WARNING"):
+            result = get_skill_content("my-skill", skill_directories=[str(skills_root)])
+
+        assert result is None
+        assert any("Failed to read skill content" in message for message in caplog.messages)
