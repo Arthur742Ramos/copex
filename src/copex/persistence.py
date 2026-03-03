@@ -208,8 +208,8 @@ class SessionStore:
                         "message_count": len(data.get("messages", [])),
                     }
                 )
-            except (json.JSONDecodeError, KeyError):
-                logger.warning("Skipping corrupted session file: %s", f.name)
+            except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError) as exc:
+                logger.warning("Skipping unreadable session file %s: %s", path.name, exc)
                 continue
 
         # Sort by updated_at descending

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 from datetime import datetime
 from pathlib import Path
 from types import SimpleNamespace
@@ -73,6 +74,21 @@ class TestCheckpoint:
         assert cp.metadata == {}
         assert cp.model == "gpt-5.2-codex"
         assert cp.reasoning_effort == "xhigh"
+
+    def test_from_dict_rejects_negative_iteration(self):
+        payload = {
+            "checkpoint_id": "id1",
+            "loop_id": "loop1",
+            "prompt": "do stuff",
+            "iteration": -1,
+            "max_iterations": 10,
+            "completion_promise": "DONE",
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:01:00",
+            "started_at": "2024-01-01T00:00:00",
+        }
+        with pytest.raises(ValueError, match="iteration"):
+            Checkpoint.from_dict(payload)
 
 
 # ---------------------------------------------------------------------------
@@ -176,6 +192,42 @@ class TestCheckpointStore:
         (tmp_path / "bad.json").write_text("not json", encoding="utf-8")
         incomplete = store.get_incomplete()
         assert len(incomplete) == 1
+
+    def test_invalid_schema_skipped_in_list(self, tmp_path: Path):
+        store = CheckpointStore(base_dir=tmp_path)
+        store.create("loop", "p")
+        invalid = {
+            "checkpoint_id": "broken",
+            "loop_id": "loop",
+            "prompt": "p",
+            "iteration": "bad-value",
+            "max_iterations": None,
+            "completion_promise": None,
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00",
+            "started_at": "2024-01-01T00:00:00",
+        }
+        (tmp_path / "invalid.json").write_text(json.dumps(invalid), encoding="utf-8")
+
+        items = store.list_checkpoints()
+        assert len(items) == 1
+
+    def test_invalid_schema_returns_none_on_load(self, tmp_path: Path):
+        store = CheckpointStore(base_dir=tmp_path)
+        invalid = {
+            "checkpoint_id": "broken",
+            "loop_id": "loop",
+            "prompt": "p",
+            "iteration": "bad-value",
+            "max_iterations": None,
+            "completion_promise": None,
+            "created_at": "2024-01-01T00:00:00",
+            "updated_at": "2024-01-01T00:00:00",
+            "started_at": "2024-01-01T00:00:00",
+        }
+        (tmp_path / "broken.json").write_text(json.dumps(invalid), encoding="utf-8")
+
+        assert store.load("broken") is None
 
     def test_delete_existing(self, tmp_path: Path):
         store = CheckpointStore(base_dir=tmp_path)

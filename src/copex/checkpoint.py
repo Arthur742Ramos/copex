@@ -57,7 +57,99 @@ class Checkpoint:
     @classmethod
     def from_dict(cls, data: dict[str, Any]) -> Checkpoint:
         """Create from dictionary."""
-        return cls(**data)
+        if not isinstance(data, dict):
+            raise TypeError("checkpoint payload must be a dictionary")
+
+        required_fields = (
+            "checkpoint_id",
+            "loop_id",
+            "prompt",
+            "iteration",
+            "max_iterations",
+            "completion_promise",
+            "created_at",
+            "updated_at",
+            "started_at",
+        )
+        missing = [field for field in required_fields if field not in data]
+        if missing:
+            raise KeyError(missing[0])
+
+        iteration = data["iteration"]
+        if not isinstance(iteration, int):
+            raise TypeError("iteration must be an integer")
+        if iteration < 0:
+            raise ValueError("iteration must be >= 0")
+
+        max_iterations = data["max_iterations"]
+        if max_iterations is not None:
+            if not isinstance(max_iterations, int):
+                raise TypeError("max_iterations must be an integer or None")
+            if max_iterations < 0:
+                raise ValueError("max_iterations must be >= 0")
+
+        completion_promise = data["completion_promise"]
+        if completion_promise is not None and not isinstance(completion_promise, str):
+            raise TypeError("completion_promise must be a string or None")
+
+        history_raw = data.get("history", [])
+        if not isinstance(history_raw, list):
+            raise TypeError("history must be a list")
+        if any(not isinstance(item, str) for item in history_raw):
+            raise TypeError("history entries must be strings")
+
+        completed = data.get("completed", False)
+        if not isinstance(completed, bool):
+            raise TypeError("completed must be a boolean")
+
+        completion_reason = data.get("completion_reason")
+        if completion_reason is not None and not isinstance(completion_reason, str):
+            raise TypeError("completion_reason must be a string or None")
+
+        metadata = data.get("metadata", {})
+        if metadata is None:
+            metadata = {}
+        if not isinstance(metadata, dict):
+            raise TypeError("metadata must be an object")
+
+        model = data.get("model", "gpt-5.2-codex")
+        if not isinstance(model, str):
+            raise TypeError("model must be a string")
+
+        reasoning_effort = data.get("reasoning_effort", "xhigh")
+        if not isinstance(reasoning_effort, str):
+            raise TypeError("reasoning_effort must be a string")
+
+        string_fields = (
+            "checkpoint_id",
+            "loop_id",
+            "prompt",
+            "created_at",
+            "updated_at",
+            "started_at",
+        )
+        for field_name in string_fields:
+            value = data[field_name]
+            if not isinstance(value, str):
+                raise TypeError(f"{field_name} must be a string")
+
+        return cls(
+            checkpoint_id=data["checkpoint_id"],
+            loop_id=data["loop_id"],
+            prompt=data["prompt"],
+            iteration=iteration,
+            max_iterations=max_iterations,
+            completion_promise=completion_promise,
+            created_at=data["created_at"],
+            updated_at=data["updated_at"],
+            started_at=data["started_at"],
+            history=history_raw,
+            completed=completed,
+            completion_reason=completion_reason,
+            model=model,
+            reasoning_effort=reasoning_effort,
+            metadata=metadata,
+        )
 
 
 class CheckpointStore:
@@ -146,6 +238,26 @@ class CheckpointStore:
         with open(path, "w", encoding="utf-8") as f:
             json.dump(checkpoint.to_dict(), f, indent=2, ensure_ascii=False)
 
+    def _load_checkpoint_file(self, path: Path, *, warn: bool) -> Checkpoint | None:
+        try:
+            with open(path, encoding="utf-8") as f:
+                data = json.load(f)
+        except (OSError, json.JSONDecodeError) as exc:
+            if warn:
+                logger.warning("Corrupted checkpoint file %s: %s", path, exc)
+            else:
+                logger.debug("Skipping unreadable checkpoint file %s: %s", path, exc)
+            return None
+
+        try:
+            return Checkpoint.from_dict(data)
+        except (KeyError, TypeError, ValueError) as exc:
+            if warn:
+                logger.warning("Invalid checkpoint payload in %s: %s", path, exc)
+            else:
+                logger.debug("Skipping invalid checkpoint payload in %s: %s", path, exc)
+            return None
+
     def update(
         self,
         checkpoint_id: str,
@@ -186,15 +298,7 @@ class CheckpointStore:
         path = self._checkpoint_path(checkpoint_id)
         if not path.exists():
             return None
-
-        with open(path, encoding="utf-8") as f:
-            try:
-                data = json.load(f)
-            except json.JSONDecodeError:
-                logger.warning("Corrupted checkpoint file: %s", path)
-                return None
-
-        return Checkpoint.from_dict(data)
+        return self._load_checkpoint_file(path, warn=True)
 
     def get_latest(self, loop_id: str) -> Checkpoint | None:
         """
@@ -226,19 +330,14 @@ class CheckpointStore:
         """
         result = []
         for path in self.base_dir.glob("*.json"):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-
-                if data.get("completed", False):
-                    continue
-
-                if loop_id and data.get("loop_id") != loop_id:
-                    continue
-
-                result.append(Checkpoint.from_dict(data))
-            except (json.JSONDecodeError, KeyError):
+            checkpoint = self._load_checkpoint_file(path, warn=False)
+            if checkpoint is None:
                 continue
+            if checkpoint.completed:
+                continue
+            if loop_id and checkpoint.loop_id != loop_id:
+                continue
+            result.append(checkpoint)
 
         # Sort by updated_at descending
         result.sort(key=lambda x: x.updated_at, reverse=True)
@@ -297,27 +396,23 @@ class CheckpointStore:
         """
         checkpoints = []
         for path in self.base_dir.glob("*.json"):
-            try:
-                with open(path, encoding="utf-8") as f:
-                    data = json.load(f)
-
-                if loop_id and data.get("loop_id") != loop_id:
-                    continue
-
-                checkpoints.append(
-                    {
-                        "checkpoint_id": data["checkpoint_id"],
-                        "loop_id": data["loop_id"],
-                        "iteration": data["iteration"],
-                        "max_iterations": data.get("max_iterations"),
-                        "completed": data.get("completed", False),
-                        "completion_reason": data.get("completion_reason"),
-                        "created_at": data["created_at"],
-                        "updated_at": data["updated_at"],
-                    }
-                )
-            except (json.JSONDecodeError, KeyError):
+            checkpoint = self._load_checkpoint_file(path, warn=False)
+            if checkpoint is None:
                 continue
+            if loop_id and checkpoint.loop_id != loop_id:
+                continue
+            checkpoints.append(
+                {
+                    "checkpoint_id": checkpoint.checkpoint_id,
+                    "loop_id": checkpoint.loop_id,
+                    "iteration": checkpoint.iteration,
+                    "max_iterations": checkpoint.max_iterations,
+                    "completed": checkpoint.completed,
+                    "completion_reason": checkpoint.completion_reason,
+                    "created_at": checkpoint.created_at,
+                    "updated_at": checkpoint.updated_at,
+                }
+            )
 
         # Sort by updated_at descending
         checkpoints.sort(key=lambda x: x["updated_at"], reverse=True)

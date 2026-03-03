@@ -417,8 +417,8 @@ def _gather_repo_context(path: Path | None = None) -> dict[str, Any]:
             deps = project.get("dependencies", [])
             if deps:
                 context["dependencies"] = deps[:10]  # First 10 deps
-        except Exception:
-            pass
+        except (OSError, ValueError, TypeError) as exc:
+            logger.debug("Failed to parse pyproject context from %s: %s", pyproject_path, exc)
 
     # Read README.md
     readme_path = root / "README.md"
@@ -426,8 +426,8 @@ def _gather_repo_context(path: Path | None = None) -> dict[str, Any]:
         try:
             text = readme_path.read_text(encoding="utf-8")[:2000]
             context["readme_excerpt"] = text
-        except Exception:
-            pass
+        except (OSError, UnicodeError) as exc:
+            logger.debug("Failed to read README context from %s: %s", readme_path, exc)
 
     # Directory structure (2 levels deep for AI)
     try:
@@ -449,8 +449,8 @@ def _gather_repo_context(path: Path | None = None) -> dict[str, Any]:
                 structure.append(entry.name)
         if structure:
             context["directory_structure"] = structure[:50]  # Limit to 50 items
-    except Exception:
-        pass
+    except OSError as exc:
+        logger.debug("Failed to build directory-structure context from %s: %s", root, exc)
 
     scan_summary = _scan_repo_files(root)
     if scan_summary.source_extensions:
@@ -1286,7 +1286,8 @@ class SquadCoordinator:
         try:
             data = json.loads(path.read_text(encoding="utf-8"))
             return data if isinstance(data, dict) else {}
-        except Exception:
+        except (OSError, json.JSONDecodeError, TypeError) as exc:
+            logger.debug("Failed to load squad state from %s: %s", path, exc)
             return {}
 
     def _save_squad_state(self, state: dict[str, Any]) -> None:
