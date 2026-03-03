@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import random
+import threading
 import time
 import warnings
 from collections.abc import AsyncIterator, Callable
@@ -95,13 +96,19 @@ class Copex:
 
     # Shared model-aware circuit breaker for fallback support (v1.9.0)
     _model_breaker: ModelAwareBreaker | None = None
+    _model_breaker_lock = threading.Lock()
 
     @classmethod
     def get_model_breaker(cls) -> ModelAwareBreaker:
         """Get the shared model-aware circuit breaker instance."""
-        if cls._model_breaker is None:
-            cls._model_breaker = ModelAwareBreaker()
-        return cls._model_breaker
+        breaker = cls._model_breaker
+        if breaker is None:
+            with cls._model_breaker_lock:
+                breaker = cls._model_breaker
+                if breaker is None:
+                    breaker = ModelAwareBreaker()
+                    cls._model_breaker = breaker
+        return breaker
 
     def __init__(
         self,

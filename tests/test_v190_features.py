@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+
+import copex.client as client_module
 from copex.backoff import ErrorCategory, categorize_error
 from copex.client import (
     DEFAULT_FALLBACK_CHAINS,
@@ -195,6 +200,30 @@ class TestCopexFallback:
         copex1 = Copex()
         copex2 = Copex()
         assert copex1.get_model_breaker() is copex2.get_model_breaker()
+
+    def test_shared_model_breaker_thread_safe(self, monkeypatch):
+        """Concurrent initialization creates only one shared breaker."""
+
+        class SlowBreaker:
+            created = 0
+            created_lock = threading.Lock()
+
+            def __init__(self) -> None:
+                time.sleep(0.01)
+                with SlowBreaker.created_lock:
+                    SlowBreaker.created += 1
+
+        monkeypatch.setattr(client_module, "ModelAwareBreaker", SlowBreaker)
+        monkeypatch.setattr(Copex, "_model_breaker", None)
+
+        def _get_breaker(_: int) -> object:
+            return Copex.get_model_breaker()
+
+        with ThreadPoolExecutor(max_workers=8) as pool:
+            results = list(pool.map(_get_breaker, range(32)))
+
+        assert len({id(result) for result in results}) == 1
+        assert SlowBreaker.created == 1
 
 
 # =============================================================================
