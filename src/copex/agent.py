@@ -10,11 +10,11 @@ from __future__ import annotations
 import json
 import logging
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from dataclasses import dataclass, field
 from typing import Any, Protocol, runtime_checkable
 
-from copex.streaming import StreamChunk
+from copex.streaming import Response, StreamChunk
 
 logger = logging.getLogger(__name__)
 
@@ -33,9 +33,9 @@ class AgentClient(Protocol):
         prompt: str,
         *,
         tools: list[Any] | None = None,
-        on_chunk: Any | None = None,
+        on_chunk: Callable[[StreamChunk], None] | None = None,
         metrics: Any | None = None,
-    ) -> Any: ...
+    ) -> Response: ...
 
 
 @dataclass
@@ -123,7 +123,7 @@ class AgentSession:
 
     def __init__(
         self,
-        client: Any,
+        client: AgentClient,
         *,
         max_turns: int = DEFAULT_MAX_TURNS,
         model: str | None = None,

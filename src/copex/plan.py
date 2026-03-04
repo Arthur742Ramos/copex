@@ -22,6 +22,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
 if TYPE_CHECKING:
+    from copex.agent import AgentClient
     from copex.ralph import RalphWiggum
 
 # Default state file name
@@ -459,7 +460,7 @@ Execute this step now. When done, summarize what you accomplished."""
 class PlanExecutor:
     """Executes plans step by step using a Copex client."""
 
-    def __init__(self, client: Any, ralph: RalphWiggum | None = None):
+    def __init__(self, client: AgentClient, ralph: RalphWiggum | None = None):
         """
         Initialize executor with a Copex client.
 

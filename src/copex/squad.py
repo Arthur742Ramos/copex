@@ -24,7 +24,7 @@ import logging
 import os
 import re
 import time
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from copy import deepcopy
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -44,6 +44,9 @@ from copex.fleet import (
 from copex.streaming import Response
 
 logger = logging.getLogger(__name__)
+
+# Callback type: (role: str, status: str) -> None
+StatusCallback = Callable[[str, str], None]
 
 
 class SquadRole(str, Enum):
@@ -790,7 +793,7 @@ class SquadCoordinator:
         self,
         prompt: str,
         *,
-        on_status: Any | None = None,
+        on_status: StatusCallback | None = None,
         auto_approve_gates: bool | None = None,
         force: bool = False,
         interactive: bool | None = None,
@@ -944,7 +947,7 @@ class SquadCoordinator:
         self,
         prompt: str,
         *,
-        on_status: Any | None = None,
+        on_status: StatusCallback | None = None,
         mailbox: FleetMailbox | None = None,
     ) -> AsyncIterator[SquadEvent]:
         """Run the squad while emitting real-time squad-level progress events."""
@@ -1177,7 +1180,7 @@ class SquadCoordinator:
     async def _run_fleet(
         fleet: Fleet,
         *,
-        on_status: Any | None,
+        on_status: StatusCallback | None,
         mailbox: FleetMailbox | None = None,
     ) -> list[FleetResult]:
         if mailbox is not None:
@@ -1427,7 +1430,7 @@ class SquadCoordinator:
         self,
         prompt: str,
         *,
-        on_status: Any | None,
+        on_status: StatusCallback | None,
         auto_approve_gates: bool,
         interactive: bool,
         force: bool,
@@ -2024,7 +2027,7 @@ class SquadCoordinator:
         fleet_results: list[FleetResult],
         task_prompts: dict[str, str],
         *,
-        on_status: Any | None = None,
+        on_status: StatusCallback | None = None,
         mailbox: FleetMailbox | None = None,
     ) -> list[FleetResult]:
         """Retry each failed non-timeout agent task based on per-role limits."""
