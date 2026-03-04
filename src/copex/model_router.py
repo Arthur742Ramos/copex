@@ -55,7 +55,7 @@ _TASK_TYPE_CLASSIFIER_INSTRUCTIONS = (
     "Classify the user's request as exactly one label: "
     "'coding' or 'general/creative'. Reply with only that label."
 )
-_task_type_cache: dict[str, "PromptTaskType"] = {}
+_task_type_cache: dict[str, PromptTaskType] = {}
 _task_type_cache_lock = threading.Lock()
 
 
