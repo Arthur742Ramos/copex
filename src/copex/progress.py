@@ -219,10 +219,16 @@ class ProgressReporter:
         """Mark an item as skipped."""
         item = self._get_item(id)
         if item:
+            prev_status = item.status
+            if prev_status in (ProgressStatus.COMPLETED, ProgressStatus.FAILED):
+                return
             item.status = ProgressStatus.SKIPPED
             item.completed_at = time.time()
             if reason:
                 item.metadata["skip_reason"] = reason
+            # Only decrement running if it was previously RUNNING
+            if prev_status == ProgressStatus.RUNNING:
+                self.state.running = max(0, self.state.running - 1)
             self.state.completed += 1  # Intentional: count skips as complete for progress %
             self._update()
 
