@@ -1,5 +1,12 @@
 # Changelog
 
+## [2.20.0] - 2026-03-04
+
+### Features
+- LLM-based model router (auto-selects coding vs creative models).
+- SDK-native domain tools (JSON-RPC tool registration).
+- Persistent server mode (warm Copilot CLI across iterations).
+
 ## [2.18.0] - 2026-03-02
 
 ### Features

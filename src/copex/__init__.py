@@ -4,7 +4,7 @@
 
 from typing import TYPE_CHECKING, Any
 
-__version__ = "2.19.0"
+__version__ = "2.20.0"
 
 # Re-export core components for convenience
 from .agent import AgentResult, AgentSession, AgentTurn
