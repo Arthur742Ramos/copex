@@ -11,7 +11,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from enum import Enum
-from typing import Any
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from copex.fleet import FleetTask
 
 from copex.models import Model, ReasoningEffort
 
@@ -251,7 +254,7 @@ def _build_escalation_prompt(
 def build_council_tasks(
     task: str,
     config: CouncilConfig | None = None,
-) -> list[Any]:
+) -> list[FleetTask]:
     """Create council workflow task graph with enhancements.
 
     Args:

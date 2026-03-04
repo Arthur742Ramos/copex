@@ -934,7 +934,12 @@ class GitFinalizer:
     async def __aenter__(self) -> GitFinalizer:
         return self
 
-    async def __aexit__(self, exc_type, exc_val, exc_tb) -> None:  # type: ignore[no-untyped-def]
+    async def __aexit__(
+        self,
+        exc_type: type[BaseException] | None,
+        exc_val: BaseException | None,
+        exc_tb: object,
+    ) -> None:
         if exc_type is None and self._modified and not self._finalized:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.finalize)
