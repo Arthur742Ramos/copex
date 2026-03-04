@@ -211,8 +211,9 @@ class CheckpointStore:
         Returns:
             New Checkpoint object
         """
-        now = datetime.now().isoformat()
-        checkpoint_id = f"{loop_id}_{datetime.now().strftime('%Y%m%d_%H%M%S')}"
+        now = datetime.now()
+        now_iso = now.isoformat()
+        checkpoint_id = f"{loop_id}_{now.strftime('%Y%m%d_%H%M%S')}"
 
         checkpoint = Checkpoint(
             checkpoint_id=checkpoint_id,
@@ -221,9 +222,9 @@ class CheckpointStore:
             iteration=0,
             max_iterations=max_iterations,
             completion_promise=completion_promise,
-            created_at=now,
-            updated_at=now,
-            started_at=now,
+            created_at=now_iso,
+            updated_at=now_iso,
+            started_at=now_iso,
             model=model,
             reasoning_effort=reasoning_effort,
             metadata=metadata or {},

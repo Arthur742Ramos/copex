@@ -218,7 +218,7 @@ class StepCache:
 
         # Compute expiration
         effective_ttl = ttl if ttl is not None else self.default_ttl
-        expires_at = time.time() + effective_ttl if effective_ttl else None
+        expires_at = time.time() + effective_ttl if effective_ttl is not None else None
 
         entry = CacheEntry(
             step_hash=step_hash,
