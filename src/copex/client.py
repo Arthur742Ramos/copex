@@ -443,6 +443,23 @@ class Copex:
             or None
         )
 
+    @staticmethod
+    def _parse_tool_args(tool_args: Any) -> dict[str, Any]:
+        """Parse tool arguments, handling string-encoded JSON."""
+        if isinstance(tool_args, str):
+            import json
+
+            try:
+                parsed = json.loads(tool_args)
+                if isinstance(parsed, dict):
+                    return parsed
+            except (json.JSONDecodeError, ValueError):
+                pass
+            return {"raw": tool_args}
+        if isinstance(tool_args, dict):
+            return tool_args
+        return {}
+
     def _handle_tool_execution_start(
         self,
         event: Any,
@@ -532,13 +549,7 @@ class Copex:
         tool_id = self._extract_tool_id(data)
         state.awaiting_post_tool_response = True
         state.tool_execution_seen = True
-        if isinstance(tool_args, str):
-            import json
-
-            try:
-                tool_args = json.loads(tool_args)
-            except (json.JSONDecodeError, ValueError):
-                tool_args = {"raw": tool_args}
+        tool_args = self._parse_tool_args(tool_args)
         if on_chunk:
             on_chunk(
                 StreamChunk(
@@ -962,13 +973,7 @@ class Copex:
             tool_args = getattr(data, "arguments", None) or getattr(data, "args", {})
             tool_id = self._extract_tool_id(data)
 
-            if isinstance(tool_args, str):
-                import json
-
-                try:
-                    tool_args = json.loads(tool_args)
-                except (json.JSONDecodeError, ValueError):
-                    tool_args = {"raw": tool_args}
+            tool_args = self._parse_tool_args(tool_args)
 
             if not isinstance(tool_args, dict):
                 return
