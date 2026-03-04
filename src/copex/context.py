@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 import math
 import re
 from collections.abc import Awaitable, Callable, Sequence
 from dataclasses import dataclass
+
+logger = logging.getLogger(__name__)
 
 _ERROR_RE = re.compile(
     r"\b(error|exception|traceback|failed|failure|stack trace|panic|invalid)\b",
@@ -75,8 +78,10 @@ class TokenCounter:
             try:
                 self._encoder = tiktoken.encoding_for_model(model)
             except Exception:
+                logger.debug("tiktoken has no encoding for %s, falling back to cl100k_base", model)
                 self._encoder = tiktoken.get_encoding("cl100k_base")
         except Exception:
+            logger.debug("tiktoken unavailable, using approximate token counting")
             self._encoder = None
 
     def count(self, text: str) -> int:
