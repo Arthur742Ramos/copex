@@ -244,6 +244,16 @@ class StdioTransport(MCPTransport):
                 logger.debug("Negative MCP Content-Length: %r", first_text)
                 return None
 
+            # Guard against OOM from broken/malicious servers
+            _MCP_MAX_CONTENT_LENGTH = 50 * 1024 * 1024  # 50 MiB
+            if content_length > _MCP_MAX_CONTENT_LENGTH:
+                logger.warning(
+                    "MCP Content-Length %d exceeds limit (%d), dropping message",
+                    content_length,
+                    _MCP_MAX_CONTENT_LENGTH,
+                )
+                return None
+
             while True:
                 header_line = await self._process.stdout.readline()
                 if not header_line:
