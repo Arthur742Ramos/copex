@@ -83,6 +83,8 @@ class DynamicSemaphore:
 
     async def release(self) -> None:
         async with self._condition:
+            if self._active <= 0:
+                raise RuntimeError("DynamicSemaphore released more times than acquired")
             self._active -= 1
             self._condition.notify_all()
 

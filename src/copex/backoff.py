@@ -158,9 +158,9 @@ _RE_CLIENT = re.compile(
     re.IGNORECASE,
 )
 
-# Sets for O(1) type name lookups
-_NETWORK_TYPES = frozenset(["connection", "timeout", "network", "socket"])
-_AUTH_TYPES = frozenset(["auth", "permission", "forbidden"])
+# Patterns for type name substring matching
+_NETWORK_TYPES = ("connection", "timeout", "network", "socket")
+_AUTH_TYPES = ("auth", "permission", "forbidden")
 
 
 def categorize_error(error: Exception) -> ErrorCategory:
@@ -195,7 +195,7 @@ def categorize_error(error: Exception) -> ErrorCategory:
     error_type = type(error).__name__.lower()
     error_msg = str(error).lower()
 
-    # Check type name for network/auth errors (O(1) set lookup)
+    # Check type name for network/auth errors (substring matching)
     if any(x in error_type for x in _NETWORK_TYPES):
         return ErrorCategory.NETWORK
     if any(x in error_type for x in _AUTH_TYPES):
