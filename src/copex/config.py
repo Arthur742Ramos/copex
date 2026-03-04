@@ -372,7 +372,7 @@ class CopexConfig(BaseModel):
         try:
             with open(path, "rb") as f:
                 data = tomllib.load(f)
-        except Exception as e:
+        except (OSError, ValueError) as e:
             import logging
             logging.getLogger(__name__).warning("Failed to load config from %s: %s", path, e)
             return cls()
