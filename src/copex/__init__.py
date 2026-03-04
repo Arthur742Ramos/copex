@@ -27,7 +27,7 @@ from .cache import StepCache, clear_global_cache, get_cache
 from .checkpoint import CheckpointedRalph, CheckpointStore
 from .cli_client import CopilotCLI
 from .client import Copex
-from .conditions import Condition, ConditionContext, all_of, any_of, when
+from .conditions import Condition, ConditionContext, all_of, any_of, none_of, when
 from .config import CopexConfig, find_copilot_cli, make_client
 from .edits import (
     EditBatchResult,
@@ -213,6 +213,7 @@ __all__ = [
     "ConditionContext",
     "all_of",
     "any_of",
+    "none_of",
     "when",
     # Edits
     "EditBatchResult",

@@ -129,6 +129,7 @@ class SessionMetrics:
 
 # Token cost estimates per 1M tokens (as of 2026)
 TOKEN_COSTS = {
+    "gpt-5.3-codex": {"input": 3.00, "output": 15.00},
     "gpt-5.2-codex": {"input": 3.00, "output": 15.00},
     "gpt-5.1-codex": {"input": 2.50, "output": 10.00},
     "gpt-5.1-codex-max": {"input": 5.00, "output": 20.00},
@@ -138,11 +139,13 @@ TOKEN_COSTS = {
     "gpt-5": {"input": 2.00, "output": 8.00},
     "gpt-5-mini": {"input": 0.40, "output": 1.60},
     "gpt-4.1": {"input": 0.30, "output": 1.20},
+    "claude-sonnet-4.6": {"input": 3.00, "output": 15.00},
     "claude-sonnet-4.5": {"input": 3.00, "output": 15.00},
     "claude-sonnet-4": {"input": 3.00, "output": 15.00},
     "claude-haiku-4.5": {"input": 0.80, "output": 4.00},
     "claude-opus-4.5": {"input": 15.00, "output": 75.00},
     "claude-opus-4.6": {"input": 15.00, "output": 75.00},
+    "claude-opus-4.6-fast": {"input": 15.00, "output": 75.00},
     "claude-opus-4.6-1m": {"input": 15.00, "output": 75.00},
     "gemini-3-pro-preview": {"input": 1.25, "output": 5.00},
 }

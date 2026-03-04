@@ -73,7 +73,7 @@ class StreamingMetrics:
         self.last_chunk_time = now
         self.total_chunks += 1
         if chunk.delta:
-            self.total_bytes += len(chunk.delta)
+            self.total_bytes += len(chunk.delta.encode("utf-8"))
         if chunk.type == "message":
             self.message_chunks += 1
         elif chunk.type == "reasoning":
