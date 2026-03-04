@@ -78,7 +78,7 @@ def extract_json_array(text: str) -> list:
             if depth_curly == 0:
                 last_complete_obj_end = i
 
-    if last_complete_obj_end > 0:
+    if last_complete_obj_end >= 0:
         truncated = (
             candidate[:last_complete_obj_end + 1].rstrip().rstrip(",") + "]"
         )

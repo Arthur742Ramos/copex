@@ -257,7 +257,6 @@ class WorktreeManager:
             return WorktreeResult(
                 success=True,
                 worktree_path=self._worktree_path,
-                error="No changes to commit",
             )
 
         # Stage everything

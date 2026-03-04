@@ -73,7 +73,7 @@ async def _stream_response(client: Copex, prompt: str, show_reasoning: bool) -> 
             )
         ),
         on_tool_result=lambda chunk: ui.update_tool_call(
-            chunk.tool_id,
+            chunk.tool_id or "",
             chunk.tool_name or "unknown",
             "success" if chunk.tool_success is not False else "error",
             result=chunk.tool_result,
@@ -182,7 +182,7 @@ async def _stream_response_interactive(
             )
         ),
         on_tool_result=lambda chunk: ui.update_tool_call(
-            chunk.tool_id,
+            chunk.tool_id or "",
             chunk.tool_name or "unknown",
             "success" if chunk.tool_success is not False else "error",
             result=chunk.tool_result,

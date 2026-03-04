@@ -223,7 +223,7 @@ class ProgressReporter:
             item.completed_at = time.time()
             if reason:
                 item.metadata["skip_reason"] = reason
-            self.state.completed += 1  # Count as complete for progress
+            self.state.completed += 1  # Intentional: count skips as complete for progress %
             self._update()
 
     def finish(self, message: str | None = None) -> None:

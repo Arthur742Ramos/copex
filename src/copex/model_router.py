@@ -6,6 +6,7 @@ import asyncio
 import re
 import threading
 import time
+from collections import OrderedDict
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -55,7 +56,7 @@ _TASK_TYPE_CLASSIFIER_INSTRUCTIONS = (
     "Classify the user's request as exactly one label: "
     "'coding' or 'general/creative'. Reply with only that label."
 )
-_task_type_cache: dict[str, PromptTaskType] = {}
+_task_type_cache: OrderedDict[str, PromptTaskType] = OrderedDict()
 _task_type_cache_lock = threading.Lock()
 
 
@@ -82,6 +83,8 @@ def detect_task_type(
         return PromptTaskType.GENERAL
     with _task_type_cache_lock:
         cached = _task_type_cache.get(text)
+        if cached is not None:
+            _task_type_cache.move_to_end(text)
     if cached is not None:
         return cached
 
@@ -104,7 +107,7 @@ def detect_task_type(
     task_type = classified or _detect_task_type_with_regex(text)
     with _task_type_cache_lock:
         if text not in _task_type_cache and len(_task_type_cache) >= _TASK_TYPE_CACHE_MAX_ENTRIES:
-            _task_type_cache.pop(next(iter(_task_type_cache)))
+            _task_type_cache.popitem(last=False)
         _task_type_cache[text] = task_type
     return task_type
 
