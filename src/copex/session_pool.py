@@ -140,28 +140,42 @@ class SessionPool:
             return
 
     async def _evict_idle(self) -> None:
-        """Evict sessions that have been idle too long."""
+        """Evict sessions that have been idle too long.
+
+        Collects eviction candidates under per-model locks (no global lock held)
+        to avoid lock-ordering inversion with ``acquire()`` which takes model
+        lock → global lock.
+        """
         now = time.monotonic()
         to_destroy: list[Any] = []
+
+        # Snapshot model keys under the global lock, then release it
+        # before acquiring per-model locks.
         async with self._global_lock:
-            for model in list(self._pools.keys()):
-                lock = self._model_locks.setdefault(model, asyncio.Lock())
-                async with lock:
-                    pool = self._pools.get(model)
-                    if pool is None:
-                        continue
-                    to_remove = []
-                    for ps in pool:
-                        if not ps.in_use and (now - ps.last_used) > self.max_idle_time:
-                            to_remove.append(ps)
+            model_keys = list(self._pools.keys())
 
-                    for ps in to_remove:
-                        pool.remove(ps)
-                        self._evictions += 1
-                        to_destroy.append(ps.session)
+        for model in model_keys:
+            lock = await self._get_model_lock(model)
+            async with lock:
+                pool = self._pools.get(model)
+                if pool is None:
+                    continue
+                to_remove = []
+                for ps in pool:
+                    if not ps.in_use and (now - ps.last_used) > self.max_idle_time:
+                        to_remove.append(ps)
 
-                    if not pool:
-                        del self._pools[model]
+                for ps in to_remove:
+                    pool.remove(ps)
+                    self._evictions += 1
+                    to_destroy.append(ps.session)
+
+                if not pool:
+                    async with self._global_lock:
+                        # Re-check under lock before deleting
+                        if model in self._pools and not self._pools[model]:
+                            del self._pools[model]
+
         for session in to_destroy:
             try:
                 await session.destroy()
