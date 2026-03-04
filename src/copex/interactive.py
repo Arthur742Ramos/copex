@@ -14,10 +14,13 @@ This module provides a polished interactive chat experience with:
 from __future__ import annotations
 
 import asyncio
+import logging
 import time
 from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
+
+logger = logging.getLogger(__name__)
 
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
@@ -739,6 +742,7 @@ async def _stream_message(console: Console, client: Copex, prompt: str) -> None:
         except Exception as e:  # Catch-all: show error and continue interactive session
             state.phase = "error"
             # Don't re-raise - show error and continue session
+            logger.debug("Interactive send failed", exc_info=True)
             console.print()
             console.print(f"[{Colors.ERROR}]Error: {e}[/{Colors.ERROR}]")
             return
