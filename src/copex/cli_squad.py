@@ -15,6 +15,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from copex.config import CopexConfig
+from copex.model_router import option_was_explicit, route_model_for_prompt
 from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
 
 console = Console()
@@ -152,6 +153,8 @@ def squad_command(
         None: Command result.
     """
     raw_args = args or []
+    model_explicit = option_was_explicit("model")
+    reasoning_explicit = option_was_explicit("reasoning")
     subcommand = raw_args[0].lower() if raw_args else None
     if subcommand == "status":
         if len(raw_args) != 1:
@@ -270,6 +273,31 @@ def squad_command(
     if not prompt:
         console.print("[red]No prompt provided[/red]")
         raise typer.Exit(1) from None
+
+    if not model_explicit:
+        route = route_model_for_prompt(prompt, client_options=config.to_client_options())
+        effective_model = route.model
+        try:
+            if _resolve_cli_model is None:
+                raise RuntimeError("Squad CLI not configured")
+            config.model = _resolve_cli_model(effective_model)
+        except ValueError:
+            console.print(f"[red]Invalid model: {effective_model}[/red]")
+            raise typer.Exit(1) from None
+
+        try:
+            requested_effort = parse_reasoning_effort(reasoning)
+            if requested_effort is None:
+                raise ValueError(reasoning)
+            if not reasoning_explicit:
+                requested_effort = route.reasoning_effort
+            normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
+            if warning and not json_output:
+                console.print(f"[yellow]{warning}[/yellow]")
+            config.reasoning_effort = normalized_effort
+        except ValueError:
+            console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
+            raise typer.Exit(1) from None
 
     asyncio.run(
         _run_squad(

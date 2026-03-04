@@ -85,6 +85,7 @@ from copex.edits import apply_edit_text, list_undo_history, undo_last_edit_batch
 from copex.exceptions import ValidationError as CopexValidationError
 from copex.log_render import render_jsonl
 from copex.memory import ProjectMemory
+from copex.model_router import option_was_explicit, route_model_for_prompt
 from copex.models import (
     Model,
     ReasoningEffort,
@@ -467,12 +468,23 @@ def main(
         if prompt is not None:
             try:
                 config = CopexConfig()
-                config.model = _resolve_cli_model(effective_model)
                 if use_cli:
                     config.use_cli = True
+                model_explicit = option_was_explicit("model")
+                reasoning_explicit = option_was_explicit("reasoning")
+                route = None
+                if not model_explicit:
+                    route = route_model_for_prompt(
+                        prompt,
+                        client_options=config.to_client_options(),
+                    )
+                    effective_model = route.model
+                config.model = _resolve_cli_model(effective_model)
                 requested_effort = parse_reasoning_effort(reasoning)
                 if requested_effort is None:
                     requested_effort = ReasoningEffort.HIGH
+                if route is not None and not reasoning_explicit:
+                    requested_effort = route.reasoning_effort
                 normalized_effort, warning = normalize_reasoning_effort(
                     config.model, requested_effort
                 )
@@ -892,25 +904,9 @@ def chat(
         else:
             config = CopexConfig()
 
-    # Override with CLI options
+    model_explicit = option_was_explicit("model")
+    reasoning_explicit = option_was_explicit("reasoning")
     effective_model = model or _DEFAULT_MODEL.value
-    try:
-        config.model = _resolve_cli_model(effective_model)
-    except ValueError:
-        console.print(f"[red]Invalid model: {effective_model}[/red]")
-        raise typer.Exit(1) from None
-
-    try:
-        requested_effort = parse_reasoning_effort(reasoning)
-        if requested_effort is None:
-            raise ValueError(reasoning)
-        normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
-        if warning:
-            console.print(f"[yellow]{warning}[/yellow]")
-        config.reasoning_effort = normalized_effort
-    except ValueError:
-        console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
-        raise typer.Exit(1) from None
 
     config.retry.max_retries = max_retries
     config.streaming = not no_stream
@@ -958,6 +954,30 @@ def chat(
 
     if not prompt:
         console.print("[red]No prompt provided[/red]")
+        raise typer.Exit(1) from None
+
+    route = None
+    if not model_explicit:
+        route = route_model_for_prompt(prompt, client_options=config.to_client_options())
+        effective_model = route.model
+    try:
+        config.model = _resolve_cli_model(effective_model)
+    except ValueError:
+        console.print(f"[red]Invalid model: {effective_model}[/red]")
+        raise typer.Exit(1) from None
+
+    try:
+        requested_effort = parse_reasoning_effort(reasoning)
+        if requested_effort is None:
+            raise ValueError(reasoning)
+        if route is not None and not reasoning_explicit:
+            requested_effort = route.reasoning_effort
+        normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
+        if warning:
+            console.print(f"[yellow]{warning}[/yellow]")
+        config.reasoning_effort = normalized_effort
+    except ValueError:
+        console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
         raise typer.Exit(1) from None
 
     # Handle context files
@@ -1701,10 +1721,18 @@ def ralph_command(
     Returns:
         None: Command result.
     """
+    model_explicit = option_was_explicit("model")
+    reasoning_explicit = option_was_explicit("reasoning")
     effective_model = model or _DEFAULT_MODEL.value
+    route = None
+    if not model_explicit:
+        route = route_model_for_prompt(prompt)
+        effective_model = route.model
     try:
         model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        if route is not None and not reasoning_explicit:
+            requested_effort = route.reasoning_effort
         normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
         if warning:
             console.print(f"[yellow]{warning}[/yellow]")
@@ -2362,26 +2390,9 @@ def agent_command(
         default_path = CopexConfig.default_path()
         config = CopexConfig.from_file(default_path) if default_path.exists() else CopexConfig()
 
-    # Override model
+    model_explicit = option_was_explicit("model")
+    reasoning_explicit = option_was_explicit("reasoning")
     effective_model = model or _DEFAULT_MODEL.value
-    try:
-        config.model = _resolve_cli_model(effective_model)
-    except ValueError:
-        console.print(f"[red]Invalid model: {effective_model}[/red]")
-        raise typer.Exit(1) from None
-
-    # Reasoning effort
-    try:
-        requested_effort = parse_reasoning_effort(reasoning)
-        if requested_effort is None:
-            raise ValueError(reasoning)
-        normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
-        if warning and not json_output:
-            console.print(f"[yellow]{warning}[/yellow]")
-        config.reasoning_effort = normalized_effort
-    except ValueError:
-        console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
-        raise typer.Exit(1) from None
 
     if use_cli:
         config.use_cli = True
@@ -2401,6 +2412,30 @@ def agent_command(
 
     if not prompt:
         console.print("[red]No prompt provided[/red]")
+        raise typer.Exit(1) from None
+
+    route = None
+    if not model_explicit:
+        route = route_model_for_prompt(prompt, client_options=config.to_client_options())
+        effective_model = route.model
+    try:
+        config.model = _resolve_cli_model(effective_model)
+    except ValueError:
+        console.print(f"[red]Invalid model: {effective_model}[/red]")
+        raise typer.Exit(1) from None
+
+    try:
+        requested_effort = parse_reasoning_effort(reasoning)
+        if requested_effort is None:
+            raise ValueError(reasoning)
+        if route is not None and not reasoning_explicit:
+            requested_effort = route.reasoning_effort
+        normalized_effort, warning = normalize_reasoning_effort(config.model, requested_effort)
+        if warning and not json_output:
+            console.print(f"[yellow]{warning}[/yellow]")
+        config.reasoning_effort = normalized_effort
+    except ValueError:
+        console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
         raise typer.Exit(1) from None
 
     asyncio.run(_run_agent(config, prompt, max_turns=max_turns, json_output=json_output))

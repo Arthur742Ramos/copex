@@ -13,6 +13,7 @@ from rich.console import Console
 from rich.panel import Panel
 
 from copex.config import CopexConfig, make_client
+from copex.model_router import option_was_explicit, route_model_for_prompt
 from copex.models import Model, ReasoningEffort, normalize_reasoning_effort, parse_reasoning_effort
 from copex.plan import Plan, PlanExecutor, PlanState, PlanStep, StepStatus
 from copex.ralph import RalphWiggum
@@ -169,12 +170,20 @@ def plan_command(
         console.print("[red]Error: Provide a task, --resume, or --load[/red]")
         raise typer.Exit(1) from None
 
+    model_explicit = option_was_explicit("model")
+    reasoning_explicit = option_was_explicit("reasoning")
+    route = None
     effective_model = model or _DEFAULT_MODEL.value
+    if task and not model_explicit:
+        route = route_model_for_prompt(task)
+        effective_model = route.model
     try:
         if _resolve_cli_model is None:
             raise RuntimeError("Plan CLI not configured")
         model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
+        if route is not None and not reasoning_explicit:
+            requested_effort = route.reasoning_effort
         normalized_effort, warning = normalize_reasoning_effort(model_enum, requested_effort)
         if warning:
             console.print(f"[yellow]{warning}[/yellow]")
