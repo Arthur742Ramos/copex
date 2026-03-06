@@ -40,8 +40,8 @@ _CODING_MODEL_PREFERENCES = [
 _GENERAL_MODEL_PREFERENCES = [
     "claude-opus-4.6-1m",
     "claude-opus-4.6",
-    "claude-sonnet-4.6",
     "gpt-5.4",
+    "claude-sonnet-4.6",
     "gpt-5.3-codex",
     "gpt-5.2",
 ]
