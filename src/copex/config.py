@@ -280,6 +280,10 @@ class CopexConfig(BaseModel):
         default=False,
         description="Log file change decisions to .copex/audit.log",
     )
+    js_repl: bool = Field(
+        default=False,
+        description="Enable persistent JavaScript REPL tool (requires Node.js)",
+    )
 
     # UI options
     ui_theme: str = Field(
@@ -523,6 +527,16 @@ class CopexConfig(BaseModel):
             opts["available_tools"] = self.available_tools
         if self.excluded_tools:
             opts["excluded_tools"] = self.excluded_tools
+
+        # Domain tools — conditionally enabled features
+        if self.js_repl:
+            from copex.sdk_tools import build_domain_tools, register_js_repl_tools
+
+            if register_js_repl_tools():
+                js_tools = build_domain_tools(
+                    ["js_repl", "js_repl_reset"], working_dir=Path(opts["working_directory"])
+                )
+                opts.setdefault("tools", []).extend(js_tools)
 
         # Permission handler — required by github-copilot-sdk >= 0.1.29.
         # Copex handles user-facing approval/deny at the tool-call level via

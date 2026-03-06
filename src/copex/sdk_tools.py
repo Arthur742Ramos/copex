@@ -4,7 +4,9 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import shlex
+import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -367,6 +369,131 @@ def _build_proof_checker_tool(working_dir: Path) -> Tool:
         },
         handler=_handler,
     )
+
+
+_js_repl_manager: Any | None = None
+_js_repl_logger = logging.getLogger(__name__)
+
+
+def _get_js_repl_manager() -> Any:
+    """Return the module-level JSReplManager singleton, creating it lazily."""
+    global _js_repl_manager
+    if _js_repl_manager is None:
+        from copex.js_repl import JSReplManager
+
+        _js_repl_manager = JSReplManager()
+    return _js_repl_manager
+
+
+def _build_js_repl_tool(working_dir: Path) -> Tool:
+    async def _handler(invocation: dict[str, Any]) -> dict[str, Any]:
+        args = invocation.get("arguments") or {}
+        code = str(args.get("code", "")).strip()
+        if not code:
+            return _failure_result(
+                "Parameter 'code' is required for js_repl.",
+                error="missing code",
+            )
+
+        manager = _get_js_repl_manager()
+        try:
+            result = await manager.execute(code)
+        except Exception as exc:
+            return _failure_result(
+                "JavaScript execution failed.",
+                error=str(exc),
+                session_log="js_repl execution error",
+            )
+
+        console_lines = result.get("console", [])
+        output_parts = []
+        if console_lines:
+            output_parts.append("Console:\n" + "\n".join(console_lines))
+        if result.get("error"):
+            output_parts.append(f"Error: {result['error']}")
+            text = "\n\n".join(output_parts) if output_parts else result["error"]
+            return _failure_result(
+                text,
+                error=result["error"],
+                session_log="js_repl error",
+            )
+        if result.get("result") is not None:
+            output_parts.append(f"Result: {result['result']}")
+        text = "\n\n".join(output_parts) if output_parts else "(no output)"
+        return _success_result(
+            text,
+            session_log=f"js_repl ok len={len(code)}",
+            telemetry={"code_length": len(code)},
+        )
+
+    return Tool(
+        name="js_repl",
+        description=(
+            "Execute JavaScript code in a persistent Node.js REPL. "
+            "Variables and functions persist across calls. "
+            "Use for calculations, data processing, prototyping, or testing JS logic."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "code": {
+                    "type": "string",
+                    "description": "JavaScript code to execute (top-level await supported)",
+                },
+            },
+            "required": ["code"],
+        },
+        handler=_handler,
+    )
+
+
+def _build_js_repl_reset_tool(working_dir: Path) -> Tool:
+    async def _handler(invocation: dict[str, Any]) -> dict[str, Any]:
+        manager = _get_js_repl_manager()
+        try:
+            await manager.reset()
+        except Exception as exc:
+            return _failure_result(
+                "Failed to reset JavaScript REPL.",
+                error=str(exc),
+                session_log="js_repl_reset error",
+            )
+        return _success_result(
+            "JavaScript REPL context has been reset. All variables and state cleared.",
+            session_log="js_repl_reset ok",
+        )
+
+    return Tool(
+        name="js_repl_reset",
+        description="Reset the persistent JavaScript REPL, clearing all variables and state.",
+        parameters={"type": "object", "properties": {}},
+        handler=_handler,
+    )
+
+
+def register_js_repl_tools() -> bool:
+    """Conditionally register JS REPL tools if Node.js is available.
+
+    Returns True if registration succeeded, False otherwise.
+    """
+    if not shutil.which("node"):
+        _js_repl_logger.warning("Node.js not found; js_repl tools will not be available")
+        return False
+
+    register_domain_tool("js_repl", _build_js_repl_tool, replace=True)
+    register_domain_tool("js_repl_reset", _build_js_repl_reset_tool, replace=True)
+    return True
+
+
+async def shutdown_js_repl() -> None:
+    """Stop the JS REPL kernel if running. Safe to call at exit."""
+    global _js_repl_manager
+    if _js_repl_manager is not None:
+        try:
+            await _js_repl_manager.stop()
+        except Exception:
+            _js_repl_logger.debug("Error stopping JS REPL manager", exc_info=True)
+        _js_repl_manager = None
 
 
 def _register_builtin_tools() -> None:

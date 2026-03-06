@@ -459,6 +459,9 @@ def main(
     audit: Annotated[
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
+    js_repl: Annotated[
+        bool, typer.Option("--js-repl", help="Enable persistent JavaScript REPL tool (requires Node.js)")
+    ] = False,
     force: Annotated[
         bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
     ] = False,
@@ -482,6 +485,7 @@ def main(
         approve: CLI argument or option value.
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
+        js_repl: CLI argument or option value.
         force: CLI argument or option value.
 
     Returns:
@@ -520,6 +524,8 @@ def main(
                 if warning:
                     console.print(f"[yellow]{warning}[/yellow]")
                 config.reasoning_effort = normalized_effort
+                if js_repl:
+                    config.js_repl = True
                 _apply_approval_flags(
                     config,
                     auto_approve=auto_approve,
@@ -887,6 +893,9 @@ def chat(
     audit: Annotated[
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
+    js_repl: Annotated[
+        bool, typer.Option("--js-repl", help="Enable persistent JavaScript REPL tool (requires Node.js)")
+    ] = False,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors.
 
@@ -916,6 +925,7 @@ def chat(
         approve: CLI argument or option value.
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
+        js_repl: CLI argument or option value.
 
     Returns:
         None: Command result.
@@ -940,6 +950,8 @@ def chat(
         config.context_budget = context_budget
     if use_cli:
         config.use_cli = True
+    if js_repl:
+        config.js_repl = True
     if ui_theme:
         config.ui_theme = ui_theme
     if ui_density:
