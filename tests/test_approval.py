@@ -330,3 +330,25 @@ def test_policy_based_mode_uses_risk_to_require_input(tmp_path: Path) -> None:
     assert reviewed[0].preview.risk.severity == "high"
     assert reviewed[0].action == ApprovalAction.REJECT
     assert reviewed[0].apply_change is False
+
+
+def test_invalid_manual_prompt_input_defaults_to_reject(tmp_path: Path) -> None:
+    workflow = ApprovalWorkflow(
+        mode="approve",
+        input_func=lambda _prompt: "wat",
+        console=_quiet_console(),
+    )
+    workflow._decision_prompt = None
+
+    preview = build_preview(
+        ProposedFileChange(
+            path=tmp_path / "src" / "foo.py",
+            display_path="src/foo.py",
+            existed_before=False,
+            before_content="",
+            after_content="print('x')\n",
+        )
+    )
+    stats = summarize_changes([preview])
+
+    assert workflow._prompt_action(preview, stats) == ApprovalAction.REJECT

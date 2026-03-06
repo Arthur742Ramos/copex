@@ -106,6 +106,21 @@ async def test_callbacks_receive_iteration_and_final_state():
     assert state.history == ["first pass", "<promise>DONE</promise>"]
 
 
+@pytest.mark.asyncio
+async def test_loop_accumulates_response_token_usage():
+    client = SimpleNamespace(send=AsyncMock(side_effect=[
+        SimpleNamespace(content="first", prompt_tokens=3, completion_tokens=2),
+        SimpleNamespace(content="second", prompt_tokens=5, completion_tokens=7),
+    ]))
+    ralph = RalphWiggum(client, RalphConfig(delay_between_iterations=0))
+
+    state = await ralph.loop("count tokens", max_iterations=2)
+
+    assert state.prompt_tokens == 8
+    assert state.completion_tokens == 9
+    assert state.tokens_used == 17
+
+
 def test_check_promise_normalizes_whitespace_and_case():
     client = SimpleNamespace(send=AsyncMock())
     ralph = RalphWiggum(client)

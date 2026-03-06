@@ -311,7 +311,7 @@ class CopexConfig(BaseModel):
         return parsed if parsed is not None else value
 
     @model_validator(mode="after")
-    def _cap_reasoning_by_model(self) -> "CopexConfig":
+    def _cap_reasoning_by_model(self) -> CopexConfig:
         fields_set = getattr(self, "__pydantic_fields_set__", set())
         self._normalize_reasoning_effort(
             warn_on_change="reasoning_effort" in fields_set,
@@ -328,7 +328,7 @@ class CopexConfig(BaseModel):
         return value
 
     @model_validator(mode="after")
-    def _apply_env_overrides(self) -> "CopexConfig":
+    def _apply_env_overrides(self) -> CopexConfig:
         env_token = os.environ.get("COPEX_TOKEN")
         if env_token:
             self.github_token = env_token
@@ -405,7 +405,7 @@ class CopexConfig(BaseModel):
         return normalized
 
     @classmethod
-    def from_file(cls, path: str | Path) -> "CopexConfig":
+    def from_file(cls, path: str | Path) -> CopexConfig:
         """Load configuration from TOML file."""
         try:
             import tomllib  # Python 3.11+
@@ -515,13 +515,17 @@ class CopexConfig(BaseModel):
                 raise FileNotFoundError(f"MCP config file not found: {config_path}")
             import json
 
-            with open(config_path, encoding="utf-8") as f:
-                mcp_data = json.load(f)
-                servers = mcp_data.get("servers")
-                if isinstance(servers, dict):
-                    opts["mcp_servers"] = list(servers.values())
-                elif isinstance(servers, list):
-                    opts["mcp_servers"] = servers
+            try:
+                with open(config_path, encoding="utf-8") as f:
+                    mcp_data = json.load(f)
+            except json.JSONDecodeError as exc:
+                raise ValueError(f"Invalid MCP config JSON in {config_path}: {exc.msg}") from exc
+
+            servers = mcp_data.get("servers")
+            if isinstance(servers, dict):
+                opts["mcp_servers"] = list(servers.values())
+            elif isinstance(servers, list):
+                opts["mcp_servers"] = servers
 
         # Merge built-in MCP servers (user-configured names win on collision)
         from copex.mcp import get_builtin_mcp_servers

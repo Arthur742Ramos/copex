@@ -29,6 +29,20 @@ if TYPE_CHECKING:
 STATE_FILE_NAME = ".copex-state.json"
 
 
+def _coerce_token_count(value: Any) -> int:
+    """Normalize optional token counts to a safe integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
+def _response_tokens_used(response: Any) -> int:
+    """Return total tokens used by a response-like object."""
+    return _coerce_token_count(getattr(response, "prompt_tokens", None)) + _coerce_token_count(
+        getattr(response, "completion_tokens", None)
+    )
+
+
 class StepStatus(Enum):
     """Status of a plan step."""
 
@@ -424,7 +438,7 @@ class PlanState:
             completed=completed,
             current_step=current.number if current else len(plan.steps) + 1,
             step_results=step_results,
-            total_tokens=plan.total_tokens,
+            total_tokens=sum(step.tokens_used for step in plan.steps),
         )
 
 
@@ -602,6 +616,26 @@ class PlanExecutor:
                     on_step_complete(step)
                 continue
 
+            dependency_error = self._get_dependency_error(plan, step)
+            if dependency_error is not None:
+                step.status = StepStatus.FAILED
+                step.error = dependency_error
+                step.completed_at = datetime.now()
+
+                ctx[f"step_{step.number}_failed"] = True
+                ctx[f"step_{step.number}_error"] = dependency_error
+
+                if save_checkpoints and self._state:
+                    self._state.current_step = step.number
+                    self._state.plan = plan
+                    self._state.save(self._state_path)
+
+                if on_error:
+                    should_continue = on_error(step, ValueError(dependency_error))
+                    if should_continue:
+                        continue
+                break
+
             step.status = StepStatus.RUNNING
             step.started_at = datetime.now()
 
@@ -645,9 +679,11 @@ class PlanExecutor:
                     step.result = (
                         ralph_state.history[-1] if ralph_state.history else "Step completed"
                     )
+                    step.tokens_used = ralph_state.tokens_used
                 else:
                     response = await self.client.send(prompt)
                     step.result = response.content
+                    step.tokens_used = _response_tokens_used(response)
 
                 step.status = StepStatus.COMPLETED
                 step.completed_at = datetime.now()
@@ -687,9 +723,12 @@ class PlanExecutor:
                 else:
                     break
 
+        plan.total_tokens = sum(step.tokens_used for step in plan.steps)
+        if self._state:
+            self._state.total_tokens = plan.total_tokens
+
         if plan.is_complete:
             plan.completed_at = datetime.now()
-            plan.total_tokens = self._state.total_tokens if self._state else 0
             # Clean up state file on successful completion
             if save_checkpoints:
                 PlanState.cleanup(self._state_path)
@@ -713,6 +752,26 @@ class PlanExecutor:
 
         await self.execute_plan(plan, from_step=step_number, on_step_complete=_stop_after_step)
         return step
+
+    def _get_dependency_error(self, plan: Plan, step: PlanStep) -> str | None:
+        """Return a descriptive dependency error when a step cannot run yet."""
+        if not step.depends_on:
+            return None
+
+        step_map = {plan_step.number: plan_step for plan_step in plan.steps}
+        missing = sorted(dep for dep in step.depends_on if dep not in step_map)
+        if missing:
+            return f"Step {step.number} depends on missing steps: {', '.join(map(str, missing))}"
+
+        incomplete = [
+            f"{dep} ({step_map[dep].status.value})"
+            for dep in step.depends_on
+            if step_map[dep].status != StepStatus.COMPLETED
+        ]
+        if incomplete:
+            return f"Step {step.number} depends on incomplete steps: {', '.join(incomplete)}"
+
+        return None
 
 
 class PlanEditor:

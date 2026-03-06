@@ -10,14 +10,12 @@ from __future__ import annotations
 
 import json
 import re
-from pathlib import Path
 from unittest.mock import patch
 
 import pytest
 
 from copex.config import CopexConfig
 from copex.mcp import MCPServerConfig, get_builtin_mcp_servers
-
 
 # ===========================================================================
 # 1. Squad CLI --mcp-config flag
@@ -197,6 +195,16 @@ class TestBuiltinServerMerge:
         config = self._make_config(mcp_config_file=str(tmp_path / "missing.json"))
         with patch("copex.mcp.shutil.which", return_value=None):
             with pytest.raises(FileNotFoundError, match="MCP config file not found"):
+                config.to_session_options()
+
+    def test_mcp_config_invalid_json_raises_clear_error(self, tmp_path):
+        """Malformed MCP config JSON should raise a user-facing ValueError."""
+        mcp_file = tmp_path / "mcp.json"
+        mcp_file.write_text("{not-json", encoding="utf-8")
+        config = self._make_config(mcp_config_file=str(mcp_file))
+
+        with patch("copex.mcp.shutil.which", return_value=None):
+            with pytest.raises(ValueError, match="Invalid MCP config JSON"):
                 config.to_session_options()
 
     def test_mcp_config_dict_format_servers(self, tmp_path):

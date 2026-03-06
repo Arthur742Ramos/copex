@@ -9,6 +9,7 @@ Allows plan steps to be conditionally executed based on:
 
 from __future__ import annotations
 
+import ast
 import operator
 import re
 from collections.abc import Callable, Mapping
@@ -153,18 +154,18 @@ class ConditionContext:
 # Reference pattern: ${step.N.field} or ${env.VAR} or ${var.NAME}
 _REF_PATTERN = re.compile(r"\$\{(step|env|var)\.([^}]+)\}")
 
-# Comparison operators (order matters: longer operators must come first
-# to avoid partial matches, e.g. " not in " before " in ")
-_OPERATORS = {
-    "!=": operator.ne,
-    "==": operator.eq,
-    "<=": operator.le,
-    ">=": operator.ge,
-    "<": operator.lt,
-    ">": operator.gt,
-    " not in ": lambda a, b: a not in b,
-    " in ": lambda a, b: a in b,
+# Safe subset of Python expression nodes used for condition evaluation.
+_COMPARISON_OPERATORS = {
+    ast.Eq: operator.eq,
+    ast.NotEq: operator.ne,
+    ast.Lt: operator.lt,
+    ast.LtE: operator.le,
+    ast.Gt: operator.gt,
+    ast.GtE: operator.ge,
+    ast.In: lambda a, b: a in b,
+    ast.NotIn: lambda a, b: a not in b,
 }
+_LITERAL_NAMES = {"true": True, "false": False, "none": None, "null": None}
 
 
 def _resolve_reference(ref_type: str, ref_path: str, context: ConditionContext) -> Any:
@@ -204,15 +205,68 @@ def _substitute_references(expr: str, context: ConditionContext) -> str:
         ref_type = match.group(1)
         ref_path = match.group(2)
         value = _resolve_reference(ref_type, ref_path, context)
-
-        # Quote strings for proper comparison
-        if isinstance(value, str):
-            # Escape quotes in the value
-            value = value.replace("'", "\\'")
-            return f"'{value}'"
-        return str(value)
+        return repr(value)
 
     return _REF_PATTERN.sub(replace, expr)
+
+
+def _evaluate_ast_node(node: ast.AST) -> Any:
+    """Safely evaluate the allowed AST subset for condition expressions."""
+    if isinstance(node, ast.Expression):
+        return _evaluate_ast_node(node.body)
+
+    if isinstance(node, ast.BoolOp):
+        values = [_evaluate_ast_node(value) for value in node.values]
+        if isinstance(node.op, ast.And):
+            return all(bool(value) for value in values)
+        if isinstance(node.op, ast.Or):
+            return any(bool(value) for value in values)
+        raise ValueError(f"Unsupported boolean operator: {type(node.op).__name__}")
+
+    if isinstance(node, ast.UnaryOp):
+        operand = _evaluate_ast_node(node.operand)
+        if isinstance(node.op, ast.Not):
+            return not bool(operand)
+        if isinstance(node.op, ast.UAdd):
+            return +operand
+        if isinstance(node.op, ast.USub):
+            return -operand
+        raise ValueError(f"Unsupported unary operator: {type(node.op).__name__}")
+
+    if isinstance(node, ast.Compare):
+        left = _evaluate_ast_node(node.left)
+        for op, comparator in zip(node.ops, node.comparators, strict=True):
+            right = _evaluate_ast_node(comparator)
+            op_func = _COMPARISON_OPERATORS.get(type(op))
+            if op_func is None:
+                raise ValueError(f"Unsupported comparison operator: {type(op).__name__}")
+            if not op_func(left, right):
+                return False
+            left = right
+        return True
+
+    if isinstance(node, ast.Constant):
+        return node.value
+
+    if isinstance(node, ast.Name):
+        return _LITERAL_NAMES.get(node.id.lower(), node.id)
+
+    if isinstance(node, ast.List):
+        return [_evaluate_ast_node(elt) for elt in node.elts]
+
+    if isinstance(node, ast.Tuple):
+        return tuple(_evaluate_ast_node(elt) for elt in node.elts)
+
+    if isinstance(node, ast.Set):
+        return {_evaluate_ast_node(elt) for elt in node.elts}
+
+    if isinstance(node, ast.Dict):
+        return {
+            _evaluate_ast_node(key): _evaluate_ast_node(value)
+            for key, value in zip(node.keys, node.values, strict=True)
+        }
+
+    raise ValueError(f"Unsupported expression element: {type(node).__name__}")
 
 
 def _evaluate_expression(expr: str, context: ConditionContext) -> bool:
@@ -234,19 +288,13 @@ def _evaluate_expression(expr: str, context: ConditionContext) -> bool:
 
     # Substitute references
     resolved = _substitute_references(expr, context)
+    try:
+        tree = ast.parse(resolved, mode="eval")
+    except SyntaxError as exc:
+        raise ValueError(f"Invalid condition expression: {expr}") from exc
 
-    # Try to find a comparison operator
-    for op_str, op_func in _OPERATORS.items():
-        if op_str in resolved:
-            parts = resolved.split(op_str, 1)
-            if len(parts) == 2:
-                left = _parse_value(parts[0].strip())
-                right = _parse_value(parts[1].strip())
-                return op_func(left, right)
-
-    # Try to evaluate as a simple truthy value
-    value = _parse_value(resolved)
-    return bool(value)
+    value = _evaluate_ast_node(tree)
+    return value if isinstance(value, bool) else bool(value)
 
 
 def _parse_value(val_str: str) -> Any:

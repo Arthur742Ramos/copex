@@ -322,7 +322,7 @@ STEP 4: Document the code"""
         )
 
         executor = PlanExecutor(mock_client)
-        result = await executor.execute_plan(plan)
+        await executor.execute_plan(plan)
 
         assert mock_client.send.call_count == 1  # Only step 2
 
@@ -398,6 +398,30 @@ STEP 4: Document the code"""
 
         assert result.steps[0].status == StepStatus.FAILED
         assert result.steps[1].status == StepStatus.COMPLETED
+
+    @pytest.mark.asyncio
+    async def test_execute_plan_enforces_step_dependencies(self, mock_client):
+        """Dependent steps should fail instead of running before prerequisites complete."""
+        mock_client.send.side_effect = [
+            Exception("Step 1 failed"),
+            MagicMock(content="should not run"),
+        ]
+
+        plan = Plan(
+            task="Test",
+            steps=[
+                PlanStep(number=1, description="Step 1"),
+                PlanStep(number=2, description="Step 2", depends_on=[1]),
+            ],
+        )
+
+        executor = PlanExecutor(mock_client)
+        result = await executor.execute_plan(plan, on_error=lambda step, e: True)
+
+        assert result.steps[0].status == StepStatus.FAILED
+        assert result.steps[1].status == StepStatus.FAILED
+        assert "depends on incomplete steps: 1 (failed)" in (result.steps[1].error or "")
+        assert mock_client.send.await_count == 1
 
     @pytest.mark.asyncio
     async def test_execute_plan_sets_timestamps(self, mock_client):
@@ -689,6 +713,24 @@ class TestRalphLoopIntegration:
         assert result.steps[0].result == "Done with step"
 
     @pytest.mark.asyncio
+    async def test_execute_plan_tracks_tokens_from_client_response(self, mock_client):
+        """Completed steps should record token usage from direct client responses."""
+        mock_client.send = AsyncMock(
+            return_value=MagicMock(content="Done with step", prompt_tokens=11, completion_tokens=7)
+        )
+
+        plan = Plan(
+            task="Test task",
+            steps=[PlanStep(number=1, description="Do something")],
+        )
+
+        executor = PlanExecutor(mock_client)
+        result = await executor.execute_plan(plan)
+
+        assert result.steps[0].tokens_used == 18
+        assert result.total_tokens == 18
+
+    @pytest.mark.asyncio
     async def test_ralph_max_iterations_configurable(self, mock_client, mock_ralph):
         """Should pass max_iterations to Ralph loop."""
         plan = Plan(
@@ -750,6 +792,30 @@ class TestRalphLoopIntegration:
         result = await executor.execute_plan(plan)
 
         assert result.steps[0].result == "Step completed"
+
+    @pytest.mark.asyncio
+    async def test_execute_plan_tracks_tokens_from_ralph_state(self, mock_client, mock_ralph):
+        """Completed steps should record token usage accumulated by Ralph."""
+        from copex.ralph import RalphState
+
+        mock_ralph.loop.return_value = RalphState(
+            prompt="test",
+            completed=True,
+            history=["Step complete"],
+            prompt_tokens=9,
+            completion_tokens=4,
+        )
+
+        plan = Plan(
+            task="Test",
+            steps=[PlanStep(number=1, description="Step 1")],
+        )
+
+        executor = PlanExecutor(mock_client, ralph=mock_ralph)
+        result = await executor.execute_plan(plan)
+
+        assert result.steps[0].tokens_used == 13
+        assert result.total_tokens == 13
 
     @pytest.mark.asyncio
     async def test_ralph_error_marks_step_failed(self, mock_client, mock_ralph):

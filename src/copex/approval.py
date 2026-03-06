@@ -997,7 +997,7 @@ class ApprovalWorkflow:
         except EOFError:
             return ApprovalAction.REJECT
         except ValueError:
-            return ApprovalAction.APPROVE
+            return ApprovalAction.REJECT
 
     def _coerce_policy_outcome(
         self, value: DecisionOutcome | ApprovalAction | bool | str

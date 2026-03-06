@@ -24,6 +24,13 @@ from typing import Any
 logger = logging.getLogger(__name__)
 
 
+def _coerce_token_count(value: Any) -> int:
+    """Normalize optional token counts to a safe integer."""
+    if isinstance(value, bool) or not isinstance(value, int):
+        return 0
+    return value
+
+
 @dataclass
 class RalphState:
     """State of a Ralph loop."""
@@ -36,6 +43,13 @@ class RalphState:
     completed: bool = False
     completion_reason: str | None = None
     history: list[str] = field(default_factory=list)
+    prompt_tokens: int = 0
+    completion_tokens: int = 0
+
+    @property
+    def tokens_used(self) -> int:
+        """Return total prompt + completion tokens observed during the loop."""
+        return self.prompt_tokens + self.completion_tokens
 
 
 @dataclass
@@ -152,6 +166,12 @@ class RalphWiggum:
                     response = await self.client.send(iteration_prompt)
                     content = response.content
                     self._state.history.append(content)
+                    self._state.prompt_tokens += _coerce_token_count(
+                        getattr(response, "prompt_tokens", None)
+                    )
+                    self._state.completion_tokens += _coerce_token_count(
+                        getattr(response, "completion_tokens", None)
+                    )
                     consecutive_errors = 0
 
                     # Check for completion promise

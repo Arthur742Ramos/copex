@@ -145,6 +145,37 @@ class TestEvaluateExpression:
     def test_env_comparison(self, ctx):
         assert _evaluate_expression("${env.NODE_ENV} == 'production'", ctx) is True
 
+    def test_logical_and(self, ctx):
+        assert (
+            _evaluate_expression(
+                "${step.0.status} == 'completed' and ${env.NODE_ENV} == 'production'",
+                ctx,
+            )
+            is True
+        )
+
+    def test_logical_or(self, ctx):
+        assert (
+            _evaluate_expression(
+                "${step.1.status} == 'completed' or ${env.NODE_ENV} == 'production'",
+                ctx,
+            )
+            is True
+        )
+
+    def test_logical_not(self, ctx):
+        assert _evaluate_expression("not (${step.1.status} == 'completed')", ctx) is True
+
+    def test_grouped_logical_expression(self, ctx):
+        assert (
+            _evaluate_expression(
+                "(${step.0.status} == 'completed' and 'tests' in ${step.0.output})"
+                " or ${var.count} < 0",
+                ctx,
+            )
+            is True
+        )
+
 
 # ── Value parsing ────────────────────────────────────────────────────
 
