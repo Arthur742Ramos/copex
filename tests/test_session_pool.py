@@ -8,6 +8,8 @@ from typing import Any
 
 import pytest
 
+from copex.client import Copex
+from copex.config import CopexConfig
 from copex.session_pool import SessionPool
 
 
@@ -356,3 +358,61 @@ class TestSessionPool:
 
         monkeypatch.setattr(asyncio, "sleep", _raise_cancelled)
         await pool._cleanup_loop()
+
+    @pytest.mark.asyncio
+    async def test_discarded_session_is_not_returned_to_pool(self) -> None:
+        pool = SessionPool(max_sessions=1)
+        client = _FakeClient()
+        config = _FakeConfig()
+
+        async with pool.acquire(client, config) as session:
+            first_id = session.session_id
+            discarded = await pool.discard(session, model=config.model.value)
+            assert discarded is True
+            assert session.destroyed is True
+
+        async with pool.acquire(client, config) as session:
+            assert session.session_id != first_id
+
+    @pytest.mark.asyncio
+    async def test_stop_releases_global_lock_before_destroy(self) -> None:
+        pool = SessionPool(max_sessions=1)
+        client = _FakeClient()
+        config = _FakeConfig()
+
+        async with pool.acquire(client, config) as session:
+            pass
+
+        destroy_started = asyncio.Event()
+        destroy_continue = asyncio.Event()
+
+        async def _blocking_destroy() -> None:
+            destroy_started.set()
+            await destroy_continue.wait()
+            session.destroyed = True
+
+        session.destroy = _blocking_destroy  # type: ignore[method-assign]
+
+        stop_task = asyncio.create_task(pool.stop())
+        await destroy_started.wait()
+
+        model_lock = await asyncio.wait_for(pool._get_model_lock("other-model"), timeout=0.2)
+        assert isinstance(model_lock, asyncio.Lock)
+
+        destroy_continue.set()
+        await stop_task
+
+    @pytest.mark.asyncio
+    async def test_release_external_session_destroys_replacement_session(self) -> None:
+        config = CopexConfig()
+        pool = SessionPool(max_sessions=1)
+        pooled_session = _FakeSession(session_id=1)
+        replacement_session = _FakeSession(session_id=2)
+        copex = Copex(config)
+        copex._session = replacement_session
+        copex._bind_pooled_session(pool, pooled_session, model=config.model.value)
+
+        await copex._release_external_session()
+
+        assert replacement_session.destroyed is True
+        assert copex._session is None

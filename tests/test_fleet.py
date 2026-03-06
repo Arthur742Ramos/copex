@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-from unittest.mock import AsyncMock, patch
+from unittest.mock import AsyncMock, Mock, patch
 
 import pytest
 
@@ -88,6 +88,8 @@ def _make_mock_copex(response: Response | None = None, error: Exception | None =
     mock = AsyncMock()
     mock.__aenter__ = AsyncMock(return_value=mock)
     mock.__aexit__ = AsyncMock(return_value=False)
+    mock._bind_pooled_session = Mock(return_value=None)
+    mock._release_external_session = AsyncMock(return_value=None)
     if error:
         mock.send = AsyncMock(side_effect=error)
     else:
@@ -279,6 +281,37 @@ class TestFleetCoordinator:
         err_msg = str(results[1].error)
         assert "Dependency failed" in err_msg
         assert "'a'" in err_msg
+
+    @pytest.mark.asyncio
+    async def test_pooled_tasks_release_external_sessions(self):
+        class _FakePooledSession:
+            async def destroy(self) -> None:
+                return None
+
+        class _FakePoolClient:
+            def __init__(self, *_args, **_kwargs) -> None:
+                self.stopped = False
+
+            async def start(self) -> None:
+                return None
+
+            async def stop(self) -> None:
+                self.stopped = True
+
+            async def create_session(self, _options):
+                return _FakePooledSession()
+
+        mock_copex = _make_mock_copex(Response(content="ok"))
+        coord = FleetCoordinator(CopexConfig())
+        tasks = [FleetTask(id="pooled", prompt="A")]
+
+        with patch("copex.fleet.CopilotClient", _FakePoolClient), \
+             patch("copex.fleet.Copex", return_value=mock_copex):
+            results = await coord.run(tasks, config=FleetConfig(max_concurrent=1))
+
+        assert results[0].success is True
+        mock_copex._bind_pooled_session.assert_called_once()
+        mock_copex._release_external_session.assert_awaited_once()
 
     @pytest.mark.asyncio
     async def test_on_status_callback(self):

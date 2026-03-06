@@ -1291,13 +1291,18 @@ class FleetCoordinator:
                                 copex._started = True
                                 copex._client = client
                                 copex._session = session
+                                copex._bind_pooled_session(
+                                    pool,
+                                    session,
+                                    model=task_config.model.value,
+                                )
                                 try:
                                     response = await asyncio.wait_for(
                                         copex.send(rendered_prompt),
                                         timeout=task_timeout,
                                     )
                                 finally:
-                                    copex._session = None
+                                    await copex._release_external_session()
                                     copex._client = None
                         else:
                             async with Copex(task_config) as copex:

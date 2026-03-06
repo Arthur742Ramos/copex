@@ -134,6 +134,9 @@ class Copex:
             context_budget=self.config.context_budget,
         )
         self._adaptive_retry = AdaptiveRetry()
+        self._bound_session_pool: SessionPool | None = None
+        self._bound_session_model: str | None = None
+        self._bound_session: Any = None
 
     async def start(self) -> None:
         """Start the Copilot client."""
@@ -184,6 +187,55 @@ class Copex:
 
     async def __aexit__(self, *args: Any) -> None:
         await self.stop()
+
+    def _bind_pooled_session(self, pool: SessionPool, session: Any, *, model: str) -> None:
+        self._bound_session_pool = pool
+        self._bound_session_model = model
+        self._bound_session = session
+
+    def _is_bound_pooled_session(self, session: Any | None) -> bool:
+        return (
+            session is not None
+            and self._bound_session_pool is not None
+            and self._bound_session is session
+        )
+
+    async def _destroy_replaced_session(self, session: Any) -> None:
+        if self._is_bound_pooled_session(session):
+            pool = self._bound_session_pool
+            model = self._bound_session_model
+            self._bound_session_pool = None
+            self._bound_session_model = None
+            self._bound_session = None
+            if pool is not None and model is not None:
+                discarded = await pool.discard(session, model=model)
+                if discarded:
+                    return
+        await session.destroy()
+
+    async def _release_external_session(self) -> None:
+        session = self._session
+        self._session = None
+        if session is None:
+            self._bound_session_pool = None
+            self._bound_session_model = None
+            self._bound_session = None
+            return
+
+        if self._is_bound_pooled_session(session):
+            self._bound_session_pool = None
+            self._bound_session_model = None
+            self._bound_session = None
+            return
+
+        try:
+            await self._destroy_replaced_session(session)
+        except Exception:  # Cleanup: best-effort external replacement teardown
+            logger.debug("Failed to destroy external replacement session", exc_info=True)
+        finally:
+            self._bound_session_pool = None
+            self._bound_session_model = None
+            self._bound_session = None
 
     def _should_retry(self, error: str | Exception) -> bool:
         """Check if error should trigger a retry using AdaptiveRetry categorization.
@@ -655,7 +707,7 @@ class Copex:
         if self._session:
             context = await self._get_session_context(self._session)
             try:
-                await self._session.destroy()
+                await self._destroy_replaced_session(self._session)
             except Exception:  # Cleanup: must not fail recovery
                 logger.debug("Failed to destroy session during recovery", exc_info=True)
             self._session = None
@@ -740,7 +792,7 @@ class Copex:
             # Create new session with fallback model
             if self._session:
                 try:
-                    await self._session.destroy()
+                    await self._destroy_replaced_session(self._session)
                 except Exception:  # Cleanup: best-effort session teardown
                     logger.debug("Failed to destroy session for model fallback", exc_info=True)
                 self._session = None
@@ -764,7 +816,7 @@ class Copex:
             )
         if prepared_context.reset_session and self._session:
             try:
-                await self._session.destroy()
+                await self._destroy_replaced_session(self._session)
             except Exception:
                 logger.debug("Failed to destroy session while reseeding context", exc_info=True)
             self._session = None

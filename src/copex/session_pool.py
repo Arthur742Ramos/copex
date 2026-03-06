@@ -119,16 +119,18 @@ class SessionPool:
                 pass
             self._cleanup_task = None
 
-        # Destroy all pooled sessions
+        sessions_to_destroy: list[Any] = []
         async with self._global_lock:
             for pool in self._pools.values():
-                for ps in pool:
-                    try:
-                        await ps.session.destroy()
-                    except Exception:  # Cleanup: best-effort session teardown
-                        logger.debug("Failed to destroy pooled session", exc_info=True)
+                sessions_to_destroy.extend(ps.session for ps in pool)
             self._pools.clear()
             self._model_locks.clear()
+
+        for session in sessions_to_destroy:
+            try:
+                await session.destroy()
+            except Exception:  # Cleanup: best-effort session teardown
+                logger.debug("Failed to destroy pooled session", exc_info=True)
 
     async def _cleanup_loop(self) -> None:
         """Periodically clean up idle sessions."""
@@ -190,6 +192,37 @@ class SessionPool:
                 if lru is None or ps.last_used < lru.last_used:
                     lru = ps
         return lru
+
+    async def discard(self, session: Any, *, model: str) -> bool:
+        """Remove a pooled session by identity and destroy it.
+
+        Returns ``True`` when the session was owned by the pool for ``model`` and
+        was removed. Returns ``False`` when the session was not pooled.
+        """
+        lock = await self._get_model_lock(model)
+        removed = False
+        async with lock:
+            pool = self._pools.get(model)
+            if pool is not None:
+                for pooled in list(pool):
+                    if pooled.session is session:
+                        pool.remove(pooled)
+                        removed = True
+                        break
+
+                if not pool:
+                    async with self._global_lock:
+                        if model in self._pools and not self._pools[model]:
+                            del self._pools[model]
+
+        if not removed:
+            return False
+
+        try:
+            await session.destroy()
+        except Exception:  # Cleanup: best-effort discarded session teardown
+            logger.debug("Failed to destroy discarded pooled session", exc_info=True)
+        return True
 
     @asynccontextmanager
     async def acquire(
@@ -283,8 +316,10 @@ class SessionPool:
             # Return session to pool or destroy if not pooled
             if pooled is not None:
                 async with lock:
-                    pooled.in_use = False
-                    pooled.last_used = time.monotonic()
+                    active_pool = self._pools.get(model)
+                    if active_pool is not None and pooled in active_pool:
+                        pooled.in_use = False
+                        pooled.last_used = time.monotonic()
             if not is_pooled and session is not None:
                 try:
                     await session.destroy()

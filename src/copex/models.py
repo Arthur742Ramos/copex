@@ -65,6 +65,7 @@ async def refresh_model_capabilities(*, timeout: float = 5.0) -> dict[str, bool]
     to the hardcoded ``_NO_REASONING_MODELS`` set and returns that mapping.
     """
     global _reasoning_support
+    client = None
     try:
         from copilot import CopilotClient  # type: ignore[import-untyped]
 
@@ -86,6 +87,12 @@ async def refresh_model_capabilities(*, timeout: float = 5.0) -> dict[str, bool]
     except Exception:
         log.debug("Backend model query failed; using hardcoded fallback", exc_info=True)
         return _fallback_reasoning_support()
+    finally:
+        if client is not None:
+            try:
+                await client.stop()
+            except Exception:
+                log.debug("Failed to stop Copilot client after model refresh", exc_info=True)
 
 
 def _fallback_reasoning_support() -> dict[str, bool]:
