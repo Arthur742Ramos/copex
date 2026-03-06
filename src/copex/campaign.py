@@ -30,6 +30,7 @@ from pathlib import Path
 from typing import Any
 
 from copex.fleet import FleetTask
+from copex.tools import write_text_file_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -133,7 +134,7 @@ def save_campaign_state(state: CampaignState, path: Path | None = None) -> Path:
     path = path or CAMPAIGN_STATE_FILE
     path.parent.mkdir(parents=True, exist_ok=True)
     state.updated_at = datetime.now(timezone.utc).isoformat()
-    path.write_text(json.dumps(state.to_dict(), indent=2), encoding="utf-8")
+    write_text_file_atomic(path, json.dumps(state.to_dict(), indent=2), encoding="utf-8")
     return path
 
 

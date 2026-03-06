@@ -14,6 +14,8 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any
 
+from copex.tools import write_text_file_atomic
+
 
 def _copex_dir() -> Path:
     return Path.home() / ".copex"
@@ -114,8 +116,7 @@ def _save_state(data: dict[str, Any]) -> None:
     """Write state dict to disk."""
     state_path = _state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(state_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    write_text_file_atomic(state_path, json.dumps(data, indent=2), encoding="utf-8")
 
 
 def save_start_commit(commit_hash: str) -> None:

@@ -16,6 +16,8 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any
 
+from copex.tools import write_text_file_atomic
+
 logger = logging.getLogger(__name__)
 
 
@@ -236,8 +238,11 @@ class CheckpointStore:
     def _save(self, checkpoint: Checkpoint) -> None:
         """Save checkpoint to disk."""
         path = self._checkpoint_path(checkpoint.checkpoint_id)
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(checkpoint.to_dict(), f, indent=2, ensure_ascii=False)
+        write_text_file_atomic(
+            path,
+            json.dumps(checkpoint.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
     def _load_checkpoint_file(self, path: Path, *, warn: bool) -> Checkpoint | None:
         try:

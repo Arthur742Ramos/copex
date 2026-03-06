@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 # ruff: noqa: F401
-
 from typing import TYPE_CHECKING, Any
 
 __version__ = "2.21.0"
@@ -18,13 +17,10 @@ from .approval import (
     AuditEntry,
     AuditLogger,
     ChangePreview,
-    ChangeStatistics,
     ChangeStats,
-    DiffPreview,
-    RiskAssessment,
     RiskAssessor,
 )
-from .backoff import AdaptiveRetry, BackoffStrategy, ErrorCategory, with_retry
+from .backoff import AdaptiveRetry, with_retry
 from .cache import StepCache, clear_global_cache, get_cache
 from .checkpoint import CheckpointedRalph, CheckpointStore
 from .cli_client import CopilotCLI
@@ -35,9 +31,7 @@ from .edits import (
     EditBatchResult,
     EditFormat,
     EditOperation,
-    UndoBatchInfo,
     UndoResult,
-    VerificationCheck,
     VerificationReport,
     apply_edit_operations,
     apply_edit_text,
@@ -194,15 +188,10 @@ __all__ = [
     "AuditEntry",
     "AuditLogger",
     "ChangePreview",
-    "ChangeStatistics",
     "ChangeStats",
-    "DiffPreview",
-    "RiskAssessment",
     "RiskAssessor",
     # Backoff / retry
     "AdaptiveRetry",
-    "BackoffStrategy",
-    "ErrorCategory",
     "with_retry",
     # Cache
     "StepCache",
@@ -219,9 +208,7 @@ __all__ = [
     "EditBatchResult",
     "EditFormat",
     "EditOperation",
-    "UndoBatchInfo",
     "UndoResult",
-    "VerificationCheck",
     "VerificationReport",
     "apply_edit_operations",
     "apply_edit_text",

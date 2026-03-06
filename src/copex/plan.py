@@ -21,6 +21,8 @@ from enum import Enum
 from pathlib import Path
 from typing import TYPE_CHECKING, Any
 
+from copex.tools import write_text_file_atomic
+
 if TYPE_CHECKING:
     from copex.agent import AgentClient
     from copex.ralph import RalphWiggum
@@ -281,7 +283,7 @@ class Plan:
 
     def save(self, path: Path) -> None:
         """Save plan to a file."""
-        path.write_text(self.to_json())
+        write_text_file_atomic(path, self.to_json(), encoding="utf-8")
 
     @classmethod
     def load(cls, path: Path) -> Plan:
@@ -365,7 +367,7 @@ class PlanState:
         if path is None:
             path = Path.cwd() / STATE_FILE_NAME
         self.last_updated = datetime.now().isoformat()
-        path.write_text(json.dumps(self.to_dict(), indent=2))
+        write_text_file_atomic(path, json.dumps(self.to_dict(), indent=2), encoding="utf-8")
         return path
 
     @classmethod

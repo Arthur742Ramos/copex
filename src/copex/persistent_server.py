@@ -12,6 +12,8 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
+from copex.tools import write_text_file_atomic
+
 
 @dataclass(frozen=True)
 class PersistentServerState:
@@ -155,7 +157,11 @@ class PersistentCopilotServer:
             "started_at": state.started_at,
             "cli_path": state.cli_path,
         }
-        self.state_file.write_text(json.dumps(payload, indent=2), encoding="utf-8")
+        write_text_file_atomic(
+            self.state_file,
+            json.dumps(payload, indent=2),
+            encoding="utf-8",
+        )
 
     def _delete_state_file(self) -> None:
         try:

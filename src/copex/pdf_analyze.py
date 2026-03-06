@@ -252,7 +252,8 @@ def _load_fitz() -> Any:
         return importlib.import_module("fitz")
     except ImportError as exc:
         raise PdfAnalyzeError(
-            "PyMuPDF is not installed. Install the 'pymupdf' dependency to use PDF tools."
+            "PyMuPDF is not installed. Install the 'pdf' extra or the 'pymupdf' package "
+            "to use PDF tools."
         ) from exc
 
 

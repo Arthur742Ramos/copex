@@ -6,6 +6,8 @@ from collections.abc import Iterator
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 
+from copex.tools import write_text_file_atomic
+
 
 @dataclass
 class HistoryEntry:
@@ -84,8 +86,11 @@ class PromptHistory:
         data = {"entries": [asdict(e) for e in self._entries[-self.max_entries :]]}
 
         try:
-            with open(self.history_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            write_text_file_atomic(
+                self.history_file,
+                json.dumps(data, indent=2),
+                encoding="utf-8",
+            )
         except OSError:
             pass  # Silently fail on write errors
 
@@ -231,8 +236,11 @@ class PromptStash:
         data = {"entries": [asdict(e) for e in self._entries]}
 
         try:
-            with open(self.stash_file, "w", encoding="utf-8") as f:
-                json.dump(data, f, indent=2)
+            write_text_file_atomic(
+                self.stash_file,
+                json.dumps(data, indent=2),
+                encoding="utf-8",
+            )
         except OSError:
             pass
 

@@ -18,6 +18,7 @@ from pathlib import Path
 from typing import Any
 
 from copex.models import Model, ReasoningEffort
+from copex.tools import write_text_file_atomic
 
 logger = logging.getLogger(__name__)
 
@@ -207,8 +208,11 @@ class SessionStore:
             metadata=metadata or {},
         )
 
-        with open(path, "w", encoding="utf-8") as f:
-            json.dump(data.to_dict(), f, indent=2, ensure_ascii=False)
+        write_text_file_atomic(
+            path,
+            json.dumps(data.to_dict(), indent=2, ensure_ascii=False),
+            encoding="utf-8",
+        )
 
         return path
 
