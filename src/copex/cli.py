@@ -462,6 +462,9 @@ def main(
     js_repl: Annotated[
         bool, typer.Option("--js-repl", help="Enable persistent JavaScript REPL tool (requires Node.js)")
     ] = False,
+    pdf_analyze: Annotated[
+        bool, typer.Option("--pdf-analyze", help="Enable PDF analysis tools (requires PyMuPDF)")
+    ] = False,
     force: Annotated[
         bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
     ] = False,
@@ -486,6 +489,7 @@ def main(
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
         js_repl: CLI argument or option value.
+        pdf_analyze: CLI argument or option value.
         force: CLI argument or option value.
 
     Returns:
@@ -526,6 +530,8 @@ def main(
                 config.reasoning_effort = normalized_effort
                 if js_repl:
                     config.js_repl = True
+                if pdf_analyze:
+                    config.pdf_analyze = True
                 _apply_approval_flags(
                     config,
                     auto_approve=auto_approve,
@@ -896,6 +902,9 @@ def chat(
     js_repl: Annotated[
         bool, typer.Option("--js-repl", help="Enable persistent JavaScript REPL tool (requires Node.js)")
     ] = False,
+    pdf_analyze: Annotated[
+        bool, typer.Option("--pdf-analyze", help="Enable PDF analysis tools (requires PyMuPDF)")
+    ] = False,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors.
 
@@ -926,6 +935,7 @@ def chat(
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
         js_repl: CLI argument or option value.
+        pdf_analyze: CLI argument or option value.
 
     Returns:
         None: Command result.
@@ -952,6 +962,8 @@ def chat(
         config.use_cli = True
     if js_repl:
         config.js_repl = True
+    if pdf_analyze:
+        config.pdf_analyze = True
     if ui_theme:
         config.ui_theme = ui_theme
     if ui_density:

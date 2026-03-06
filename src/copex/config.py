@@ -284,6 +284,10 @@ class CopexConfig(BaseModel):
         default=False,
         description="Enable persistent JavaScript REPL tool (requires Node.js)",
     )
+    pdf_analyze: bool = Field(
+        default=False,
+        description="Enable PDF analysis tools (requires PyMuPDF)",
+    )
 
     # UI options
     ui_theme: str = Field(
@@ -537,6 +541,15 @@ class CopexConfig(BaseModel):
                     ["js_repl", "js_repl_reset"], working_dir=Path(opts["working_directory"])
                 )
                 opts.setdefault("tools", []).extend(js_tools)
+        if self.pdf_analyze:
+            from copex.sdk_tools import build_domain_tools, register_pdf_tools
+
+            if register_pdf_tools():
+                pdf_tools = build_domain_tools(
+                    ["pdf_analyze", "pdf_screenshot"],
+                    working_dir=Path(opts["working_directory"]),
+                )
+                opts.setdefault("tools", []).extend(pdf_tools)
 
         # Permission handler — required by github-copilot-sdk >= 0.1.29.
         # Copex handles user-facing approval/deny at the tool-call level via

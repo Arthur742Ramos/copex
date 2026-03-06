@@ -22,6 +22,7 @@ A resilient Python wrapper for the GitHub Copilot SDK with automatic retry, Ralp
 - **Repo-awareness** — automatic discovery of project structure, README, pyproject.toml, and conventions
 - **MCP integration** — connect external Model Context Protocol servers
 - **Skill discovery** — auto-discover and load skill files from repo/user dirs
+- **PDF vision analysis** — render PDF pages for the active model to inspect text, charts, and figures
 - **Beautiful CLI** with Rich terminal output, themes, and streaming
 - **CLI client mode** — bypass the SDK to access all models via subprocess
 - **Metrics & cost tracking** — token usage, timing, success rates

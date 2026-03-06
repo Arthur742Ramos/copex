@@ -14,6 +14,12 @@ from typing import Any
 from copilot import Tool
 
 from copex.memory import ProjectMemory
+from copex.pdf_analyze import (
+    PdfAnalyzeError,
+    export_pdf_screenshots,
+    pdf_support_available,
+    prepare_pdf_analysis_payload,
+)
 
 DomainToolFactory = Callable[[Path], Tool]
 ProofCheckerHook = Callable[[dict[str, Any], Path], dict[str, Any] | str]
@@ -41,11 +47,14 @@ def _success_result(
     *,
     session_log: str | None = None,
     telemetry: dict[str, Any] | None = None,
+    binary_results: Sequence[dict[str, Any]] | None = None,
 ) -> dict[str, Any]:
     result: dict[str, Any] = {
         "resultType": "success",
         "textResultForLlm": _clip_text(text),
     }
+    if binary_results:
+        result["binaryResultsForLlm"] = list(binary_results)
     if session_log:
         result["sessionLog"] = _clip_text(session_log, limit=1_000)
     if telemetry:
@@ -373,6 +382,7 @@ def _build_proof_checker_tool(working_dir: Path) -> Tool:
 
 _js_repl_manager: Any | None = None
 _js_repl_logger = logging.getLogger(__name__)
+_pdf_tools_logger = logging.getLogger(__name__)
 
 
 def _get_js_repl_manager() -> Any:
@@ -469,6 +479,163 @@ def _build_js_repl_reset_tool(working_dir: Path) -> Tool:
         parameters={"type": "object", "properties": {}},
         handler=_handler,
     )
+
+
+def _build_pdf_analyze_tool(working_dir: Path) -> Tool:
+    async def _handler(invocation: dict[str, Any]) -> dict[str, Any]:
+        args = invocation.get("arguments") or {}
+        path = str(args.get("path", "")).strip()
+        prompt = str(args.get("prompt", "")).strip()
+        pages = args.get("pages")
+        page_spec = str(pages).strip() if pages is not None else None
+        if page_spec == "":
+            page_spec = None
+
+        if not path:
+            return _failure_result(
+                "Parameter 'path' is required for pdf_analyze.",
+                error="missing path",
+            )
+        if not prompt:
+            return _failure_result(
+                "Parameter 'prompt' is required for pdf_analyze.",
+                error="missing prompt",
+            )
+
+        try:
+            payload = prepare_pdf_analysis_payload(
+                path,
+                prompt=prompt,
+                pages=page_spec,
+                working_dir=working_dir,
+            )
+        except PdfAnalyzeError as exc:
+            return _failure_result(
+                f"Unable to prepare PDF analysis: {exc}",
+                error=str(exc),
+                session_log="pdf_analyze error",
+            )
+
+        return _success_result(
+            payload.prompt_text,
+            session_log=(
+                f"pdf_analyze ok path={payload.display_path} pages={len(payload.selected_pages)}"
+            ),
+            telemetry={
+                "path": payload.display_path,
+                "page_count": len(payload.selected_pages),
+                "total_image_bytes": payload.total_image_bytes,
+            },
+            binary_results=payload.binary_results,
+        )
+
+    return Tool(
+        name="pdf_analyze",
+        description=(
+            "Render PDF pages to images for the current model to inspect text, graphics, charts, "
+            "tables, and figures."
+        ),
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the PDF file to analyze",
+                },
+                "prompt": {
+                    "type": "string",
+                    "description": "Analysis request for the rendered PDF pages",
+                },
+                "pages": {
+                    "type": "string",
+                    "description": "Optional page selection like '1-3,5'; defaults to all pages",
+                },
+            },
+            "required": ["path", "prompt"],
+        },
+        handler=_handler,
+    )
+
+
+def _build_pdf_screenshot_tool(working_dir: Path) -> Tool:
+    async def _handler(invocation: dict[str, Any]) -> dict[str, Any]:
+        args = invocation.get("arguments") or {}
+        path = str(args.get("path", "")).strip()
+        pages = str(args.get("pages", "")).strip()
+        output_dir = str(args.get("output_dir", "")).strip()
+
+        if not path:
+            return _failure_result(
+                "Parameter 'path' is required for pdf_screenshot.",
+                error="missing path",
+            )
+        if not pages:
+            return _failure_result(
+                "Parameter 'pages' is required for pdf_screenshot.",
+                error="missing pages",
+            )
+        if not output_dir:
+            return _failure_result(
+                "Parameter 'output_dir' is required for pdf_screenshot.",
+                error="missing output_dir",
+            )
+
+        try:
+            written_paths = export_pdf_screenshots(
+                path,
+                pages=pages,
+                output_dir=output_dir,
+                working_dir=working_dir,
+            )
+        except PdfAnalyzeError as exc:
+            return _failure_result(
+                f"Unable to render PDF screenshots: {exc}",
+                error=str(exc),
+                session_log="pdf_screenshot error",
+            )
+
+        written_display = [str(output_path.relative_to(working_dir.resolve())) for output_path in written_paths]
+        return _success_result(
+            "Rendered PDF screenshots:\n" + "\n".join(f"- {path}" for path in written_display),
+            session_log=f"pdf_screenshot ok path={path} pages={len(written_paths)}",
+            telemetry={"path": path, "page_count": len(written_paths), "output_dir": output_dir},
+        )
+
+    return Tool(
+        name="pdf_screenshot",
+        description="Render selected PDF pages to PNG files inside the working directory.",
+        parameters={
+            "type": "object",
+            "properties": {
+                "path": {
+                    "type": "string",
+                    "description": "Path to the PDF file to render",
+                },
+                "pages": {
+                    "type": "string",
+                    "description": "Page selection like '1-3,5'",
+                },
+                "output_dir": {
+                    "type": "string",
+                    "description": "Directory where rendered PNG files should be written",
+                },
+            },
+            "required": ["path", "pages", "output_dir"],
+        },
+        handler=_handler,
+    )
+
+
+def register_pdf_tools() -> bool:
+    """Conditionally register PDF tools if PyMuPDF is available."""
+
+    if not pdf_support_available():
+        _pdf_tools_logger.warning("PyMuPDF not found; pdf tools will not be available")
+        return False
+
+    register_domain_tool("pdf_analyze", _build_pdf_analyze_tool, replace=True)
+    register_domain_tool("pdf_screenshot", _build_pdf_screenshot_tool, replace=True)
+    return True
 
 
 def register_js_repl_tools() -> bool:
