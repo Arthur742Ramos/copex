@@ -14,7 +14,7 @@ A resilient Python wrapper for the GitHub Copilot SDK with automatic retry, Ralp
 - **Session pooling** with LRU eviction and pre-warming
 - **Agent loop** — turn-based agent with tool calls and iterative reasoning
 - **Squad orchestration** — multi-agent team (Lead architect, Developer, Tester, Docs expert) with auto-discovery of project context and parallel execution
-- **Squad as default** — `copex chat "prompt"` now runs squad mode by default; use `--no-squad` for single-agent chat
+- **Squad as default for root prompts** — `copex -p "prompt"` runs squad mode by default; use `--no-squad` to force single-agent mode, or call `copex chat` directly
 - **Ralph Wiggum loops** — iterative AI development via repeated prompts
 - **Fleet mode** — run multiple tasks in parallel with dependency ordering
 - **Council mode** — multi-model deliberation with a chair model
@@ -39,6 +39,17 @@ Or with [pipx](https://pipx.pypa.io/) for isolated CLI usage:
 pipx install copex
 ```
 
+Optional extras:
+
+```bash
+pip install "copex[pdf]"            # Enable --pdf-analyze
+pip install "copex[repo-map]"       # Enhanced repository mapping
+pip install "copex[scrape]"         # Built-in Scrapling MCP integration
+pip install -e ".[dev]"             # Test/lint tooling for contributors
+```
+
+Extras can be combined, for example: `pip install "copex[pdf,repo-map]"`.
+
 **Prerequisite:** The GitHub Copilot CLI must be installed and authenticated:
 
 ```bash
@@ -51,14 +62,20 @@ copilot login
 ### CLI
 
 ```bash
-# One-shot prompt
+# One-shot single-agent chat
 copex chat "Explain the builder pattern in Python"
+
+# One-shot squad run from the root command
+copex -p "Build a REST API with auth and tests"
 
 # Interactive session
 copex interactive
 
 # Pipe from stdin
 echo "What is a monad?" | copex chat --stdin
+
+# Root prompt, but disable squad and force single-agent mode
+copex -p "Explain quicksort" --no-squad
 
 # Choose model and reasoning
 copex chat "Optimize this SQL" -m gpt-5.2-codex -r xhigh
@@ -98,8 +115,8 @@ async with Copex(config) as client:
 Squad is Copex's built-in multi-agent team that auto-decomposes tasks and executes them in parallel:
 
 ```bash
-# Default for `copex chat` — orchestrate with Lead, Developer, Tester
-copex chat "Build a REST API with auth and tests"
+# Root prompt path — orchestrate with Lead, Developer, Tester
+copex -p "Build a REST API with auth and tests"
 
 # Or explicitly:
 copex squad "Build a REST API with CRUD operations"
@@ -124,10 +141,11 @@ async with SquadCoordinator(config) as squad:
     print(result.final_content)
 ```
 
-Use `--no-squad` with `copex chat` to use single-agent mode instead:
+Use `copex chat` for direct single-agent mode, or keep the root prompt flow and add `--no-squad`:
 
 ```bash
-copex chat "Explain quicksort" --no-squad
+copex chat "Explain quicksort"
+copex -p "Explain quicksort" --no-squad
 ```
 
 ## Agent Loops
@@ -171,7 +189,7 @@ streaming = true
 use_cli = false
 timeout = 300.0
 auto_continue = true
-ui_theme = "default"       # default, midnight, mono, sunset
+ui_theme = "default"       # default, midnight, mono, sunset, tokyo
 ui_density = "extended"    # compact, extended
 
 [retry]
@@ -202,27 +220,36 @@ skills = ["code-review"]
 
 ## CLI Commands
 
+The root command also accepts `-p/--prompt` to run a prompt without a subcommand; that path uses squad by default and honors `--no-squad`.
+
 | Command | Description |
 |---|---|
-| `copex chat` | Send a prompt (squad mode by default, use `--no-squad` for single-agent) |
-| `copex agent` | Run a single-agent loop with tool calls and JSON Lines output |
-| `copex squad` | Run a multi-agent team: Lead architect, Developer, Tester orchestrated via Fleet |
-| `copex interactive` | Start an interactive chat session |
-| `copex tui` | Launch the full TUI interface |
-| `copex ralph` | Start a Ralph Wiggum iterative loop |
 | `copex plan` | Generate and execute step-by-step plans |
 | `copex fleet` | Run multiple tasks in parallel |
-| `copex council` | Multi-model deliberation on a task |
+| `copex council` | Run a council workflow: Codex + Gemini + Opus, with Opus as chair |
+| `copex squad` | Run a squad or manage the repo `.squad` file |
+| `copex chat` | Send a prompt through the direct single-agent chat command |
 | `copex models` | List available models |
-| `copex skills list` | List discovered skills |
-| `copex skills show` | Show skill content |
-| `copex render` | Render a JSONL session log |
-| `copex status` | Show auth and CLI status |
-| `copex config` | Show/edit configuration |
-| `copex init` | Generate a starter config file |
-| `copex login` | Authenticate with GitHub Copilot |
-| `copex logout` | Remove authentication |
+| `copex render` | Render JSONL session logs with readable formatting |
+| `copex tui` | Start the Copex TUI |
+| `copex init` | Create a default config file |
+| `copex interactive` | Start an interactive chat session |
+| `copex ralph` | Start a Ralph Wiggum iterative loop |
+| `copex login` | Login to GitHub |
+| `copex logout` | Logout from GitHub |
+| `copex status` | Check Copilot CLI and GitHub authentication status |
+| `copex config` | Validate and display the current Copex configuration |
+| `copex map` | Display the repository map or task-relevant files |
+| `copex campaign` | Run a campaign: discover targets, batch them, and run fleet waves |
+| `copex agent` | Run an agent loop: prompt -> tool calls -> respond -> repeat |
+| `copex edit` | Apply structured edits (unified diff, SEARCH/REPLACE, whole-file blocks) |
+| `copex undo` | Undo structured edits from the latest (or listed) undo batch |
 | `copex completions` | Generate shell completion scripts |
+| `copex stats` | Show statistics for recent Copex runs |
+| `copex audit` | Show approval audit log entries |
+| `copex diff` | Show what changed since the last Copex run started |
+| `copex memory` | Manage persistent project memory (`show`, `add`, `clear`, `import`) |
+| `copex skills` | Manage and discover skills (`list`, `show`) |
 
 ### Common flags
 
@@ -242,21 +269,25 @@ Copex supports all models available through the Copilot SDK:
 
 | Model | Reasoning | xhigh |
 |---|---|---|
+| `gpt-5.4` | ✅ | ✅ |
+| `gpt-5.3-codex` | ✅ | ✅ |
 | `gpt-5.2-codex` | ✅ | ✅ |
-| `gpt-5.2` | ✅ | ✅ |
 | `gpt-5.1-codex` | ✅ | ❌ |
 | `gpt-5.1-codex-max` | ✅ | ❌ |
 | `gpt-5.1-codex-mini` | ✅ | ❌ |
+| `gpt-5.2` | ✅ | ✅ |
 | `gpt-5.1` | ✅ | ❌ |
 | `gpt-5` | ✅ | ❌ |
 | `gpt-5-mini` | ✅ | ❌ |
 | `gpt-4.1` | ❌ | ❌ |
-| `claude-opus-4.6` | ✅ | ❌ |
-| `claude-opus-4.6-fast` | ✅ | ❌ |
-| `claude-opus-4.5` | ❌ | ❌ |
 | `claude-sonnet-4.5` | ❌ | ❌ |
 | `claude-sonnet-4` | ❌ | ❌ |
 | `claude-haiku-4.5` | ❌ | ❌ |
+| `claude-opus-4.5` | ❌ | ❌ |
+| `claude-opus-4.6` | ✅ | ❌ |
+| `claude-opus-4.6-fast` | ✅ | ❌ |
+| `claude-opus-4.6-1m` | ✅ | ❌ |
+| `claude-sonnet-4.6` | ✅ | ❌ |
 | `gemini-3-pro-preview` | ❌ | ❌ |
 
 Copex also discovers models dynamically from `copilot --help` at runtime, so newly added models work automatically.
@@ -274,10 +305,10 @@ Five levels control how much thinking the model does:
 | `none` | No extended reasoning |
 | `low` | Minimal reasoning |
 | `medium` | Balanced |
-| `high` | Thorough reasoning (default) |
+| `high` | Thorough reasoning (default for CLI commands) |
 | `xhigh` | Maximum reasoning (GPT-5.2+ only) |
 
-If you request an unsupported level, Copex automatically downgrades and warns you.
+If you request an unsupported level, Copex automatically downgrades and warns you. The CLI defaults `--reasoning` to `high`; config and API values are still normalized per model capability.
 
 ## Advanced Features
 
@@ -422,6 +453,9 @@ client = make_client(config)  # Returns CopilotCLI instead of Copex
 git clone https://github.com/Arthur742Ramos/copex.git
 cd copex
 pip install -e ".[dev]"
+
+# Include optional feature extras when working on those paths
+pip install -e ".[dev,pdf,repo-map,scrape]"
 
 # Run tests
 python -m pytest tests/ -v
