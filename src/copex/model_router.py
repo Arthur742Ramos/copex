@@ -7,6 +7,7 @@ import re
 import threading
 import time
 from collections import OrderedDict
+from concurrent.futures import Future
 from dataclasses import dataclass
 from enum import Enum
 from typing import Any
@@ -92,19 +93,12 @@ def detect_task_type(
 
     classified: PromptTaskType | None = None
     try:
-        running_loop = asyncio.get_running_loop()
-    except RuntimeError:
-        running_loop = None
-    if running_loop is None or not running_loop.is_running():
-        try:
-            classified = asyncio.run(
-                asyncio.wait_for(
-                    _classify_task_type_with_llm(text, client_options=client_options),
-                    timeout=_TASK_TYPE_CLASSIFIER_TIMEOUT_SECONDS,
-                )
-            )
-        except Exception:
-            classified = None
+        classified = _run_coroutine_sync(
+            _classify_task_type_with_llm(text, client_options=client_options),
+            timeout=_TASK_TYPE_CLASSIFIER_TIMEOUT_SECONDS,
+        )
+    except Exception:
+        classified = None
 
     task_type = classified or _detect_task_type_with_regex(text)
     with _task_type_cache_lock:
@@ -112,6 +106,36 @@ def detect_task_type(
             _task_type_cache.popitem(last=False)
         _task_type_cache[text] = task_type
     return task_type
+
+
+def _run_coroutine_sync(coro: Any, *, timeout: float | None = None) -> Any:
+    """Run an async classifier from sync code, even when already inside an event loop."""
+    try:
+        running_loop = asyncio.get_running_loop()
+    except RuntimeError:
+        running_loop = None
+
+    if not running_loop or not running_loop.is_running():
+        if timeout is None:
+            return asyncio.run(coro)
+        return asyncio.run(asyncio.wait_for(coro, timeout=timeout))
+
+    result: Future[Any] = Future()
+
+    def _runner() -> None:
+        try:
+            if timeout is None:
+                resolved = asyncio.run(coro)
+            else:
+                resolved = asyncio.run(asyncio.wait_for(coro, timeout=timeout))
+        except BaseException as exc:
+            result.set_exception(exc)
+        else:
+            result.set_result(resolved)
+
+    thread = threading.Thread(target=_runner, daemon=True)
+    thread.start()
+    return result.result(timeout=timeout + 0.5 if timeout is not None else None)
 
 
 def _detect_task_type_with_regex(prompt: str) -> PromptTaskType:

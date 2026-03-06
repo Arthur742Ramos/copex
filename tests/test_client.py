@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import asyncio
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, patch
 
@@ -169,6 +170,59 @@ class TestClientSendAndStream:
         assert tool_calls[0].tool_args == {"path": "a.txt"}
         assert tool_calls[1].tool_name == "run_shell"
         assert tool_calls[1].tool_args == {"raw": "ls -la"}
+
+    def test_send_offloads_approval_workflow_to_executor(self, monkeypatch):
+        created: list[object] = []
+        main_thread = threading.get_ident()
+
+        class FakeApprovalWorkflow:
+            def __init__(self, *args, **kwargs):
+                self.review_thread = None
+                self.apply_thread = None
+                self.log_thread = None
+                created.append(self)
+
+            def review_tool_call(self, tool_name, tool_args, *, cwd=None):
+                self.review_thread = threading.get_ident()
+                return ["reviewed"]
+
+            def apply_post_tool_decisions(self, reviewed):
+                self.apply_thread = threading.get_ident()
+                return ["applied"]
+
+            def log_execution_event(self, reviewed, *, success, result=None, error=None):
+                self.log_thread = threading.get_ident()
+
+        monkeypatch.setattr("copex.approval.ApprovalWorkflow", FakeApprovalWorkflow)
+
+        events = [[
+            build_event(
+                EventType.TOOL_CALL.value,
+                name="write_file",
+                arguments='{"path":"a.txt","content":"updated"}',
+            ),
+            build_event(
+                EventType.TOOL_EXECUTION_COMPLETE.value,
+                tool_name="write_file",
+                success=True,
+                result=SimpleNamespace(content="ok"),
+            ),
+            build_event(EventType.ASSISTANT_MESSAGE.value, content="done"),
+            build_event(EventType.SESSION_IDLE.value),
+        ]]
+        session = FakeSession(events)
+        client = Copex(CopexConfig(approval_mode="manual"))
+        client._started = True
+        client._client = SimpleNamespace(start=AsyncMock(), stop=AsyncMock())
+        client._session = session
+
+        response = run(client.send("prompt"))
+
+        assert response.content == "done"
+        workflow = created[0]
+        assert workflow.review_thread is not None and workflow.review_thread != main_thread
+        assert workflow.apply_thread is not None and workflow.apply_thread != main_thread
+        assert workflow.log_thread is not None and workflow.log_thread != main_thread
 
 
 class TestClientRetryAndErrors:

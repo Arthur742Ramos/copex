@@ -81,6 +81,23 @@ def test_detect_task_type_uses_llm_for_nuanced_coding_prompt(monkeypatch) -> Non
     assert task_type == PromptTaskType.CODING
 
 
+@pytest.mark.asyncio
+async def test_detect_task_type_uses_llm_inside_running_loop(monkeypatch) -> None:
+    async def _classify(_prompt: str, client_options=None):
+        return PromptTaskType.CODING
+
+    monkeypatch.setattr(model_router, "_classify_task_type_with_llm", _classify)
+    monkeypatch.setattr(
+        model_router,
+        "_detect_task_type_with_regex",
+        lambda _prompt: PromptTaskType.GENERAL,
+    )
+
+    assert detect_task_type("Make this code more elegant while preserving behavior.") == (
+        PromptTaskType.CODING
+    )
+
+
 def test_detect_task_type_falls_back_to_regex_on_llm_failure(monkeypatch) -> None:
     async def _fail(_prompt: str, client_options=None):
         raise asyncio.TimeoutError()

@@ -3,13 +3,12 @@
 from __future__ import annotations
 
 import asyncio
-import json
 import logging
 import random
 import threading
 import time
 import warnings
-from collections.abc import AsyncIterator, Callable
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from dataclasses import dataclass, field
 from typing import Any
@@ -34,9 +33,16 @@ from copex.exceptions import AllModelsUnavailable, CircuitBreakerOpen, CopexTime
 from copex.memory import auto_capture_memory
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
-from copex.sdk_patch import patch_copilot_client  # noqa: F401 - side-effect import, patches CopilotClient
+from copex.sdk_patch import (
+    patch_copilot_client,  # noqa: F401 - side-effect import, patches CopilotClient
+)
 from copex.session_pool import SessionPool  # noqa: F401 - re-exported for backward compatibility
-from copex.streaming import ChunkBatcher, Response, StreamChunk, StreamingMetrics  # noqa: F401 - re-exported
+from copex.streaming import (  # noqa: F401 - re-exported
+    ChunkBatcher,
+    Response,
+    StreamChunk,
+    StreamingMetrics,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -981,7 +987,9 @@ class Copex:
         state.last_activity = loop.time()
         state.streaming_metrics.start()
         approval_workflow = None
-        pending_approvals: dict[str, list[Any]] = {}
+        pending_approvals: dict[str, asyncio.Task[list[Any]]] = {}
+        approval_tasks: set[asyncio.Task[Any]] = set()
+        approval_chain: asyncio.Future[Any] | None = None
         pending_counter = 0
         if bool(self.config.audit) or self.config.approval_mode != "auto-approve":
             from copex.approval import ApprovalWorkflow
@@ -1000,7 +1008,92 @@ class Copex:
             pending_counter += 1
             return f"{tool_name}:{pending_counter}"
 
-        def _pop_pending_approval(tool_id: str | None, tool_name: str) -> list[Any] | None:
+        def _track_approval_task(task: asyncio.Task[Any]) -> asyncio.Task[Any]:
+            approval_tasks.add(task)
+
+            def _on_done(done: asyncio.Task[Any]) -> None:
+                approval_tasks.discard(done)
+                try:
+                    done.result()
+                except asyncio.CancelledError:
+                    return
+                except Exception as exc:
+                    logger.warning("Approval operation failed: %s", exc, exc_info=True)
+                    state.error_holder.append(exc)
+                    state.done.set()
+
+            task.add_done_callback(_on_done)
+            return task
+
+        def _schedule_approval_operation(
+            operation: Callable[[], Awaitable[Any]],
+        ) -> asyncio.Task[Any]:
+            nonlocal approval_chain
+            previous = approval_chain
+
+            async def _run() -> Any:
+                if previous is not None:
+                    try:
+                        await previous
+                    except Exception:
+                        pass
+                return await operation()
+
+            task = _track_approval_task(loop.create_task(_run()))
+            approval_chain = task
+            return task
+
+        async def _review_tool_call_async(
+            tool_name: str,
+            tool_args: dict[str, Any],
+        ) -> list[Any]:
+            if approval_workflow is None:
+                return []
+            return await loop.run_in_executor(
+                None,
+                lambda: approval_workflow.review_tool_call(
+                    tool_name,
+                    tool_args,
+                    cwd=approval_cwd,
+                ),
+            )
+
+        async def _apply_tool_decisions_async(
+            review_task: asyncio.Task[list[Any]],
+            event_data: Any,
+        ) -> None:
+            if approval_workflow is None:
+                return
+
+            reviewed = await review_task
+            if not reviewed:
+                return
+
+            result_obj = getattr(event_data, "result", None)
+            result_text = ""
+            if result_obj is not None:
+                result_text = getattr(result_obj, "content", "") or str(result_obj)
+            success_raw = getattr(event_data, "success", None)
+            success = success_raw is not False
+            event_error = None if success else (result_text or "Tool execution failed")
+            log_execution_event = getattr(approval_workflow, "log_execution_event", None)
+
+            def _apply_and_log() -> None:
+                approval_workflow.apply_post_tool_decisions(reviewed)
+                if callable(log_execution_event):
+                    log_execution_event(
+                        reviewed,
+                        success=success,
+                        result=result_text if success else None,
+                        error=event_error,
+                    )
+
+            await loop.run_in_executor(None, _apply_and_log)
+
+        def _pop_pending_approval(
+            tool_id: str | None,
+            tool_name: str,
+        ) -> asyncio.Task[list[Any]] | None:
             if tool_id:
                 key = str(tool_id)
                 if key in pending_approvals:
@@ -1031,15 +1124,12 @@ class Copex:
             if not isinstance(tool_args, dict):
                 return
 
-            reviewed = approval_workflow.review_tool_call(
-                str(tool_name),
-                tool_args,
-                cwd=approval_cwd,
+            review_task = _schedule_approval_operation(
+                lambda: _review_tool_call_async(str(tool_name), tool_args),
             )
-            if reviewed:
-                pending_approvals[_approval_key(str(tool_id) if tool_id else None, str(tool_name))] = (
-                    reviewed
-                )
+            pending_approvals[_approval_key(str(tool_id) if tool_id else None, str(tool_name))] = (
+                review_task
+            )
 
         def _handle_tool_execution_complete_with_approval(
             event: Any,
@@ -1057,22 +1147,9 @@ class Copex:
                 str(tool_name) if tool_name else "unknown",
             )
             if reviewed:
-                approval_workflow.apply_post_tool_decisions(reviewed)
-                log_execution_event = getattr(approval_workflow, "log_execution_event", None)
-                if callable(log_execution_event):
-                    result_obj = getattr(event.data, "result", None)
-                    result_text = ""
-                    if result_obj is not None:
-                        result_text = getattr(result_obj, "content", "") or str(result_obj)
-                    success_raw = getattr(event.data, "success", None)
-                    success = success_raw is not False
-                    event_error = None if success else (result_text or "Tool execution failed")
-                    log_execution_event(
-                        reviewed,
-                        success=success,
-                        result=result_text if success else None,
-                        error=event_error,
-                    )
+                _schedule_approval_operation(
+                    lambda: _apply_tool_decisions_async(reviewed, event.data)
+                )
 
         def _handle_usage(event: Any, st: _SendState, _oc: Any) -> None:
             data = event.data
@@ -1183,6 +1260,9 @@ class Copex:
                 unsubscribe()
             except Exception:  # Cleanup: unsubscribe is best-effort
                 logger.debug("Failed to unsubscribe event handler", exc_info=True)
+
+        if approval_tasks:
+            await asyncio.gather(*list(approval_tasks), return_exceptions=True)
 
         # Preserve history fallback only for non-streaming sends. In streaming mode
         # history can point at the prior turn and reintroduce stale content.

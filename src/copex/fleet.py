@@ -2019,6 +2019,12 @@ class Fleet:
     ) -> AsyncIterator[FleetEvent]:
         """Execute all tasks with streaming progress events.
 
+        Note:
+            ``run()`` delegates to ``FleetCoordinator`` for compact batch execution,
+            while ``run_streaming()`` keeps an inline scheduler so it can emit
+            dependency transitions and streaming deltas as they happen. Keep retry,
+            dependency, and cancellation changes aligned across both paths.
+
         This is an async generator that yields FleetEvent objects as
         tasks progress through their lifecycle.
 
