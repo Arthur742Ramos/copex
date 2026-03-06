@@ -20,6 +20,7 @@ from copex.pdf_analyze import (
     pdf_support_available,
     prepare_pdf_analysis_payload,
 )
+from copex.security import SecurityError, sanitize_command, validate_path
 
 DomainToolFactory = Callable[[Path], Tool]
 ProofCheckerHook = Callable[[dict[str, Any], Path], dict[str, Any] | str]
@@ -28,6 +29,11 @@ TestRunnerHook = Callable[[dict[str, Any], Path], dict[str, Any] | str]
 _MAX_TEXT_RESULT_CHARS = 8_000
 _MAX_MEMORY_ENTRY_CHARS = 400
 _DEFAULT_TEST_TIMEOUT_SECONDS = 300.0
+_ALLOWED_PYTHON_TEST_MODULES = frozenset({"pytest", "unittest"})
+_ALLOWED_DIRECT_TEST_RUNNERS = frozenset({"pytest", "tox", "nox"})
+_ALLOWED_SUBCOMMAND_TEST_RUNNERS = frozenset(
+    {"bun", "cargo", "dotnet", "go", "make", "npm", "pnpm", "uv", "yarn"}
+)
 
 _proof_checker_hook: ProofCheckerHook | None = None
 _test_runner_hook: TestRunnerHook | None = None
@@ -157,6 +163,93 @@ async def _run_test_command(
     return int(process.returncode or 0), stdout, stderr
 
 
+def _is_test_name(value: str) -> bool:
+    normalized = value.strip().lower()
+    return normalized == "test" or normalized.startswith("test:")
+
+
+def _validate_test_command(argv: list[str]) -> list[str]:
+    sanitized = sanitize_command(argv)
+    program = Path(sanitized[0]).name.lower()
+    tail = sanitized[1:]
+
+    if program in _ALLOWED_DIRECT_TEST_RUNNERS:
+        return sanitized
+
+    if program in {"python", "python3"}:
+        if len(tail) >= 2 and tail[0] == "-m" and tail[1].lower() in _ALLOWED_PYTHON_TEST_MODULES:
+            return sanitized
+        raise SecurityError(
+            "Only python -m pytest/unittest test commands are allowed.",
+            violation_type="invalid_test_command",
+            context={"command": " ".join(sanitized[:4])},
+        )
+
+    if program == "uv":
+        if tail and tail[0] == "run":
+            _validate_test_command(tail[1:])
+            return sanitized
+        raise SecurityError(
+            "Only uv run <test command> invocations are allowed.",
+            violation_type="invalid_test_command",
+            context={"command": " ".join(sanitized[:4])},
+        )
+
+    if program not in _ALLOWED_SUBCOMMAND_TEST_RUNNERS:
+        raise SecurityError(
+            "Only supported project test commands are allowed.",
+            violation_type="invalid_test_command",
+            context={"command": " ".join(sanitized[:4])},
+        )
+
+    if not tail:
+        raise SecurityError(
+            "Test command is missing a test subcommand.",
+            violation_type="invalid_test_command",
+            context={"command": program},
+        )
+
+    head = tail[0].lower()
+    if program in {"npm", "pnpm"}:
+        if _is_test_name(head):
+            return sanitized
+        if len(tail) >= 2 and head == "run" and _is_test_name(tail[1]):
+            return sanitized
+        raise SecurityError(
+            "Only npm/pnpm test scripts are allowed.",
+            violation_type="invalid_test_command",
+            context={"command": " ".join(sanitized[:4])},
+        )
+
+    if program == "yarn":
+        if _is_test_name(head):
+            return sanitized
+        if len(tail) >= 2 and head == "run" and _is_test_name(tail[1]):
+            return sanitized
+        raise SecurityError(
+            "Only yarn test scripts are allowed.",
+            violation_type="invalid_test_command",
+            context={"command": " ".join(sanitized[:4])},
+        )
+
+    if program == "make":
+        if _is_test_name(head):
+            return sanitized
+        raise SecurityError(
+            "Only make test targets are allowed.",
+            violation_type="invalid_test_command",
+            context={"command": " ".join(sanitized[:4])},
+        )
+
+    if head != "test":
+        raise SecurityError(
+            "Only test subcommands are allowed for this runner.",
+            violation_type="invalid_test_command",
+            context={"command": " ".join(sanitized[:4])},
+        )
+    return sanitized
+
+
 def _build_memory_search_tool(working_dir: Path) -> Tool:
     async def _handler(invocation: dict[str, Any]) -> dict[str, Any]:
         args = invocation.get("arguments") or {}
@@ -250,15 +343,18 @@ def _build_test_runner_tool(working_dir: Path) -> Tool:
         if "cwd" in args and args["cwd"]:
             candidate = Path(str(args["cwd"]))
             if not candidate.is_absolute():
-                candidate = (working_dir / candidate).resolve()
-            else:
-                candidate = candidate.resolve()
-            if not str(candidate).startswith(str(working_dir.resolve())):
+                candidate = working_dir / candidate
+            try:
+                command_cwd = validate_path(
+                    candidate,
+                    base_dir=working_dir.resolve(),
+                    allow_absolute=True,
+                )
+            except SecurityError as exc:
                 return _failure_result(
                     "test_runner cwd must stay within the configured working directory.",
-                    error="cwd outside working directory",
+                    error=str(exc),
                 )
-            command_cwd = candidate
 
         try:
             argv = shlex.split(command)
@@ -266,6 +362,15 @@ def _build_test_runner_tool(working_dir: Path) -> Tool:
             return _failure_result("Invalid test command syntax.", error=str(exc))
         if not argv:
             return _failure_result("Parameter 'command' cannot be empty.", error="empty argv")
+
+        try:
+            argv = _validate_test_command(argv)
+        except SecurityError as exc:
+            return _failure_result(
+                "Only supported project test commands are allowed.",
+                error=str(exc),
+                session_log=f"test_runner rejected command={command!r}",
+            )
 
         try:
             return_code, stdout, stderr = await _run_test_command(
@@ -314,7 +419,10 @@ def _build_test_runner_tool(working_dir: Path) -> Tool:
             "properties": {
                 "command": {
                     "type": "string",
-                    "description": "Command to execute (default: 'pytest -q')",
+                    "description": (
+                        "Supported test command to execute "
+                        "(examples: 'pytest -q', 'python -m pytest', 'uv run pytest -q')"
+                    ),
                 },
                 "cwd": {
                     "type": "string",

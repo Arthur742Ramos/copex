@@ -96,9 +96,53 @@ def test_stop_removes_state_file(tmp_path: Path, monkeypatch) -> None:
         cli_path="/usr/bin/copilot",
         state_file=state_file,
     )
+    monkeypatch.setattr(manager, "_pid_matches_state", lambda _state: True)
     monkeypatch.setattr(manager, "_terminate_pid", lambda _pid: True)
 
     stopped = manager.stop()
 
     assert stopped is True
     assert not state_file.exists()
+
+
+def test_stop_refuses_to_kill_mismatched_pid_identity(tmp_path: Path, monkeypatch) -> None:
+    state_file = tmp_path / "server.json"
+    _write_state(state_file, pid=3333)
+    manager = PersistentCopilotServer(
+        cli_path="/usr/bin/copilot",
+        state_file=state_file,
+    )
+    monkeypatch.setattr(manager, "_pid_matches_state", lambda _state: False)
+    monkeypatch.setattr(
+        manager,
+        "_terminate_pid",
+        lambda _pid: (_ for _ in ()).throw(AssertionError("unexpected terminate")),
+    )
+
+    stopped = manager.stop()
+
+    assert stopped is False
+    assert not state_file.exists()
+
+
+def test_state_is_unhealthy_when_pid_identity_mismatches(tmp_path: Path, monkeypatch) -> None:
+    state_file = tmp_path / "server.json"
+    state = PersistentServerState(
+        pid=3333,
+        host="127.0.0.1",
+        port=8765,
+        started_at="2026-03-04T00:00:00Z",
+        cli_path="/usr/bin/copilot",
+    )
+    manager = PersistentCopilotServer(
+        cli_path="/usr/bin/copilot",
+        state_file=state_file,
+    )
+    monkeypatch.setattr(manager, "_pid_matches_state", lambda _state: False)
+    monkeypatch.setattr(
+        manager,
+        "_is_server_healthy",
+        lambda _host, _port: (_ for _ in ()).throw(AssertionError("unexpected health check")),
+    )
+
+    assert manager._state_is_healthy(state) is False

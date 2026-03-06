@@ -312,14 +312,10 @@ class CopexConfig(BaseModel):
 
     @model_validator(mode="after")
     def _cap_reasoning_by_model(self) -> "CopexConfig":
-        normalized, warning = normalize_reasoning_effort(self.model, self.reasoning_effort)
-        if warning and normalized != self.reasoning_effort:
-            # Only warn when the user explicitly set reasoning_effort.
-            # (Avoid noisy warnings when defaults get normalized.)
-            fields_set = getattr(self, "__pydantic_fields_set__", set())
-            if "reasoning_effort" in fields_set:
-                warnings.warn(warning, UserWarning, stacklevel=2)
-            self.reasoning_effort = normalized
+        fields_set = getattr(self, "__pydantic_fields_set__", set())
+        self._normalize_reasoning_effort(
+            warn_on_change="reasoning_effort" in fields_set,
+        )
         return self
 
     @field_validator("skill_directories", mode="after")
@@ -338,9 +334,11 @@ class CopexConfig(BaseModel):
             self.github_token = env_token
 
         env_model = os.environ.get("COPEX_MODEL")
+        env_model_applied = False
         if env_model:
             try:
                 self.model = Model(env_model)
+                env_model_applied = True
             except ValueError:
                 valid = ", ".join(m.value for m in Model)
                 warnings.warn(
@@ -350,11 +348,13 @@ class CopexConfig(BaseModel):
                 )
 
         env_reasoning = os.environ.get("COPEX_REASONING")
+        env_reasoning_applied = False
         if env_reasoning:
             try:
                 parsed = parse_reasoning_effort(env_reasoning)
                 if parsed is not None:
                     self.reasoning_effort = parsed
+                    env_reasoning_applied = True
             except ValueError:
                 valid = ", ".join(r.value for r in ReasoningEffort)
                 warnings.warn(
@@ -362,7 +362,22 @@ class CopexConfig(BaseModel):
                     UserWarning,
                     stacklevel=2,
                 )
+        fields_set = getattr(self, "__pydantic_fields_set__", set())
+        self._normalize_reasoning_effort(
+            warn_on_change=(
+                env_model_applied
+                or env_reasoning_applied
+                or "reasoning_effort" in fields_set
+            ),
+        )
         return self
+
+    def _normalize_reasoning_effort(self, *, warn_on_change: bool) -> None:
+        normalized, warning = normalize_reasoning_effort(self.model, self.reasoning_effort)
+        if normalized != self.reasoning_effort:
+            if warning and warn_on_change:
+                warnings.warn(warning, UserWarning, stacklevel=2)
+            self.reasoning_effort = normalized
 
     @field_validator("ui_theme")
     @classmethod

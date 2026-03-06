@@ -99,6 +99,10 @@ class PersistentCopilotServer:
             self._delete_state_file()
             return False
 
+        if not self._pid_matches_state(state):
+            self._delete_state_file()
+            return False
+
         terminated = self._terminate_pid(state.pid)
         self._delete_state_file()
         return terminated
@@ -162,7 +166,10 @@ class PersistentCopilotServer:
             return
 
     def _state_is_healthy(self, state: PersistentServerState) -> bool:
-        return self._pid_is_alive(state.pid) and self._is_server_healthy(state.host, state.port)
+        return (
+            self._pid_matches_state(state)
+            and self._is_server_healthy(state.host, state.port)
+        )
 
     def _pid_is_alive(self, pid: int) -> bool:
         try:
@@ -170,6 +177,47 @@ class PersistentCopilotServer:
         except OSError:
             return False
         return True
+
+    def _pid_matches_state(self, state: PersistentServerState) -> bool:
+        if not self._pid_is_alive(state.pid):
+            return False
+
+        if os.name != "posix" or not Path("/proc").exists():
+            return True
+
+        proc_dir = Path("/proc") / str(state.pid)
+        expected = Path(state.cli_path or self.cli_path)
+        try:
+            expected_resolved = expected.resolve(strict=False)
+        except OSError:
+            expected_resolved = expected
+
+        exe_matches = False
+        try:
+            exe_resolved = Path(os.readlink(proc_dir / "exe")).resolve(strict=False)
+            exe_matches = exe_resolved == expected_resolved
+        except OSError:
+            exe_matches = False
+
+        cmdline_matches = False
+        try:
+            raw_cmdline = (proc_dir / "cmdline").read_bytes()
+            for raw_arg in raw_cmdline.split(b"\0"):
+                if not raw_arg:
+                    continue
+                arg = raw_arg.decode("utf-8", errors="ignore")
+                arg_path = Path(arg)
+                try:
+                    arg_resolved = arg_path.resolve(strict=False)
+                except OSError:
+                    arg_resolved = arg_path
+                if arg == state.cli_path or arg_resolved == expected_resolved:
+                    cmdline_matches = True
+                    break
+        except OSError:
+            cmdline_matches = False
+
+        return exe_matches or cmdline_matches
 
     def _is_server_healthy(self, host: str, port: int) -> bool:
         try:

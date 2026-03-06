@@ -5,6 +5,7 @@ from pathlib import Path
 
 import pytest
 
+from copex import sdk_tools
 from copex.memory import ProjectMemory
 from copex.sdk_tools import (
     build_domain_tools,
@@ -77,3 +78,31 @@ def test_test_runner_uses_registered_hook(tmp_path: Path) -> None:
 
     assert result["resultType"] == "success"
     assert result["textResultForLlm"] == "ok"
+
+
+def test_test_runner_rejects_arbitrary_commands(tmp_path: Path) -> None:
+    tool = build_domain_tools(["test_runner"], working_dir=tmp_path)[0]
+
+    result = run(tool.handler(_invocation({"command": "bash -lc 'echo nope'"})))
+
+    assert result["resultType"] == "failure"
+    assert "Only supported project test commands are allowed" in result["textResultForLlm"]
+
+
+def test_test_runner_allows_uv_pytest_commands(tmp_path: Path, monkeypatch) -> None:
+    captured: dict[str, object] = {}
+
+    async def fake_run(argv: list[str], *, cwd: Path, timeout_seconds: float):
+        captured["argv"] = argv
+        captured["cwd"] = cwd
+        captured["timeout_seconds"] = timeout_seconds
+        return 0, "ok", ""
+
+    monkeypatch.setattr(sdk_tools, "_run_test_command", fake_run)
+    tool = build_domain_tools(["test_runner"], working_dir=tmp_path)[0]
+
+    result = run(tool.handler(_invocation({"command": "uv run pytest -q", "cwd": "."})))
+
+    assert result["resultType"] == "success"
+    assert captured["argv"] == ["uv", "run", "pytest", "-q"]
+    assert captured["cwd"] == tmp_path.resolve()

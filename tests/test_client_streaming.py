@@ -134,8 +134,8 @@ def test_send_falls_back_to_session_history():
     assert response.content == "From history"
 
 
-def test_streaming_falls_back_to_history_when_no_content_streamed():
-    """Streaming mode should fall back to history when no content events were received."""
+def test_streaming_does_not_fall_back_to_history_when_no_content_streamed():
+    """Streaming mode should not reuse history when no content events were received."""
     events = [
         build_event(EventType.ASSISTANT_REASONING_DELTA.value, delta_content="Thinking..."),
         build_event(EventType.ASSISTANT_REASONING.value, content="Thinking..."),
@@ -155,9 +155,7 @@ def test_streaming_falls_back_to_history_when_no_content_streamed():
     chunks: list[StreamChunk] = []
     response = run(client.send("prompt", on_chunk=chunks.append))
 
-    # Should recover content from history when streaming produced none
-    assert response.content == "Recovered response"
-    # Reasoning should still be captured
+    assert response.content == ""
     assert response.reasoning == "Thinking..."
 
 

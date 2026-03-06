@@ -76,3 +76,15 @@ class TestClientOptions:
 
         with pytest.raises(RuntimeError, match=COPILOT_CLI_NOT_FOUND_MESSAGE):
             config.to_client_options()
+
+
+class TestEnvOverrides:
+    def test_env_model_override_reapplies_reasoning_normalization(self, monkeypatch) -> None:
+        monkeypatch.setenv("COPEX_MODEL", "claude-sonnet-4.5")
+
+        with pytest.warns(UserWarning, match="does not support reasoning effort"):
+            config = CopexConfig(reasoning_effort="xhigh")
+
+        assert config.model.value == "claude-sonnet-4.5"
+        assert config.reasoning_effort.value == "none"
+        assert "reasoning_effort" not in config.to_session_options()
