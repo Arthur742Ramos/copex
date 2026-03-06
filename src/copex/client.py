@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import json
 import logging
 import random
 import threading
@@ -25,7 +26,7 @@ from copex.circuit_breaker import (
 from copex.circuit_breaker import (
     DEFAULT_FALLBACK_CHAINS,
     ModelAwareBreaker,
-    SlidingWindowBreaker,  # noqa: F401
+    SlidingWindowBreaker,  # noqa: F401 - re-exported for backward compatibility
 )
 from copex.config import COPILOT_CLI_NOT_FOUND_MESSAGE, CopexConfig
 from copex.context import SmartContextWindow
@@ -33,9 +34,9 @@ from copex.exceptions import AllModelsUnavailable, CircuitBreakerOpen, CopexTime
 from copex.memory import auto_capture_memory
 from copex.metrics import MetricsCollector, get_collector
 from copex.models import EventType, Model, ReasoningEffort, parse_reasoning_effort
-from copex.sdk_patch import patch_copilot_client  # noqa: F401
-from copex.session_pool import SessionPool  # noqa: F401
-from copex.streaming import ChunkBatcher, Response, StreamChunk, StreamingMetrics  # noqa: F401
+from copex.sdk_patch import patch_copilot_client  # noqa: F401 - side-effect import, patches CopilotClient
+from copex.session_pool import SessionPool  # noqa: F401 - re-exported for backward compatibility
+from copex.streaming import ChunkBatcher, Response, StreamChunk, StreamingMetrics  # noqa: F401 - re-exported
 
 logger = logging.getLogger(__name__)
 
@@ -1219,8 +1220,14 @@ class Copex:
             try:
                 loop = asyncio.get_running_loop()
             except RuntimeError:
+                # No running loop - try creating a new one, but handle nested case
                 try:
-                    asyncio.run(session.destroy())
+                    # Create a new event loop for this sync call
+                    new_loop = asyncio.new_event_loop()
+                    try:
+                        new_loop.run_until_complete(session.destroy())
+                    finally:
+                        new_loop.close()
                 except Exception:  # Cleanup: sync destroy is best-effort
                     logger.debug("Failed to destroy session in new_session (sync)", exc_info=True)
             else:

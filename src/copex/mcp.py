@@ -15,6 +15,7 @@ import asyncio
 import json
 import logging
 import re
+import shutil
 from abc import ABC, abstractmethod
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, field
@@ -34,6 +35,24 @@ _BLOCKED_ARG_CHARS_RE = re.compile(r"[\x00;|&$`(){}<>\n\r]")
 
 # Maximum size for MCP config files (1 MB)
 _MAX_CONFIG_SIZE = 1_048_576
+
+
+def get_builtin_mcp_servers() -> list[MCPServerConfig]:
+    """Return built-in MCP server configs for installed optional tools.
+
+    Currently detects:
+    - ``scrapling`` — web scraping MCP server (``scrapling mcp``, stdio mode).
+    """
+    servers: list[MCPServerConfig] = []
+    if shutil.which("scrapling"):
+        servers.append(
+            MCPServerConfig(
+                name="scrapling",
+                command="scrapling",
+                args=["mcp"],
+            )
+        )
+    return servers
 
 
 def _validate_command(cmd: str | list[str]) -> None:

@@ -105,6 +105,9 @@ def squad_command(
     audit: Annotated[
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
+    mcp_config: Annotated[
+        Path | None, typer.Option("--mcp-config", help="Path to MCP config JSON file")
+    ] = None,
     force: Annotated[
         bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
     ] = False,
@@ -147,6 +150,7 @@ def squad_command(
         approve: CLI argument or option value.
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
+        mcp_config: CLI argument or option value.
         force: CLI argument or option value.
 
     Returns:
@@ -221,6 +225,11 @@ def squad_command(
         console.print(f"[red]Invalid reasoning effort: {reasoning}[/red]")
         raise typer.Exit(1) from None
 
+    if mcp_config:
+        if not mcp_config.exists():
+            console.print(f"[red]MCP config file not found: {mcp_config}[/red]")
+            raise typer.Exit(1) from None
+        config.mcp_config_file = str(mcp_config)
     if use_cli:
         config.use_cli = True
     try:

@@ -133,11 +133,28 @@ __all__ = [
     "squad_command",
 ]
 
-# Effective default: last used model or claude-opus-4.5
-_DEFAULT_MODEL = load_last_model() or Model.CLAUDE_OPUS_4_5
+# Default model for CLI configure calls (constant to avoid import-time side effects).
+# Actual model resolution uses _get_default_model() which lazy-loads the last used model.
+_DEFAULT_MODEL: Model = Model.CLAUDE_OPUS_4_6
+_DEFAULT_MODEL_CACHE: Model | None = None
+
+
+def _get_default_model() -> Model:
+    """Lazy-load default model (last used or claude-opus-4.6)."""
+    global _DEFAULT_MODEL_CACHE
+    if _DEFAULT_MODEL_CACHE is None:
+        _DEFAULT_MODEL_CACHE = load_last_model() or Model.CLAUDE_OPUS_4_6
+    return _DEFAULT_MODEL_CACHE
 
 
 class _ResolvedModel(str):
+    """String subclass that provides a .value property for CLI model resolution.
+
+    When resolve_model returns a model ID not in the Model enum (e.g., a newly
+    added model), we wrap it in _ResolvedModel so it can still be used with
+    code expecting a .value attribute.
+    """
+
     @property
     def value(self) -> str:
         return str(self)
@@ -190,7 +207,7 @@ _copex_completion() {
 
     case "${prev}" in
         -m|--model)
-            local models="claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini"
+            local models="claude-opus-4.6 claude-opus-4.6-fast claude-opus-4.6-1m claude-opus-4.5 claude-sonnet-4.6 claude-sonnet-4.5 claude-sonnet-4 claude-haiku-4.5 gpt-5.4 gpt-5.3-codex gpt-5.2-codex gpt-5.1-codex gpt-5.1-codex-max gpt-5.1-codex-mini gpt-5.2 gpt-5.1 gpt-5 gpt-5-mini gpt-4.1 gemini-3-pro-preview"
             COMPREPLY=( $(compgen -W "${models}" -- ${cur}) )
             return 0
             ;;
@@ -245,14 +262,26 @@ _copex() {
         'undo:Undo the latest edit batch'
     )
     models=(
+        'claude-opus-4.6'
+        'claude-opus-4.6-fast'
+        'claude-opus-4.6-1m'
         'claude-opus-4.5'
-        'claude-sonnet-4.1'
+        'claude-sonnet-4.6'
+        'claude-sonnet-4.5'
+        'claude-sonnet-4'
+        'claude-haiku-4.5'
+        'gpt-5.4'
+        'gpt-5.3-codex'
         'gpt-5.2-codex'
         'gpt-5.1-codex'
-        'o3'
-        'o3-mini'
-        'o1'
-        'o1-mini'
+        'gpt-5.1-codex-max'
+        'gpt-5.1-codex-mini'
+        'gpt-5.2'
+        'gpt-5.1'
+        'gpt-5'
+        'gpt-5-mini'
+        'gpt-4.1'
+        'gemini-3-pro-preview'
     )
     reasoning_levels=('none' 'low' 'medium' 'high' 'xhigh')
 
@@ -287,7 +316,7 @@ FISH_COMPLETION = """
 # copex fish completion
 
 set -l commands chat plan ralph fleet council interactive map render models skills memory status config init login logout tui completions stats diff squad audit agent edit undo
-set -l models claude-opus-4.5 claude-sonnet-4.1 gpt-5.2-codex gpt-5.1-codex o3 o3-mini o1 o1-mini
+set -l models claude-opus-4.6 claude-opus-4.6-fast claude-opus-4.6-1m claude-opus-4.5 claude-sonnet-4.6 claude-sonnet-4.5 claude-sonnet-4 claude-haiku-4.5 gpt-5.4 gpt-5.3-codex gpt-5.2-codex gpt-5.1-codex gpt-5.1-codex-max gpt-5.1-codex-mini gpt-5.2 gpt-5.1 gpt-5 gpt-5-mini gpt-4.1 gemini-3-pro-preview
 set -l reasoning none low medium high xhigh
 
 complete -c copex -f
@@ -462,7 +491,7 @@ def main(
     _record_start_commit()
 
     if ctx.invoked_subcommand is None:
-        effective_model = model or _DEFAULT_MODEL.value
+        effective_model = model or _get_default_model().value
 
         # If -p/--prompt provided, run squad (default) or chat
         if prompt is not None:
@@ -511,6 +540,7 @@ def main(
                             prompt,
                             json_output=non_interactive,
                             auto_approve_gates=auto_approve,
+                            force=force,
                         )
                     )
             except typer.BadParameter as e:
@@ -857,9 +887,6 @@ def chat(
     audit: Annotated[
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
-    force: Annotated[
-        bool, typer.Option("--force", help="Force rerun all squad agents (ignore .squad/state.json)")
-    ] = False,
 ) -> None:
     """Send a prompt to Copilot with automatic retry on errors.
 
@@ -889,7 +916,6 @@ def chat(
         approve: CLI argument or option value.
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
-        force: CLI argument or option value.
 
     Returns:
         None: Command result.
@@ -906,7 +932,7 @@ def chat(
 
     model_explicit = option_was_explicit("model")
     reasoning_explicit = option_was_explicit("reasoning")
-    effective_model = model or _DEFAULT_MODEL.value
+    effective_model = model or _get_default_model().value
 
     config.retry.max_retries = max_retries
     config.streaming = not no_stream
@@ -1302,7 +1328,7 @@ def tui(
     """
     from copex.tui import run_tui
 
-    effective_model = model or _DEFAULT_MODEL.value
+    effective_model = model or _get_default_model().value
     try:
         model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
@@ -1431,7 +1457,7 @@ def interactive(
     Returns:
         None: Command result.
     """
-    effective_model = model or _DEFAULT_MODEL.value
+    effective_model = model or _get_default_model().value
     try:
         model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
@@ -1723,7 +1749,7 @@ def ralph_command(
     """
     model_explicit = option_was_explicit("model")
     reasoning_explicit = option_was_explicit("reasoning")
-    effective_model = model or _DEFAULT_MODEL.value
+    effective_model = model or _get_default_model().value
     route = None
     if not model_explicit:
         route = route_model_for_prompt(prompt)
@@ -2049,9 +2075,7 @@ def map_command(
         console.print(repo_map.render_map())
 
 
-
-
-
+@app.command("campaign")
 
 @app.command("campaign")
 def campaign_command(
@@ -2210,7 +2234,7 @@ def campaign_command(
         )
 
     # Step 3: Configure model
-    effective_model = model or _DEFAULT_MODEL.value
+    effective_model = model or _get_default_model().value
     try:
         model_enum = _resolve_cli_model(effective_model)
         requested_effort = parse_reasoning_effort(reasoning) or ReasoningEffort.HIGH
@@ -2222,30 +2246,28 @@ def campaign_command(
         console.print(f"[red]Error: {e}[/red]")
         raise typer.Exit(1) from None
 
-    # Step 4: Run waves sequentially
-    pending = get_pending_wave_indices(state)
-    total_succeeded = 0
-    total_failed = 0
-    campaign_start = time.time()
+    # Step 4: Run waves sequentially (single asyncio.run to avoid nested loop issues)
+    async def _run_campaign_waves() -> tuple[int, int]:
+        """Run all pending waves and return (succeeded, failed) counts."""
+        _total_succeeded = 0
+        _total_failed = 0
+        for wave_idx in pending:
+            wave = state.waves[wave_idx]
+            wave.status = WaveStatus.RUNNING
+            save_campaign_state(state, state_file)
 
-    for wave_idx in pending:
-        wave = state.waves[wave_idx]
-        wave.status = WaveStatus.RUNNING
-        save_campaign_state(state, state_file)
+            console.print(
+                f"\n[bold blue]━━━ Wave {wave_idx + 1}/{len(state.waves)} "
+                f"({len(wave.targets)} targets) ━━━[/bold blue]"
+            )
 
-        console.print(
-            f"\n[bold blue]━━━ Wave {wave_idx + 1}/{len(state.waves)} "
-            f"({len(wave.targets)} targets) ━━━[/bold blue]"
-        )
+            # Generate fleet tasks for this wave
+            wave_tasks = generate_wave_tasks(state.goal, wave.targets, wave_idx)
 
-        # Generate fleet tasks for this wave
-        wave_tasks = generate_wave_tasks(state.goal, wave.targets, wave_idx)
+            wave_git_msg = git_message or f"campaign wave {wave_idx + 1}: {state.goal[:50]}"
 
-        wave_git_msg = git_message or f"campaign wave {wave_idx + 1}: {state.goal[:50]}"
-
-        try:
-            asyncio.run(
-                _run_fleet(
+            try:
+                await _run_fleet(
                     config=config,
                     prompts=[],
                     file=None,
@@ -2263,23 +2285,29 @@ def campaign_command(
                     exclude_tools=_parse_exclude_tools(exclude_tools),
                     tasks_override=wave_tasks,
                 )
-            )
-            wave.status = WaveStatus.COMPLETED
-            wave.succeeded = len(wave.targets)
-            total_succeeded += wave.succeeded
-        except (SystemExit, typer.Exit):
-            # Fleet exits with code 1 on failures - mark wave but continue
-            wave.status = WaveStatus.COMPLETED
-            wave.succeeded = len(wave.targets)  # approximate
-            total_succeeded += wave.succeeded
-        except Exception as exc:
-            wave.status = WaveStatus.FAILED
-            wave.error = str(exc)
-            wave.failed = len(wave.targets)
-            total_failed += wave.failed
-            console.print(f"[red]Wave {wave_idx + 1} failed: {exc}[/red]")
+                wave.status = WaveStatus.COMPLETED
+                wave.succeeded = len(wave.targets)
+                _total_succeeded += wave.succeeded
+            except (SystemExit, typer.Exit):
+                # Fleet exits with code 1 on failures - mark wave but continue
+                wave.status = WaveStatus.COMPLETED
+                wave.succeeded = len(wave.targets)  # approximate
+                _total_succeeded += wave.succeeded
+            except Exception as exc:
+                wave.status = WaveStatus.FAILED
+                wave.error = str(exc)
+                wave.failed = len(wave.targets)
+                _total_failed += wave.failed
+                console.print(f"[red]Wave {wave_idx + 1} failed: {exc}[/red]")
+                logger.debug("Campaign wave %d failed", wave_idx + 1, exc_info=True)
 
-        save_campaign_state(state, state_file)
+            save_campaign_state(state, state_file)
+
+        return _total_succeeded, _total_failed
+
+    pending = get_pending_wave_indices(state)
+    campaign_start = time.time()
+    total_succeeded, total_failed = asyncio.run(_run_campaign_waves())
 
     # Step 5: Final summary
     campaign_duration = time.time() - campaign_start
@@ -2392,7 +2420,7 @@ def agent_command(
 
     model_explicit = option_was_explicit("model")
     reasoning_explicit = option_was_explicit("reasoning")
-    effective_model = model or _DEFAULT_MODEL.value
+    effective_model = model or _get_default_model().value
 
     if use_cli:
         config.use_cli = True

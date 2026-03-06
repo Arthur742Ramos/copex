@@ -2,10 +2,14 @@
 
 from __future__ import annotations
 
+import json
+import logging
 from collections.abc import Iterable, Mapping
 from typing import Any
 
 from copex.json_utils import extract_json_array
+
+logger = logging.getLogger(__name__)
 
 
 def build_repo_analysis_prompt(
@@ -118,4 +122,10 @@ def build_repo_analysis_prompt(
 
 def parse_repo_analysis_response(content: str) -> list[Any]:
     """Extract the JSON array payload from an AI repo-analysis response."""
-    return extract_json_array(content.strip())
+    if not content or not content.strip():
+        return []
+    try:
+        return extract_json_array(content.strip())
+    except (ValueError, json.JSONDecodeError):
+        logger.debug("Failed to parse repo analysis response as JSON array")
+        return []

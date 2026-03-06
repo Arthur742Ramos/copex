@@ -1,10 +1,12 @@
 """Copex - Copilot Extended: A resilient wrapper for GitHub Copilot SDK."""
 
+from __future__ import annotations
+
 # ruff: noqa: F401
 
 from typing import TYPE_CHECKING, Any
 
-__version__ = "2.20.0"
+__version__ = "2.21.0"
 
 # Re-export core components for convenience
 from .agent import AgentResult, AgentSession, AgentTurn
@@ -52,7 +54,6 @@ from .exceptions import (
     CircuitBreakerOpen,
     ConfigError,
     ConfigurationError,
-    ConnectionError,  # Deprecated alias.
     CopexConnectionError,
     CopexError,
     CopexTimeoutError,
@@ -64,7 +65,6 @@ from .exceptions import (
     SessionError,
     SessionRecoveryFailed,
     StreamingError,
-    TimeoutError,  # Deprecated alias.
     ToolExecutionError,
     ValidationError,
 )
@@ -183,9 +183,9 @@ __all__ = [
     "StreamingError",
     "CopexTimeoutError",
     "CopexConnectionError",
-    # Deprecated aliases
-    "ConnectionError",
-    "TimeoutError",
+    # NOTE: TimeoutError and ConnectionError are deprecated aliases kept for backward
+    # compatibility but intentionally excluded from __all__ to avoid shadowing builtins.
+    # Users should use CopexTimeoutError and CopexConnectionError instead.
     # Approval
     "ApprovalAction",
     "ApprovalGate",

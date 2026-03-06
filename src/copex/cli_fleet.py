@@ -1165,7 +1165,7 @@ async def _run_fleet(
         _progress_thread.start()
 
     # ── Worktree isolation setup ───────────────────────────────────
-    worktree_managers: dict[str, WorktreeManager] = {}  # task_id -> manager  # noqa: F821
+    worktree_managers: dict[str, "WorktreeManager"] = {}  # task_id -> manager
     if worktree:
         from copex.worktree import WorktreeManager
 

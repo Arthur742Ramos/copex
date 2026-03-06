@@ -175,8 +175,19 @@ class _RepoScanSummary:
     source_extensions: tuple[str, ...]
 
 
+# Cache size limit to prevent unbounded memory growth
+_CACHE_MAX_SIZE = 32
+
 _REPO_CONTEXT_CACHE: dict[Path, dict[str, Any]] = {}
 _REPO_SCAN_CACHE: dict[Path, _RepoScanSummary] = {}
+
+
+def _evict_oldest_cache_entry(cache: dict[Path, Any]) -> None:
+    """Evict oldest entry from cache if over size limit."""
+    if len(cache) > _CACHE_MAX_SIZE:
+        # Simple FIFO eviction (dict preserves insertion order in Python 3.7+)
+        oldest_key = next(iter(cache))
+        del cache[oldest_key]
 
 
 def _now_iso_utc() -> str:
@@ -329,6 +340,7 @@ def _scan_repo_files(root: Path) -> _RepoScanSummary:
         has_tests=has_tests,
         source_extensions=tuple(sorted(extensions)),
     )
+    _evict_oldest_cache_entry(_REPO_SCAN_CACHE)
     _REPO_SCAN_CACHE[resolved_root] = summary
     return summary
 
@@ -459,6 +471,7 @@ def _gather_repo_context(path: Path | None = None) -> dict[str, Any]:
     if scan_summary.source_extensions:
         context["source_extensions"] = list(scan_summary.source_extensions)
 
+    _evict_oldest_cache_entry(_REPO_CONTEXT_CACHE)
     _REPO_CONTEXT_CACHE[root] = deepcopy(context)
     return context
 

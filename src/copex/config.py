@@ -1,5 +1,7 @@
 """Configuration management for Copex."""
 
+from __future__ import annotations
+
 import os
 import shutil
 import sys
@@ -97,7 +99,7 @@ def find_copilot_cli() -> str | None:
     return None
 
 
-UI_THEMES = {"default", "midnight", "mono", "sunset"}
+UI_THEMES = {"default", "midnight", "mono", "sunset", "tokyo"}
 UI_DENSITIES = {"compact", "extended"}
 APPROVAL_MODES = {"auto-approve", "approve", "manual", "deny-all", "policy-based", "dry-run"}
 COPILOT_CLI_NOT_FOUND_MESSAGE = "Copilot CLI not found, install with: npm install -g @github/copilot"
@@ -152,8 +154,12 @@ def load_last_model() -> Model | None:
 
 
 def save_last_model(model: Model) -> None:
-    """Save the last used model to user state."""
+    """Save the last used model to user state.
+
+    Uses atomic write (temp file + rename) to avoid race conditions.
+    """
     import json
+    import tempfile
 
     state_path = get_user_state_path()
     state_path.parent.mkdir(parents=True, exist_ok=True)
@@ -167,10 +173,28 @@ def save_last_model(model: Model) -> None:
         except (OSError, json.JSONDecodeError):
             pass
 
-    # Update and save
+    # Update and save atomically
     data["last_model"] = model.value
-    with open(state_path, "w", encoding="utf-8") as f:
-        json.dump(data, f, indent=2)
+    # Write to temp file in same directory, then rename (atomic on POSIX)
+    try:
+        fd, tmp_path = tempfile.mkstemp(
+            dir=state_path.parent, prefix=".state_", suffix=".tmp"
+        )
+        try:
+            with os.fdopen(fd, "w", encoding="utf-8") as f:
+                json.dump(data, f, indent=2)
+            os.replace(tmp_path, state_path)
+        except Exception:
+            # Clean up temp file on failure
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+            raise
+    except OSError:
+        # Fallback to direct write if temp file creation fails
+        with open(state_path, "w", encoding="utf-8") as f:
+            json.dump(data, f, indent=2)
 
 
 class CopexConfig(BaseModel):
@@ -475,6 +499,24 @@ class CopexConfig(BaseModel):
                     opts["mcp_servers"] = list(servers.values())
                 elif isinstance(servers, list):
                     opts["mcp_servers"] = servers
+
+        # Merge built-in MCP servers (user-configured names win on collision)
+        from copex.mcp import get_builtin_mcp_servers
+
+        builtin = get_builtin_mcp_servers()
+        if builtin:
+            existing = opts.get("mcp_servers", [])
+            existing_names = {
+                s.get("name") if isinstance(s, dict) else getattr(s, "name", None)
+                for s in existing
+            }
+            for srv in builtin:
+                if srv.name not in existing_names:
+                    existing.append(
+                        {"name": srv.name, "command": srv.command, "args": srv.args}
+                    )
+            if existing:
+                opts["mcp_servers"] = existing
 
         # Tool filtering
         if self.available_tools is not None:

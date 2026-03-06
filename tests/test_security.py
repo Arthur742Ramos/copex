@@ -74,7 +74,7 @@ class TestSanitizeCommandArg:
             "foo || evil",
             "foo > /etc/passwd",
             "foo < /dev/null",
-            "foo\nbar",
+            "foo\nrm -rf /",
         ],
     )
     def test_dangerous_patterns_rejected(self, dangerous):

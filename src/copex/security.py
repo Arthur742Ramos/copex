@@ -57,18 +57,25 @@ ENV_ALLOWLIST: frozenset[str] = frozenset(
     }
 )
 
-# Patterns that indicate potentially dangerous input
+# Patterns that indicate potentially dangerous input in shell contexts.
+# These are refined to reduce false positives while still catching dangerous injection.
+# Each pattern is designed to catch actual injection attempts, not benign text.
 DANGEROUS_PATTERNS: tuple[re.Pattern[str], ...] = (
-    re.compile(r"\$\{[^}]+\}"),  # ${VAR} expansion
-    re.compile(r"\$\([^)]+\)"),  # $(command) substitution
-    re.compile(r"`[^`]+`"),  # `command` substitution
-    re.compile(r";\s*"),  # Command chaining with ;
-    re.compile(r"\|\s*"),  # Pipe chaining
-    re.compile(r"&&\s*"),  # Logical AND chaining
-    re.compile(r"\|\|\s*"),  # Logical OR chaining
-    re.compile(r">\s*"),  # Output redirection
-    re.compile(r"<\s*"),  # Input redirection
-    re.compile(r"\n"),  # Newline injection
+    re.compile(r"\$\{[^}]+\}"),  # ${VAR} expansion (shell variable expansion)
+    re.compile(r"\$\([^)]+\)"),  # $(command) substitution (command substitution)
+    re.compile(r"`[^`]+`"),  # `command` substitution (backtick substitution)
+    # Command chaining patterns - require at least 2 non-whitespace chars after
+    # to avoid matching things like "option; description" or trailing semicolons
+    re.compile(r";\s*[a-zA-Z/\\.]{2,}"),  # Command chaining with ; followed by command-like text
+    re.compile(r"\|\s*[a-zA-Z/\\.]{2,}"),  # Pipe to command (e.g., | rm)
+    re.compile(r"&&\s*[a-zA-Z/\\.]{2,}"),  # Logical AND chaining to command
+    re.compile(r"\|\|\s*[a-zA-Z/\\.]{2,}"),  # Logical OR chaining to command
+    # Redirection to dangerous paths only
+    re.compile(r">\s*/(?:etc|proc|sys|dev|bin|sbin|usr|var)/"),  # Redirect to system paths
+    re.compile(r">\s*(?:\.\./){2,}"),  # Redirect with multiple parent traversals
+    re.compile(r"<\s*/(?:etc|proc|sys|dev)/"),  # Input from sensitive system paths
+    # Newline injection - only flag if followed by command-like content
+    re.compile(r"\n\s*(?:rm|mv|cp|chmod|chown|curl|wget|sudo|sh|bash)\s"),
 )
 
 # Characters that should be escaped in shell arguments

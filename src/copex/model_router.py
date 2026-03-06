@@ -27,6 +27,7 @@ _CODING_PATTERNS = (
 )
 
 _CODING_MODEL_PREFERENCES = [
+    "gpt-5.4",
     "gpt-5.3-codex",
     "gpt-5.2-codex",
     "gpt-5.1-codex-max",
@@ -40,6 +41,7 @@ _GENERAL_MODEL_PREFERENCES = [
     "claude-opus-4.6-1m",
     "claude-opus-4.6",
     "claude-sonnet-4.6",
+    "gpt-5.4",
     "gpt-5.3-codex",
     "gpt-5.2",
 ]
