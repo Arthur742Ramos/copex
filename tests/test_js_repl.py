@@ -393,3 +393,381 @@ def test_shutdown_js_repl_stops_manager() -> None:
     run(shutdown_js_repl())
     mock_manager.stop.assert_awaited_once()
     assert _sdk._js_repl_manager is None
+
+
+def test_shutdown_js_repl_suppresses_exception() -> None:
+    import copex.sdk_tools as _sdk
+
+    mock_manager = MagicMock()
+    mock_manager.stop = AsyncMock(side_effect=RuntimeError("boom"))
+    _sdk._js_repl_manager = mock_manager
+
+    run(shutdown_js_repl())  # should not raise
+    assert _sdk._js_repl_manager is None
+
+
+# --------------------------------------------------------------------------
+# _get_js_repl_manager lazy singleton
+# --------------------------------------------------------------------------
+
+
+def test_get_js_repl_manager_creates_lazily() -> None:
+    import copex.sdk_tools as _sdk
+
+    _sdk._js_repl_manager = None
+    manager = _sdk._get_js_repl_manager()
+    assert manager is not None
+    from copex.js_repl import JSReplManager
+
+    assert isinstance(manager, JSReplManager)
+    # Calling again returns same instance
+    assert _sdk._get_js_repl_manager() is manager
+    _sdk._js_repl_manager = None  # cleanup
+
+
+# --------------------------------------------------------------------------
+# JSReplManager - idempotent start
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manager_start_idempotent(
+    manager: JSReplManager, fake_process: FakeProcess
+) -> None:
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = fake_process
+        await manager.start()
+        await manager.start()  # second call is a no-op
+        assert mock_exec.await_count == 1
+        await manager.stop()
+
+
+# --------------------------------------------------------------------------
+# JSReplManager - timeout paths
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manager_execute_timeout() -> None:
+    """execute() raises JSReplError when the kernel never responds."""
+    proc = FakeProcess([])  # no responses → future never resolves
+    mgr = JSReplManager(node_path="/usr/bin/node")
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = proc
+        await mgr.start()
+        with pytest.raises(JSReplError, match="timed out"):
+            await mgr.execute("slow()", timeout=0.05)
+        await mgr.stop()
+
+
+@pytest.mark.asyncio
+async def test_manager_reset_timeout() -> None:
+    """reset() raises JSReplError when the kernel never responds."""
+    proc = FakeProcess([])
+    mgr = JSReplManager(node_path="/usr/bin/node")
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = proc
+        await mgr.start()
+        with pytest.raises(JSReplError, match="reset timed out"):
+            await mgr.reset(timeout=0.05)
+        await mgr.stop()
+
+
+# --------------------------------------------------------------------------
+# JSReplManager - stop with stubborn process (kill path)
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manager_stop_kills_on_timeout() -> None:
+    """When terminate + wait times out, stop() calls kill()."""
+    proc = FakeProcess([{"id": 1, "result": "ok", "error": None, "console": []}])
+    mgr = JSReplManager(node_path="/usr/bin/node")
+
+    # Make wait() hang so it times out
+    original_wait = proc.wait
+
+    async def _slow_wait() -> int:
+        await asyncio.sleep(60)
+        return 0
+
+    proc.wait = _slow_wait
+
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = proc
+        await mgr.start()
+        await mgr.stop()
+        # kill() should have been called since wait() timed out
+        assert proc.returncode == -9
+
+
+@pytest.mark.asyncio
+async def test_manager_stop_handles_process_lookup_error() -> None:
+    """ProcessLookupError during terminate/kill is handled gracefully."""
+    proc = FakeProcess([{"id": 1, "result": "ok", "error": None, "console": []}])
+    mgr = JSReplManager(node_path="/usr/bin/node")
+
+    # Make terminate raise ProcessLookupError (process already gone)
+    def _raise_plookup() -> None:
+        raise ProcessLookupError()
+
+    proc.terminate = _raise_plookup
+
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = proc
+        await mgr.start()
+        await mgr.stop()  # should not raise
+        assert not mgr.running
+
+
+# --------------------------------------------------------------------------
+# JSReplManager - stop fails pending futures
+# --------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_manager_stop_fails_pending_futures() -> None:
+    """Pending futures get ConnectionError when stop() is called."""
+    proc = FakeProcess([])  # no responses
+    mgr = JSReplManager(node_path="/usr/bin/node")
+
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = proc
+        await mgr.start()
+
+        # Manually inject a pending future
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        mgr._pending[999] = fut
+
+        await mgr.stop()
+        assert fut.done()
+        with pytest.raises(ConnectionError, match="stopped"):
+            fut.result()
+
+
+# --------------------------------------------------------------------------
+# JSReplManager - reader loop edge cases
+# --------------------------------------------------------------------------
+
+
+class NonJsonFakeProcess(FakeProcess):
+    """FakeProcess that sends non-JSON output before real responses."""
+
+    def __init__(self, responses: list[dict[str, Any]] | None = None) -> None:
+        super().__init__(responses)
+
+    def _make_stdout(self) -> Any:
+        stdout = MagicMock()
+        lines = [b"not json at all\n"]  # non-JSON output first
+        for resp in self._responses:
+            lines.append((json.dumps(resp) + "\n").encode())
+
+        idx = 0
+
+        async def _readline() -> bytes:
+            nonlocal idx
+            if idx < len(lines):
+                data = lines[idx]
+                idx += 1
+                return data
+            await asyncio.sleep(60)
+            return b""
+
+        stdout.readline = _readline
+        return stdout
+
+
+@pytest.mark.asyncio
+async def test_reader_loop_skips_non_json() -> None:
+    """Non-JSON lines from the kernel are skipped without error."""
+    responses = [{"id": 1, "result": "ok", "error": None, "console": []}]
+    proc = NonJsonFakeProcess(responses)
+    mgr = JSReplManager(node_path="/usr/bin/node")
+
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = proc
+        await mgr.start()
+
+        result = await mgr.execute("1")
+        assert result["result"] == "ok"
+        await mgr.stop()
+
+
+class EofFakeProcess(FakeProcess):
+    """FakeProcess whose stdout returns empty bytes immediately (kernel exit)."""
+
+    def _make_stdout(self) -> Any:
+        stdout = MagicMock()
+
+        async def _readline() -> bytes:
+            return b""  # immediate EOF
+
+        stdout.readline = _readline
+        return stdout
+
+
+@pytest.mark.asyncio
+async def test_reader_loop_handles_eof_and_fails_pending() -> None:
+    """When kernel exits (EOF), pending futures get ConnectionError."""
+    proc = EofFakeProcess([])
+    mgr = JSReplManager(node_path="/usr/bin/node")
+
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = proc
+        await mgr.start()
+
+        # Give reader loop a moment to process the EOF
+        await asyncio.sleep(0.05)
+
+        # Manually inject a pending future
+        loop = asyncio.get_running_loop()
+        fut: asyncio.Future[dict[str, Any]] = loop.create_future()
+        mgr._pending[999] = fut
+
+        # Reader loop already exited — stop will clean up pending
+        await mgr.stop()
+
+
+# --------------------------------------------------------------------------
+# Tool handler edge cases
+# --------------------------------------------------------------------------
+
+
+def test_js_repl_tool_handler_no_result_no_console(tmp_path: Path) -> None:
+    """Handler returns '(no output)' when kernel returns nothing."""
+    mock_manager = MagicMock()
+    mock_manager.execute = AsyncMock(
+        return_value={"result": None, "error": None, "console": []}
+    )
+
+    with patch("copex.sdk_tools._get_js_repl_manager", return_value=mock_manager):
+        tool = _build_js_repl_tool(tmp_path)
+        result = run(tool.handler(_invocation({"code": "void 0"})))
+
+    assert result["resultType"] == "success"
+    assert "(no output)" in result["textResultForLlm"]
+
+
+def test_js_repl_tool_handler_console_and_result(tmp_path: Path) -> None:
+    """Handler shows both console output and result when both present."""
+    mock_manager = MagicMock()
+    mock_manager.execute = AsyncMock(
+        return_value={"result": "3", "error": None, "console": ["log line"]}
+    )
+
+    with patch("copex.sdk_tools._get_js_repl_manager", return_value=mock_manager):
+        tool = _build_js_repl_tool(tmp_path)
+        result = run(tool.handler(_invocation({"code": "console.log('log line'); 1+2"})))
+
+    assert result["resultType"] == "success"
+    assert "log line" in result["textResultForLlm"]
+    assert "3" in result["textResultForLlm"]
+
+
+def test_js_repl_tool_handler_error_with_console(tmp_path: Path) -> None:
+    """Handler includes console output even when there's an error."""
+    mock_manager = MagicMock()
+    mock_manager.execute = AsyncMock(
+        return_value={"result": None, "error": "SyntaxError: bad", "console": ["before error"]}
+    )
+
+    with patch("copex.sdk_tools._get_js_repl_manager", return_value=mock_manager):
+        tool = _build_js_repl_tool(tmp_path)
+        result = run(tool.handler(_invocation({"code": "console.log('before error'); {{{"})))
+
+    assert result["resultType"] == "failure"
+    assert "before error" in result["textResultForLlm"]
+    assert "SyntaxError" in result["textResultForLlm"]
+
+
+# --------------------------------------------------------------------------
+# Integration tests (require Node.js)
+# --------------------------------------------------------------------------
+
+
+_node_available = shutil.which("node") is not None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _node_available, reason="Node.js not available")
+async def test_integration_basic_execution() -> None:
+    """Kernel evaluates simple expressions correctly."""
+    async with JSReplManager() as mgr:
+        result = await mgr.execute("2 + 3")
+        assert result["result"] == "5"
+        assert result["error"] is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _node_available, reason="Node.js not available")
+async def test_integration_state_persistence() -> None:
+    """Variables persist across execute() calls."""
+    async with JSReplManager() as mgr:
+        await mgr.execute("var x = 10")
+        result = await mgr.execute("x * 2")
+        assert result["result"] == "20"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _node_available, reason="Node.js not available")
+async def test_integration_let_const_promotion() -> None:
+    """let/const are promoted to var so they persist across calls."""
+    async with JSReplManager() as mgr:
+        await mgr.execute("let a = 5")
+        await mgr.execute("const b = 3")
+        result = await mgr.execute("a + b")
+        assert result["result"] == "8"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _node_available, reason="Node.js not available")
+async def test_integration_console_capture() -> None:
+    """console.log output is captured and returned."""
+    async with JSReplManager() as mgr:
+        result = await mgr.execute("console.log('hello'); console.warn('oops')")
+        assert "hello" in result["console"]
+        assert "[warn] oops" in result["console"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _node_available, reason="Node.js not available")
+async def test_integration_reset_clears_state() -> None:
+    """reset() clears the VM context."""
+    async with JSReplManager() as mgr:
+        await mgr.execute("var counter = 42")
+        result = await mgr.reset()
+        assert result["result"] == "context reset"
+
+        # counter should no longer exist
+        result = await mgr.execute("typeof counter")
+        assert result["result"] == "undefined"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _node_available, reason="Node.js not available")
+async def test_integration_error_handling() -> None:
+    """Errors in JS code are reported as error field."""
+    async with JSReplManager() as mgr:
+        result = await mgr.execute("undeclaredVar.prop")
+        assert result["error"] is not None
+        assert "not defined" in result["error"] or "ReferenceError" in result["error"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _node_available, reason="Node.js not available")
+async def test_integration_function_persistence() -> None:
+    """Functions assigned to var persist across calls."""
+    async with JSReplManager() as mgr:
+        await mgr.execute("var double = function(n) { return n * 2 }")
+        result = await mgr.execute("double(21)")
+        assert result["result"] == "42"
+
+
+@pytest.mark.asyncio
+@pytest.mark.skipif(not _node_available, reason="Node.js not available")
+async def test_integration_empty_code() -> None:
+    """Empty code produces an error."""
+    async with JSReplManager() as mgr:
+        result = await mgr.execute("   ")
+        assert result["error"] is not None
