@@ -53,6 +53,7 @@ class FakeProcess:
         self.stdin.drain = AsyncMock()
         self.stdout = self._make_stdout()
         self.stderr = MagicMock()
+        self.stderr.read = AsyncMock(return_value=b"")
 
     def _make_stdout(self) -> Any:
         stdout = MagicMock()
@@ -107,6 +108,18 @@ async def test_manager_start_creates_subprocess(
         await manager.start()
         assert manager.running
         mock_exec.assert_awaited_once()
+        await manager.stop()
+
+
+@pytest.mark.asyncio
+async def test_manager_start_drains_stderr(
+    manager: JSReplManager, fake_process: FakeProcess
+) -> None:
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = fake_process
+        await manager.start()
+        await asyncio.sleep(0)
+        fake_process.stderr.read.assert_awaited_once()
         await manager.stop()
 
 

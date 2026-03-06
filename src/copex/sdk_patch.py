@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
 
 from copilot import CopilotClient
 
@@ -76,6 +77,27 @@ async def _patched_start_cli_server(self: CopilotClient) -> None:
             cwd=self.options["cwd"],
             env=env,
         )
+
+    if self._process.stderr is not None:
+        def _drain_stderr() -> None:
+            try:
+                for raw_line in iter(self._process.stderr.readline, b""):
+                    if not raw_line:
+                        break
+                    logger.debug(
+                        "Copilot CLI stderr: %s",
+                        raw_line.decode("utf-8", errors="replace").rstrip(),
+                    )
+            except Exception:
+                logger.debug("Failed to drain Copilot CLI stderr", exc_info=True)
+
+        stderr_thread = threading.Thread(
+            target=_drain_stderr,
+            name="copex-copilot-stderr",
+            daemon=True,
+        )
+        stderr_thread.start()
+        self._stderr_drain_thread = stderr_thread
 
     if self.options["use_stdio"]:
         return

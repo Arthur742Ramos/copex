@@ -1197,7 +1197,10 @@ class TuiApp:
                     prompt = self.state.input_buffer
                     self.state.input_buffer = ""
                     self._current_send_task = asyncio.create_task(self._process_message(prompt))
-                    await self._current_send_task
+                    try:
+                        await self._current_send_task
+                    except asyncio.CancelledError:
+                        continue
                 await asyncio.sleep(0.05)
 
         spinner_task = asyncio.create_task(spinner_loop())

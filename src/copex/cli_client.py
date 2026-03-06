@@ -239,6 +239,9 @@ class CopilotCLI:
 
         content: list[str] = []
         assert process.stdout is not None
+        stderr_task: asyncio.Task[bytes] | None = None
+        if process.stderr is not None:
+            stderr_task = asyncio.create_task(process.stderr.read())
 
         try:
             async for line in process.stdout:
@@ -262,15 +265,19 @@ class CopilotCLI:
             await process.wait()
             raise
 
+        stderr_bytes = b""
+        if stderr_task is not None:
+            stderr_bytes = await stderr_task
+        stderr_text = stderr_bytes.decode("utf-8", errors="replace")
+
         if process.returncode != 0:
-            stderr_text = ""
-            if process.stderr is not None:
-                stderr_bytes = await process.stderr.read()
-                stderr_text = stderr_bytes.decode("utf-8", errors="replace")
             raise CopexError(
                 f"CLI exited with code {process.returncode}: {stderr_text}",
                 context={"returncode": process.returncode},
             )
+
+        if stderr_text.strip():
+            logger.debug("CLI emitted stderr output: %s", stderr_text.strip())
 
         self._has_session = True
         return "".join(content), metrics

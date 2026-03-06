@@ -345,6 +345,17 @@ class TestSend:
         assert response.streaming_metrics.total_bytes > 0
         cli._cleanup()
 
+    @pytest.mark.asyncio
+    async def test_send_drains_stderr_even_on_success(self):
+        cli = _make_cli()
+        proc = _fake_process([b"ok\n"], stderr=b"warning")
+
+        with patch("asyncio.create_subprocess_exec", return_value=proc):
+            await cli.send("test")
+
+        proc.stderr.read.assert_awaited_once()
+        cli._cleanup()
+
 
 # ---------------------------------------------------------------------------
 # stream()

@@ -1,18 +1,14 @@
-"""Tests for TUI module components.
-
-These tests are designed to be standalone and not require the copilot SDK.
-"""
+"""Tests for TUI module components."""
 
 from __future__ import annotations
 
-import sys
+import asyncio
+from types import SimpleNamespace
+from unittest.mock import AsyncMock
 
 import pytest
 
-# Ensure local package imports work even when modules are loaded via
-# importlib.util.spec_from_file_location.
-if "src" not in sys.path:
-    sys.path.insert(0, "src")
+import copex.tui.state as state_mod
 
 
 class TestTuiState:
@@ -20,18 +16,6 @@ class TestTuiState:
 
     def test_tui_mode_enum(self) -> None:
         """Test TuiMode enum values."""
-        # Import directly to avoid triggering parent package
-        import sys
-        sys.path.insert(0, "src")
-
-        # Import the module file directly
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "state", "src/copex/tui/state.py"
-        )
-        state_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(state_mod)
-
         TuiMode = state_mod.TuiMode
 
         assert TuiMode.NORMAL == "normal"
@@ -40,13 +24,6 @@ class TestTuiState:
 
     def test_panel_state_enum(self) -> None:
         """Test PanelState enum values."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "state", "src/copex/tui/state.py"
-        )
-        state_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(state_mod)
-
         PanelState = state_mod.PanelState
 
         assert PanelState.COLLAPSED == "collapsed"
@@ -54,13 +31,6 @@ class TestTuiState:
 
     def test_tool_call_state(self) -> None:
         """Test ToolCallState dataclass."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "state", "src/copex/tui/state.py"
-        )
-        state_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(state_mod)
-
         ToolCallState = state_mod.ToolCallState
         PanelState = state_mod.PanelState
 
@@ -81,13 +51,6 @@ class TestTuiState:
 
     def test_tool_call_icon(self) -> None:
         """Test ToolCallState icon property."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "state", "src/copex/tui/state.py"
-        )
-        state_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(state_mod)
-
         ToolCallState = state_mod.ToolCallState
 
         assert ToolCallState(name="view").icon == "📖"
@@ -104,13 +67,6 @@ class TestTuiState:
 
     def test_session_state(self) -> None:
         """Test SessionState dataclass."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "state", "src/copex/tui/state.py"
-        )
-        state_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(state_mod)
-
         SessionState = state_mod.SessionState
 
         session = SessionState()
@@ -134,13 +90,6 @@ class TestTuiState:
 
     def test_tui_state_stash(self) -> None:
         """Test TuiState stash operations."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "state", "src/copex/tui/state.py"
-        )
-        state_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(state_mod)
-
         TuiState = state_mod.TuiState
 
         state = TuiState()
@@ -161,13 +110,6 @@ class TestTuiState:
 
     def test_tui_state_palette(self) -> None:
         """Test TuiState palette operations."""
-        import importlib.util
-        spec = importlib.util.spec_from_file_location(
-            "state", "src/copex/tui/state.py"
-        )
-        state_mod = importlib.util.module_from_spec(spec)
-        spec.loader.exec_module(state_mod)
-
         TuiState = state_mod.TuiState
         TuiMode = state_mod.TuiMode
 
@@ -191,9 +133,6 @@ class TestTuiState:
 
     def test_tui_app_builds_keybindings_and_layout(self) -> None:
         """Smoke test: the TUI app constructs without invalid key bindings."""
-        import sys
-
-        sys.path.insert(0, "src")
         from copex.tui.app import TuiApp
 
         app = TuiApp()
@@ -202,6 +141,57 @@ class TestTuiState:
 
         assert kb is not None
         assert layout is not None
+
+    @pytest.mark.asyncio
+    async def test_tui_app_input_loop_survives_cancel(self, monkeypatch) -> None:
+        from copex.config import CopexConfig
+        from copex.tui.app import TuiApp
+
+        app = TuiApp()
+        cancel_seen = asyncio.Event()
+        second_prompt_seen = asyncio.Event()
+        fake_client = SimpleNamespace(
+            start=AsyncMock(),
+            stop=AsyncMock(),
+            abort=AsyncMock(),
+        )
+
+        async def fake_process(prompt: str) -> None:
+            if prompt == "first":
+                app.state.session.is_streaming = True
+                try:
+                    await asyncio.sleep(60)
+                except asyncio.CancelledError:
+                    cancel_seen.set()
+                    raise
+            elif prompt == "second":
+                second_prompt_seen.set()
+
+        class _FakeApplication:
+            def invalidate(self) -> None:
+                return None
+
+            async def run_async(self) -> None:
+                app.state.input_buffer = "first"
+                while app._current_send_task is None:
+                    await asyncio.sleep(0.01)
+                app._handle_cancel()
+                await asyncio.wait_for(cancel_seen.wait(), timeout=1.0)
+                app.state.session.is_streaming = False
+                app.state.input_buffer = "second"
+                await asyncio.wait_for(second_prompt_seen.wait(), timeout=1.0)
+                app._running = False
+
+        monkeypatch.setattr(app, "_process_message", fake_process)
+        monkeypatch.setattr("copex.client.Copex", lambda _config: fake_client)
+        monkeypatch.setattr("copex.metrics.get_collector", lambda: object())
+        monkeypatch.setattr("copex.tui.app.Application", lambda *args, **kwargs: _FakeApplication())
+        monkeypatch.setattr("copex.ui.print_welcome", lambda *_args, **_kwargs: None)
+
+        await app.run(CopexConfig())
+
+        fake_client.abort.assert_awaited()
+        fake_client.stop.assert_awaited_once()
 
 
 class TestPalette:

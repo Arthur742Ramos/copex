@@ -33,7 +33,9 @@ class JSReplManager:
         self._request_id = 0
         self._pending: dict[int, asyncio.Future[dict[str, Any]]] = {}
         self._reader_task: asyncio.Task[None] | None = None
+        self._stderr_task: asyncio.Task[bytes] | None = None
         self._lock = asyncio.Lock()
+        self._expected_shutdown = False
 
     # ------------------------------------------------------------------
     # Lifecycle
@@ -51,7 +53,10 @@ class JSReplManager:
                 stdout=asyncio.subprocess.PIPE,
                 stderr=asyncio.subprocess.PIPE,
             )
-            self._reader_task = asyncio.create_task(self._reader_loop())
+            process = self._process
+            self._reader_task = asyncio.create_task(self._reader_loop(process))
+            if self._process.stderr is not None:
+                self._stderr_task = asyncio.create_task(self._process.stderr.read())
             logger.debug("JS REPL kernel started (pid=%s)", self._process.pid)
 
     async def stop(self) -> None:
@@ -59,25 +64,34 @@ class JSReplManager:
         async with self._lock:
             await self._stop_unlocked()
 
-    async def _stop_unlocked(self) -> None:
-        if self._reader_task is not None:
-            self._reader_task.cancel()
-            try:
-                await self._reader_task
-            except asyncio.CancelledError:
-                pass
-            self._reader_task = None
+    async def _stop_unlocked(self, *, expected_shutdown: bool = True) -> None:
+        self._expected_shutdown = expected_shutdown
+        reader_task = self._reader_task
+        stderr_task = self._stderr_task
+        process = self._process
+        self._reader_task = None
+        self._stderr_task = None
+        self._process = None
 
-        if self._process is not None:
+        if process is not None:
             try:
-                self._process.terminate()
-                await asyncio.wait_for(self._process.wait(), timeout=5.0)
+                process.terminate()
+                await asyncio.wait_for(process.wait(), timeout=5.0)
             except (asyncio.TimeoutError, ProcessLookupError):
                 try:
-                    self._process.kill()
+                    process.kill()
                 except ProcessLookupError:
                     pass
-            self._process = None
+
+        for task in (reader_task, stderr_task):
+            if task is None:
+                continue
+            if not task.done():
+                task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                pass
 
         # Fail all pending futures
         pending = dict(self._pending)
@@ -85,6 +99,7 @@ class JSReplManager:
         for fut in pending.values():
             if not fut.done():
                 fut.set_exception(ConnectionError("JS REPL kernel stopped"))
+        self._expected_shutdown = False
 
     @property
     def running(self) -> bool:
@@ -149,14 +164,14 @@ class JSReplManager:
         """Auto-(re)start the kernel if it crashed or was never started."""
         if not self.running:
             async with self._lock:
-                await self._stop_unlocked()
+                await self._stop_unlocked(expected_shutdown=False)
             await self.start()
 
-    async def _reader_loop(self) -> None:
-        assert self._process is not None and self._process.stdout is not None
+    async def _reader_loop(self, process: asyncio.subprocess.Process) -> None:
+        assert process.stdout is not None
         try:
             while True:
-                line = await self._process.stdout.readline()
+                line = await process.stdout.readline()
                 if not line:
                     break
                 try:
@@ -177,9 +192,14 @@ class JSReplManager:
         finally:
             pending = dict(self._pending)
             self._pending.clear()
+            error_message = (
+                "JS REPL kernel stopped"
+                if self._expected_shutdown
+                else "JS REPL kernel exited unexpectedly"
+            )
             for fut in pending.values():
                 if not fut.done():
-                    fut.set_exception(ConnectionError("JS REPL kernel exited unexpectedly"))
+                    fut.set_exception(ConnectionError(error_message))
 
     # ------------------------------------------------------------------
     # Context manager

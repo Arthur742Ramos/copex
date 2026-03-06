@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import shlex
 import subprocess
 import time
 from collections.abc import Callable
@@ -1164,194 +1165,183 @@ async def _run_fleet(
         _progress_thread = threading.Thread(target=_progress_worker, daemon=True)
         _progress_thread.start()
 
-    # ── Worktree isolation setup ───────────────────────────────────
-    worktree_managers: dict[str, "WorktreeManager"] = {}  # task_id -> manager
-    if worktree:
-        from copex.worktree import WorktreeManager
+    worktree_managers: dict[str, "WorktreeManager"] = {}
+    results: list[Any] = []
+    try:
+        # ── Worktree isolation setup ───────────────────────────────────
+        if worktree:
+            from copex.worktree import WorktreeManager
 
-        repo_root = WorktreeManager.get_repo_root(config.working_dir)
-        if repo_root is None:
-            console.print("[red]Error: --worktree requires a git repository[/red]")
-            raise typer.Exit(1) from None
-        if WorktreeManager.has_uncommitted_changes(repo_root):
-            console.print(
-                "[yellow]Warning: uncommitted changes in working tree. "
-                "Worktrees will be based on HEAD (uncommitted changes won't be included).[/yellow]"
-            )
-        for task in tasks:
-            mgr = WorktreeManager(repo_root=repo_root)
-            create_result = mgr.create_worktree()
-            if not create_result.success:
-                console.print(
-                    f"[red]Failed to create worktree for task '{task.id}': "
-                    f"{create_result.error}[/red]"
-                )
-                # Clean up already-created worktrees
-                for prev_mgr in worktree_managers.values():
-                    prev_mgr.cleanup_worktree()
+            repo_root = WorktreeManager.get_repo_root(config.working_dir)
+            if repo_root is None:
+                console.print("[red]Error: --worktree requires a git repository[/red]")
                 raise typer.Exit(1) from None
-            worktree_managers[task.id] = mgr
-            # Override task cwd to the worktree path
-            task.cwd = str(mgr.worktree_path)
-            console.print(
-                f"  [dim]🌲 Task '{task.id}' → worktree {mgr.worktree_path}[/dim]"
-            )
-
-    async with Fleet(config, fleet_config) as fleet:
-        for task in tasks:
-            fleet.add(
-                task.prompt,
-                task_id=task.id,
-                depends_on=task.depends_on if task.depends_on else None,
-                model=task.model,
-                reasoning_effort=task.reasoning_effort,
-                cwd=task.cwd,
-                skills=task.skills,
-                exclude_tools=task.exclude_tools,
-                mcp_servers=task.mcp_servers,
-                timeout_sec=task.timeout_sec,
-                skills_dirs=task.skills_dirs,
-                on_dependency_failure=task.on_dependency_failure,
-            )
-
-        with Live(build_table(), console=console, refresh_per_second=4) as live:
-
-            async def _run_with_updates() -> list:
-
-                results = await fleet.run(on_status=on_status)
-                # Mark final statuses
-                for r in results:
-                    statuses[r.task_id] = "done" if r.success else "failed"
-                live.update(build_table())
-                return results
-
-            results = await _run_with_updates()
-
-    # ── Worktree merge-back & cleanup ────────────────────────────────
-    if worktree and worktree_managers:
-        merge_failures: list[str] = []
-        for r in results:
-            mgr = worktree_managers.get(r.task_id)
-            if mgr is None:
-                continue
-            if r.success:
-                commit_res = mgr.commit_in_worktree(
-                    f"fleet({r.task_id}): apply changes"
+            if WorktreeManager.has_uncommitted_changes(repo_root):
+                console.print(
+                    "[yellow]Warning: uncommitted changes in working tree. "
+                    "Worktrees will be based on HEAD (uncommitted changes won't be included).[/yellow]"
                 )
-                if commit_res.success and commit_res.commit_hash:
-                    merge_res = mgr.merge_back()
-                    if merge_res.success:
+            for task in tasks:
+                mgr = WorktreeManager(repo_root=repo_root)
+                create_result = mgr.create_worktree()
+                if not create_result.success:
+                    console.print(
+                        f"[red]Failed to create worktree for task '{task.id}': "
+                        f"{create_result.error}[/red]"
+                    )
+                    raise typer.Exit(1) from None
+                worktree_managers[task.id] = mgr
+                task.cwd = str(mgr.worktree_path)
+                console.print(
+                    f"  [dim]🌲 Task '{task.id}' → worktree {mgr.worktree_path}[/dim]"
+                )
+
+        async with Fleet(config, fleet_config) as fleet:
+            for task in tasks:
+                fleet.add(
+                    task.prompt,
+                    task_id=task.id,
+                    depends_on=task.depends_on if task.depends_on else None,
+                    model=task.model,
+                    reasoning_effort=task.reasoning_effort,
+                    cwd=task.cwd,
+                    skills=task.skills,
+                    exclude_tools=task.exclude_tools,
+                    mcp_servers=task.mcp_servers,
+                    timeout_sec=task.timeout_sec,
+                    skills_dirs=task.skills_dirs,
+                    on_dependency_failure=task.on_dependency_failure,
+                )
+
+            with Live(build_table(), console=console, refresh_per_second=4) as live:
+
+                async def _run_with_updates() -> list:
+
+                    fleet_results = await fleet.run(on_status=on_status)
+                    for result in fleet_results:
+                        statuses[result.task_id] = "done" if result.success else "failed"
+                    live.update(build_table())
+                    return fleet_results
+
+                results = await _run_with_updates()
+
+        if worktree and worktree_managers:
+            merge_failures: list[str] = []
+            for r in results:
+                mgr = worktree_managers.get(r.task_id)
+                if mgr is None:
+                    continue
+                if r.success:
+                    commit_res = mgr.commit_in_worktree(
+                        f"fleet({r.task_id}): apply changes"
+                    )
+                    if commit_res.success and commit_res.commit_hash:
+                        merge_res = mgr.merge_back()
+                        if merge_res.success:
+                            console.print(
+                                f"  [green]✅ Task '{r.task_id}' merged back "
+                                f"({commit_res.commit_hash[:8]})[/green]"
+                            )
+                        else:
+                            merge_failures.append(
+                                f"Task '{r.task_id}': {merge_res.error}"
+                            )
+                            console.print(
+                                f"  [red]❌ Task '{r.task_id}' merge failed: "
+                                f"{merge_res.error}[/red]"
+                            )
+                    elif commit_res.error == "No changes to commit":
                         console.print(
-                            f"  [green]✅ Task '{r.task_id}' merged back "
-                            f"({commit_res.commit_hash[:8]})[/green]"
+                            f"  [dim]Task '{r.task_id}': no changes to merge[/dim]"
                         )
                     else:
-                        merge_failures.append(
-                            f"Task '{r.task_id}': {merge_res.error}"
-                        )
                         console.print(
-                            f"  [red]❌ Task '{r.task_id}' merge failed: "
-                            f"{merge_res.error}[/red]"
+                            f"  [red]❌ Task '{r.task_id}' commit failed: "
+                            f"{commit_res.error}[/red]"
                         )
-                elif commit_res.error == "No changes to commit":
-                    console.print(
-                        f"  [dim]Task '{r.task_id}': no changes to merge[/dim]"
-                    )
                 else:
                     console.print(
-                        f"  [red]❌ Task '{r.task_id}' commit failed: "
-                        f"{commit_res.error}[/red]"
+                        f"  [dim]Task '{r.task_id}' failed — skipping merge[/dim]"
                     )
-            else:
+
+            if merge_failures:
                 console.print(
-                    f"  [dim]Task '{r.task_id}' failed — skipping merge[/dim]"
-                )
-
-            # Always clean up
-            mgr.cleanup_worktree()
-
-        if merge_failures:
-            console.print(
-                Panel(
-                    "\n".join(merge_failures),
-                    title="⚠️  Worktree Merge Failures",
-                    border_style="red",
-                )
-            )
-
-    # Stop progress watcher
-    if _progress_thread is not None:
-        _progress_stop.set()
-        _progress_thread.join(timeout=5.0)
-
-    # --retry: detect build commands and retry on failure
-    if retry > 0:
-        _BUILD_CMDS = [
-            "lake build", "cargo build", "npm run build", "yarn build",
-            "make", "go build", "dotnet build", "gradle build",
-            "mvn compile", "tsc", "pnpm build",
-        ]
-
-        def _detect_build_cmd() -> str | None:
-            """Try to detect a build command from task prompts or common project files."""
-            cwd_path = config.working_dir
-            # Check for lakefile / Cargo.toml / package.json etc.
-            detectors: list[tuple[str, str]] = [
-                ("lakefile.lean", "lake build"),
-                ("Cargo.toml", "cargo build"),
-                ("package.json", "npm run build"),
-                ("Makefile", "make"),
-                ("go.mod", "go build ./..."),
-                ("build.gradle", "gradle build"),
-                ("pom.xml", "mvn compile"),
-                ("tsconfig.json", "tsc --noEmit"),
-            ]
-            for marker, cmd in detectors:
-                if (cwd_path / marker).exists():
-                    return cmd
-            return None
-
-        build_cmd = _detect_build_cmd()
-        if build_cmd:
-            console.print(f"[blue]🔨 Detected build command: {build_cmd}[/blue]")
-            for attempt in range(1, retry + 1):
-                console.print(f"[yellow]Running build check ({attempt}/{retry})…[/yellow]")
-                build_result = subprocess.run(
-                    build_cmd,
-                    shell=True,
-                    capture_output=True,
-                    text=True,
-                    cwd=str(config.working_dir),
-                )
-                if build_result.returncode == 0:
-                    console.print("[green]✅ Build succeeded![/green]")
-                    break
-                else:
-                    errors_text = (build_result.stderr or build_result.stdout or "unknown error").strip()
-                    # Truncate very long error output
-                    if len(errors_text) > 4000:
-                        errors_text = errors_text[:4000] + "\n... (truncated)"
-                    console.print(
-                        f"[red]Build failed (attempt {attempt}/{retry}).[/red]\n"
-                        f"[dim]{errors_text[:500]}[/dim]"
+                    Panel(
+                        "\n".join(merge_failures),
+                        title="⚠️  Worktree Merge Failures",
+                        border_style="red",
                     )
-                    if attempt >= retry:
-                        console.print("[red]❌ All retry attempts exhausted. Build still failing.[/red]")
+                )
+
+        if retry > 0:
+
+            def _detect_build_cmd() -> list[str] | None:
+                """Try to detect a build command from task prompts or common project files."""
+                cwd_path = config.working_dir
+                detectors: list[tuple[str, list[str]]] = [
+                    ("lakefile.lean", ["lake", "build"]),
+                    ("Cargo.toml", ["cargo", "build"]),
+                    ("package.json", ["npm", "run", "build"]),
+                    ("Makefile", ["make"]),
+                    ("go.mod", ["go", "build", "./..."]),
+                    ("build.gradle", ["gradle", "build"]),
+                    ("pom.xml", ["mvn", "compile"]),
+                    ("tsconfig.json", ["tsc", "--noEmit"]),
+                ]
+                for marker, cmd in detectors:
+                    if (cwd_path / marker).exists():
+                        return cmd
+                return None
+
+            build_cmd = _detect_build_cmd()
+            if build_cmd:
+                build_cmd_display = shlex.join(build_cmd)
+                console.print(f"[blue]🔨 Detected build command: {build_cmd_display}[/blue]")
+                for attempt in range(1, retry + 1):
+                    console.print(f"[yellow]Running build check ({attempt}/{retry})…[/yellow]")
+                    build_result = subprocess.run(
+                        build_cmd,
+                        capture_output=True,
+                        text=True,
+                        cwd=str(config.working_dir),
+                    )
+                    if build_result.returncode == 0:
+                        console.print("[green]✅ Build succeeded![/green]")
                         break
-                    # Use fleet to fix the errors
-                    fix_prompt = (
-                        f"Build failed with errors:\n{errors_text}\n\n"
-                        f"Please fix these errors. The build command is: {build_cmd}"
-                    )
-                    console.print(f"[yellow]Retry {attempt}/{retry}: fixing build errors…[/yellow]")
-                    async with Fleet(config, fleet_config) as retry_fleet:
-                        retry_fleet.add(fix_prompt, task_id=f"retry-{attempt}")
-                        retry_results = await retry_fleet.run()
-                        for r in retry_results:
-                            if not r.success:
-                                console.print(f"[red]Retry task failed: {r.error}[/red]")
-        else:
-            console.print("[dim]--retry: no build system detected, skipping build check[/dim]")
+                    else:
+                        errors_text = (build_result.stderr or build_result.stdout or "unknown error").strip()
+                        if len(errors_text) > 4000:
+                            errors_text = errors_text[:4000] + "\n... (truncated)"
+                        console.print(
+                            f"[red]Build failed (attempt {attempt}/{retry}).[/red]\n"
+                            f"[dim]{errors_text[:500]}[/dim]"
+                        )
+                        if attempt >= retry:
+                            console.print("[red]❌ All retry attempts exhausted. Build still failing.[/red]")
+                            break
+                        fix_prompt = (
+                            f"Build failed with errors:\n{errors_text}\n\n"
+                            f"Please fix these errors. The build command is: {build_cmd_display}"
+                        )
+                        console.print(f"[yellow]Retry {attempt}/{retry}: fixing build errors…[/yellow]")
+                        async with Fleet(config, fleet_config) as retry_fleet:
+                            retry_fleet.add(fix_prompt, task_id=f"retry-{attempt}")
+                            retry_results = await retry_fleet.run()
+                            for r in retry_results:
+                                if not r.success:
+                                    console.print(f"[red]Retry task failed: {r.error}[/red]")
+            else:
+                console.print("[dim]--retry: no build system detected, skipping build check[/dim]")
+    finally:
+        if worktree_managers:
+            for mgr in worktree_managers.values():
+                try:
+                    mgr.cleanup_worktree()
+                except Exception:
+                    console.print("[dim]Failed to clean up worktree[/dim]")
+        if _progress_thread is not None:
+            _progress_stop.set()
+            _progress_thread.join(timeout=5.0)
 
     total_time = time.time() - start_time
     successes = sum(1 for r in results if r.success)

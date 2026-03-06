@@ -12,6 +12,7 @@ import typer
 import copex.cli as cli
 import copex.cli_plan as cli_plan
 import copex.cli_squad as cli_squad
+from copex.campaign import create_campaign, load_campaign_state, save_campaign_state
 from copex.config import CopexConfig
 
 
@@ -116,3 +117,33 @@ def test_run_chat_reports_actionable_error_and_stops_client(monkeypatch, capsys)
     assert "Chat failed (RuntimeError): chat exploded" in output
     assert "Tip: retry with --json or --quiet for easier automation." in output
     client.stop.assert_awaited_once()
+
+
+def test_campaign_wave_failure_does_not_raise_nameerror(monkeypatch, tmp_path, capsys):
+    """Campaign wave failures should surface the original error without secondary NameError."""
+    state_file = tmp_path / "campaign.json"
+    state = create_campaign(
+        goal="Fix bugs",
+        discover_command="discover",
+        batch_size=1,
+        targets=["src/a.py"],
+    )
+    save_campaign_state(state, state_file)
+
+    async def _boom(**_kwargs):
+        raise RuntimeError("fleet exploded")
+
+    monkeypatch.setattr(cli, "_run_fleet", _boom)
+
+    with pytest.raises(typer.Exit):
+        cli.campaign_command(
+            resume=True,
+            state_file=state_file,
+            git_finalize=False,
+        )
+
+    output = capsys.readouterr().out
+    assert "Wave 1 failed: fleet exploded" in output
+    resumed = load_campaign_state(state_file)
+    assert resumed is not None
+    assert resumed.waves[0].error == "fleet exploded"

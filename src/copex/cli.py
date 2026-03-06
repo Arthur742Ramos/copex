@@ -103,6 +103,8 @@ from copex.ui import (
     print_welcome,
 )
 
+logger = logging.getLogger(__name__)
+
 __all__ = [
     "FleetTaskSpec",
     "_build_council_tasks",
