@@ -5,7 +5,8 @@ from __future__ import annotations
 # ruff: noqa: F401
 from typing import TYPE_CHECKING, Any
 
-__version__ = "2.22.0"
+
+__version__ = "2.23.0"
 
 # Re-export core components for convenience
 from .agent import AgentResult, AgentSession, AgentTurn
