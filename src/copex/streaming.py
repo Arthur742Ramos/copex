@@ -7,6 +7,8 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
 
+_now = time.perf_counter
+
 
 @dataclass
 class StreamChunk:
@@ -40,7 +42,7 @@ class StreamingMetrics:
 
     def start(self) -> None:
         """Record the stream start time."""
-        self._start_time = time.monotonic()
+        self._start_time = _now()
 
     @property
     def time_to_first_chunk_ms(self) -> float | None:
@@ -67,7 +69,7 @@ class StreamingMetrics:
         return self.total_bytes / elapsed
 
     def record_chunk(self, chunk: StreamChunk) -> None:
-        now = time.monotonic()
+        now = _now()
         if self.first_chunk_time is None:
             self.first_chunk_time = now
         self.last_chunk_time = now

@@ -228,7 +228,7 @@ class CopilotCLI:
         on_chunk: Callable[[StreamChunk], None] | None = None,
     ) -> tuple[str, StreamingMetrics]:
         cwd = str(self.config.working_dir) if (self.config.working_directory or self.config.cwd) else None
-        metrics = StreamingMetrics(_start_time=time.monotonic())
+        metrics = StreamingMetrics(_start_time=time.perf_counter())
 
         process = await asyncio.create_subprocess_exec(
             *cmd,

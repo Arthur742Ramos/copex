@@ -48,7 +48,7 @@ class TestStreamingMetrics:
         assert m.throughput_bytes_per_second == 0.0
 
     def test_record_message_chunk(self):
-        m = StreamingMetrics(_start_time=time.monotonic())
+        m = StreamingMetrics(_start_time=time.perf_counter())
         m.record_chunk(StreamChunk(type="message", delta="hello"))
         assert m.total_chunks == 1
         assert m.message_chunks == 1
@@ -71,7 +71,7 @@ class TestStreamingMetrics:
         assert m.tool_chunks == 1
 
     def test_time_to_first_chunk(self):
-        now = time.monotonic()
+        now = time.perf_counter()
         m = StreamingMetrics(_start_time=now)
         m.first_chunk_time = now + 0.1
         ttfc = m.time_to_first_chunk_ms
@@ -80,24 +80,24 @@ class TestStreamingMetrics:
 
     def test_time_to_first_chunk_no_start(self):
         m = StreamingMetrics()
-        m.first_chunk_time = time.monotonic()
+        m.first_chunk_time = time.perf_counter()
         assert m.time_to_first_chunk_ms is None
 
     def test_chunks_per_second_single_chunk(self):
-        now = time.monotonic()
+        now = time.perf_counter()
         m = StreamingMetrics(first_chunk_time=now, last_chunk_time=now, total_chunks=1)
         # elapsed=0 → returns 0.0 (rate is undefined for zero elapsed time)
         assert m.chunks_per_second == 0.0
 
     def test_chunks_per_second_multiple(self):
-        now = time.monotonic()
+        now = time.perf_counter()
         m = StreamingMetrics(
             first_chunk_time=now, last_chunk_time=now + 2.0, total_chunks=10
         )
         assert abs(m.chunks_per_second - 5.0) < 0.01
 
     def test_throughput_bytes_zero_elapsed(self):
-        now = time.monotonic()
+        now = time.perf_counter()
         m = StreamingMetrics(
             first_chunk_time=now, last_chunk_time=now, total_bytes=100
         )
@@ -105,7 +105,7 @@ class TestStreamingMetrics:
         assert m.throughput_bytes_per_second == 0.0
 
     def test_throughput_bytes_nonzero(self):
-        now = time.monotonic()
+        now = time.perf_counter()
         m = StreamingMetrics(
             first_chunk_time=now, last_chunk_time=now + 1.0, total_bytes=1000
         )
@@ -229,7 +229,7 @@ class TestStreamingEdgeCases:
 
     def test_metrics_multiple_chunks_timing(self):
         """Verify first/last chunk times are tracked correctly."""
-        m = StreamingMetrics(_start_time=time.monotonic())
+        m = StreamingMetrics(_start_time=time.perf_counter())
         m.record_chunk(StreamChunk(type="message", delta="a"))
         first = m.first_chunk_time
         time.sleep(0.01)
@@ -245,10 +245,10 @@ class TestStreamingEdgeCases:
 
     def test_chunks_per_second_no_first_chunk(self):
         """No first chunk should return 0."""
-        m = StreamingMetrics(last_chunk_time=time.monotonic(), total_chunks=5)
+        m = StreamingMetrics(last_chunk_time=time.perf_counter(), total_chunks=5)
         assert m.chunks_per_second == 0.0
 
     def test_chunks_per_second_no_last_chunk(self):
         """No last chunk should return 0."""
-        m = StreamingMetrics(first_chunk_time=time.monotonic(), total_chunks=5)
+        m = StreamingMetrics(first_chunk_time=time.perf_counter(), total_chunks=5)
         assert m.chunks_per_second == 0.0
