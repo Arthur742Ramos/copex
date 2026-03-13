@@ -284,6 +284,10 @@ class CopexConfig(BaseModel):
         default=False,
         description="Enable persistent JavaScript REPL tool (requires Node.js)",
     )
+    js_repl_node_path: str | None = Field(
+        default=None,
+        description="Optional Node.js executable path to use for the JavaScript REPL",
+    )
     pdf_analyze: bool = Field(
         default=False,
         description="Enable PDF analysis tools (requires PyMuPDF)",
@@ -309,6 +313,14 @@ class CopexConfig(BaseModel):
         except (ValueError, KeyError, TypeError):
             return value
         return parsed if parsed is not None else value
+
+    @field_validator("js_repl_node_path", mode="before")
+    @classmethod
+    def _normalize_js_repl_node_path(cls, value: Any) -> str | None:
+        if value is None:
+            return None
+        normalized = str(value).strip()
+        return normalized or None
 
     @model_validator(mode="after")
     def _cap_reasoning_by_model(self) -> CopexConfig:
@@ -555,7 +567,13 @@ class CopexConfig(BaseModel):
         if self.js_repl:
             from copex.sdk_tools import build_domain_tools, register_js_repl_tools
 
-            if register_js_repl_tools():
+            registered = register_js_repl_tools(self.js_repl_node_path)
+            if self.js_repl_node_path and not registered:
+                raise ValueError(
+                    f"Configured js_repl_node_path was not found or is not executable: "
+                    f"{self.js_repl_node_path}"
+                )
+            if registered:
                 js_tools = build_domain_tools(
                     ["js_repl", "js_repl_reset"], working_dir=Path(opts["working_directory"])
                 )

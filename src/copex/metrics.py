@@ -51,8 +51,8 @@ class RequestMetrics:
 
     def finalize(self, end_time: float | None = None) -> None:
         """Finalize timing metrics."""
-        self.end_time = end_time or time.time()
-        self.duration_ms = (self.end_time - self.start_time) * 1000
+        self.end_time = end_time if end_time is not None else time.perf_counter()
+        self.duration_ms = max((self.end_time - self.start_time) * 1000, 0.001)
 
 
 @dataclass
@@ -228,7 +228,7 @@ class MetricsCollector:
             timestamp=datetime.now().isoformat(),
             model=model,
             reasoning_effort=reasoning_effort,
-            start_time=time.time(),
+            start_time=time.perf_counter(),
             prompt_preview=prompt[:100] if prompt else "",
             prompt_tokens=estimate_tokens(prompt) if prompt else None,
         )

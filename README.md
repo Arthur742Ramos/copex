@@ -22,6 +22,7 @@ A resilient Python wrapper for the GitHub Copilot SDK with automatic retry, Ralp
 - **Repo-awareness** — automatic discovery of project structure, README, pyproject.toml, and conventions
 - **MCP integration** — connect external Model Context Protocol servers
 - **Skill discovery** — auto-discover and load skill files from repo/user dirs
+- **Persistent JavaScript REPL** — optional stateful Node.js tool for calculations, prototyping, and debugging JS
 - **PDF vision analysis** — render PDF pages for the active model to inspect text, charts, and figures
 - **Beautiful CLI** with Rich terminal output, themes, and streaming
 - **CLI client mode** — bypass the SDK to access all models via subprocess
@@ -76,6 +77,9 @@ echo "What is a monad?" | copex chat --stdin
 
 # Root prompt, but disable squad and force single-agent mode
 copex -p "Explain quicksort" --no-squad
+
+# Enable the persistent JavaScript REPL tool for this session
+copex chat "Check this JS array logic" --js-repl
 
 # Choose model and reasoning
 copex chat "Optimize this SQL" -m gpt-5.2-codex -r xhigh
@@ -189,6 +193,9 @@ streaming = true
 use_cli = false
 timeout = 300.0
 auto_continue = true
+js_repl = false
+# js_repl_node_path = "/path/to/node"
+pdf_analyze = false
 ui_theme = "default"       # default, midnight, mono, sunset, tokyo
 ui_density = "extended"    # compact, extended
 
@@ -217,6 +224,22 @@ skills = ["code-review"]
 |---|---|
 | `COPEX_MODEL` | Override the default model |
 | `COPEX_REASONING` | Override the reasoning effort |
+
+## JavaScript REPL Tool
+
+Enable the optional persistent JavaScript REPL with `--js-repl` on `copex chat`, the root `copex -p ...` flow, or `copex interactive`.
+
+```bash
+copex chat "Inspect this snippet" --js-repl
+copex interactive --js-repl --js-repl-node /custom/node
+```
+
+When enabled, Copex registers two domain tools for the model:
+
+- `js_repl` — execute JavaScript in a persistent Node.js VM context
+- `js_repl_reset` — clear the persistent JS state
+
+If Node.js is not on `PATH`, set `js_repl_node_path` in `config.toml` or pass `--js-repl-node`. Startup failures now surface the kernel's stderr output to make troubleshooting easier.
 
 ## CLI Commands
 

@@ -464,6 +464,10 @@ def main(
     js_repl: Annotated[
         bool, typer.Option("--js-repl", help="Enable persistent JavaScript REPL tool (requires Node.js)")
     ] = False,
+    js_repl_node: Annotated[
+        str | None,
+        typer.Option("--js-repl-node", help="Path to the Node.js executable for --js-repl"),
+    ] = None,
     pdf_analyze: Annotated[
         bool, typer.Option("--pdf-analyze", help="Enable PDF analysis tools (requires PyMuPDF)")
     ] = False,
@@ -491,6 +495,7 @@ def main(
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
         js_repl: CLI argument or option value.
+        js_repl_node: CLI argument or option value.
         pdf_analyze: CLI argument or option value.
         force: CLI argument or option value.
 
@@ -530,8 +535,10 @@ def main(
                 if warning:
                     console.print(f"[yellow]{warning}[/yellow]")
                 config.reasoning_effort = normalized_effort
-                if js_repl:
+                if js_repl or js_repl_node:
                     config.js_repl = True
+                if js_repl_node:
+                    config.js_repl_node_path = js_repl_node
                 if pdf_analyze:
                     config.pdf_analyze = True
                 _apply_approval_flags(
@@ -565,7 +572,13 @@ def main(
                 raise typer.Exit(1) from None
         else:
             # No prompt provided - launch interactive mode
-            interactive(model=effective_model, reasoning=reasoning)
+            interactive(
+                model=effective_model,
+                reasoning=reasoning,
+                js_repl=js_repl,
+                js_repl_node=js_repl_node,
+                pdf_analyze=pdf_analyze,
+            )
 
 
 @memory_app.command("show")
@@ -904,6 +917,10 @@ def chat(
     js_repl: Annotated[
         bool, typer.Option("--js-repl", help="Enable persistent JavaScript REPL tool (requires Node.js)")
     ] = False,
+    js_repl_node: Annotated[
+        str | None,
+        typer.Option("--js-repl-node", help="Path to the Node.js executable for --js-repl"),
+    ] = None,
     pdf_analyze: Annotated[
         bool, typer.Option("--pdf-analyze", help="Enable PDF analysis tools (requires PyMuPDF)")
     ] = False,
@@ -937,6 +954,7 @@ def chat(
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
         js_repl: CLI argument or option value.
+        js_repl_node: CLI argument or option value.
         pdf_analyze: CLI argument or option value.
 
     Returns:
@@ -962,8 +980,10 @@ def chat(
         config.context_budget = context_budget
     if use_cli:
         config.use_cli = True
-    if js_repl:
+    if js_repl or js_repl_node:
         config.js_repl = True
+    if js_repl_node:
+        config.js_repl_node_path = js_repl_node
     if pdf_analyze:
         config.pdf_analyze = True
     if ui_theme:
@@ -1416,6 +1436,8 @@ def init(
         },
         "approval_mode": "auto-approve",
         "audit": False,
+        "js_repl": False,
+        "pdf_analyze": False,
         "ui_theme": "default",
         "ui_density": "extended",
     }
@@ -1463,6 +1485,16 @@ def interactive(
     audit: Annotated[
         bool, typer.Option("--audit", help="Log file change decisions to .copex/audit.log")
     ] = False,
+    js_repl: Annotated[
+        bool, typer.Option("--js-repl", help="Enable persistent JavaScript REPL tool (requires Node.js)")
+    ] = False,
+    js_repl_node: Annotated[
+        str | None,
+        typer.Option("--js-repl-node", help="Path to the Node.js executable for --js-repl"),
+    ] = None,
+    pdf_analyze: Annotated[
+        bool, typer.Option("--pdf-analyze", help="Enable PDF analysis tools (requires PyMuPDF)")
+    ] = False,
 ) -> None:
     """Start an interactive chat session.
 
@@ -1479,6 +1511,9 @@ def interactive(
         approve: CLI argument or option value.
         dry_run: CLI argument or option value.
         audit: CLI argument or option value.
+        js_repl: CLI argument or option value.
+        js_repl_node: CLI argument or option value.
+        pdf_analyze: CLI argument or option value.
 
     Returns:
         None: Command result.
@@ -1496,6 +1531,12 @@ def interactive(
             config.ui_theme = ui_theme
         if ui_density:
             config.ui_density = ui_density
+        if js_repl or js_repl_node:
+            config.js_repl = True
+        if js_repl_node:
+            config.js_repl_node_path = js_repl_node
+        if pdf_analyze:
+            config.pdf_analyze = True
 
         # Skills options
         if skill_dir:

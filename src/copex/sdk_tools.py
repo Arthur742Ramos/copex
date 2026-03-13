@@ -6,7 +6,6 @@ import asyncio
 import json
 import logging
 import shlex
-import shutil
 from collections.abc import Callable, Sequence
 from pathlib import Path
 from typing import Any
@@ -493,17 +492,20 @@ _js_repl_logger = logging.getLogger(__name__)
 _pdf_tools_logger = logging.getLogger(__name__)
 
 
-def _get_js_repl_manager() -> Any:
+def _get_js_repl_manager(node_path: str | None = None) -> Any:
     """Return the module-level JSReplManager singleton, creating it lazily."""
     global _js_repl_manager
-    if _js_repl_manager is None:
+    current_node_path = getattr(_js_repl_manager, "node_path", None) if _js_repl_manager else None
+    if _js_repl_manager is None or (node_path and current_node_path != node_path):
         from copex.js_repl import JSReplManager
 
-        _js_repl_manager = JSReplManager()
+        if _js_repl_manager is not None and getattr(_js_repl_manager, "running", False):
+            raise RuntimeError("JS REPL manager is already running with a different Node.js executable")
+        _js_repl_manager = JSReplManager(node_path=node_path)
     return _js_repl_manager
 
 
-def _build_js_repl_tool(working_dir: Path) -> Tool:
+def _build_js_repl_tool(working_dir: Path, *, node_path: str | None = None) -> Tool:
     async def _handler(invocation: dict[str, Any]) -> dict[str, Any]:
         args = invocation.get("arguments") or {}
         code = str(args.get("code", "")).strip()
@@ -513,7 +515,7 @@ def _build_js_repl_tool(working_dir: Path) -> Tool:
                 error="missing code",
             )
 
-        manager = _get_js_repl_manager()
+        manager = _get_js_repl_manager(node_path)
         try:
             result = await manager.execute(code)
         except Exception as exc:
@@ -565,9 +567,9 @@ def _build_js_repl_tool(working_dir: Path) -> Tool:
     )
 
 
-def _build_js_repl_reset_tool(working_dir: Path) -> Tool:
+def _build_js_repl_reset_tool(working_dir: Path, *, node_path: str | None = None) -> Tool:
     async def _handler(invocation: dict[str, Any]) -> dict[str, Any]:
-        manager = _get_js_repl_manager()
+        manager = _get_js_repl_manager(node_path)
         try:
             await manager.reset()
         except Exception as exc:
@@ -746,17 +748,34 @@ def register_pdf_tools() -> bool:
     return True
 
 
-def register_js_repl_tools() -> bool:
+def register_js_repl_tools(node_path: str | None = None) -> bool:
     """Conditionally register JS REPL tools if Node.js is available.
 
     Returns True if registration succeeded, False otherwise.
     """
-    if not shutil.which("node"):
-        _js_repl_logger.warning("Node.js not found; js_repl tools will not be available")
+    from copex.js_repl import resolve_node_path
+
+    resolved_node_path = resolve_node_path(node_path)
+    if not resolved_node_path:
+        if node_path:
+            _js_repl_logger.warning(
+                "Configured Node.js executable not found for js_repl: %s",
+                node_path,
+            )
+        else:
+            _js_repl_logger.warning("Node.js not found; js_repl tools will not be available")
         return False
 
-    register_domain_tool("js_repl", _build_js_repl_tool, replace=True)
-    register_domain_tool("js_repl_reset", _build_js_repl_reset_tool, replace=True)
+    register_domain_tool(
+        "js_repl",
+        lambda working_dir: _build_js_repl_tool(working_dir, node_path=resolved_node_path),
+        replace=True,
+    )
+    register_domain_tool(
+        "js_repl_reset",
+        lambda working_dir: _build_js_repl_reset_tool(working_dir, node_path=resolved_node_path),
+        replace=True,
+    )
     return True
 
 

@@ -12,8 +12,8 @@
  * that variables survive between executions.
  */
 
-import { createInterface } from "node:readline";
-import vm from "node:vm";
+const { createInterface } = require("node:readline");
+const vm = require("node:vm");
 
 const TIMEOUT_MS = 30_000;
 

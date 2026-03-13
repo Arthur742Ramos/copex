@@ -43,23 +43,34 @@ def _invocation(args: dict[str, Any]) -> dict[str, Any]:
 class FakeProcess:
     """Simulates an asyncio.subprocess.Process for the JS kernel."""
 
-    def __init__(self, responses: list[dict[str, Any]] | None = None) -> None:
+    def __init__(
+        self,
+        responses: list[dict[str, Any]] | None = None,
+        *,
+        stderr_output: bytes = b"",
+    ) -> None:
         self.returncode: int | None = None
         self.pid: int = 12345
         self._responses = list(responses or [])
         self._response_idx = 0
+        self._write_count = 0
         self.stdin = MagicMock()
-        self.stdin.write = MagicMock()
+        self.stdin.write = MagicMock(side_effect=self._write)
         self.stdin.drain = AsyncMock()
         self.stdout = self._make_stdout()
         self.stderr = MagicMock()
-        self.stderr.read = AsyncMock(return_value=b"")
+        self.stderr.read = AsyncMock(return_value=stderr_output)
+
+    def _write(self, _data: bytes) -> None:
+        self._write_count += 1
 
     def _make_stdout(self) -> Any:
         stdout = MagicMock()
 
         async def _readline() -> bytes:
             if self._response_idx < len(self._responses):
+                while self._write_count <= self._response_idx:
+                    await asyncio.sleep(0)
                 resp = self._responses[self._response_idx]
                 self._response_idx += 1
                 return (json.dumps(resp) + "\n").encode()
@@ -164,11 +175,10 @@ async def test_manager_reset(manager: JSReplManager) -> None:
 
 @pytest.mark.asyncio
 async def test_manager_auto_restarts_on_crash(manager: JSReplManager) -> None:
-    # proc1 has already exited (returncode != None), so _ensure_running re-spawns
+    # proc1 crashes after start(), so _ensure_running re-spawns before execute()
     responses2 = [{"id": 1, "result": "second", "error": None, "console": []}]
     proc1 = FakeProcess([])
     proc2 = FakeProcess(responses2)
-    proc1.returncode = 1  # simulate crash
 
     call_count = 0
 
@@ -179,7 +189,7 @@ async def test_manager_auto_restarts_on_crash(manager: JSReplManager) -> None:
 
     with patch("copex.js_repl.asyncio.create_subprocess_exec", side_effect=_mock_exec):
         await manager.start()
-        # Process has crashed (returncode set), _ensure_running will restart
+        proc1.returncode = 1  # simulate crash after start
         # After restart, request_id resets to 0 internally, so next id=1
         manager._request_id = 0
         result = await manager.execute("1 + 1")
@@ -313,21 +323,21 @@ def test_js_repl_reset_tool_handler_failure(tmp_path: Path) -> None:
 
 
 def test_register_js_repl_tools_with_node() -> None:
-    with patch("copex.sdk_tools.shutil.which", return_value="/usr/bin/node"):
+    with patch("copex.js_repl.shutil.which", return_value="/usr/bin/node"):
         assert register_js_repl_tools() is True
     assert "js_repl" in list_domain_tools()
     assert "js_repl_reset" in list_domain_tools()
 
 
 def test_register_js_repl_tools_without_node() -> None:
-    with patch("copex.sdk_tools.shutil.which", return_value=None):
+    with patch("copex.js_repl.shutil.which", return_value=None):
         assert register_js_repl_tools() is False
     # Tools should not be registered when node is missing
     # (unless a previous test registered them)
 
 
 def test_register_js_repl_tools_builds_tools(tmp_path: Path) -> None:
-    with patch("copex.sdk_tools.shutil.which", return_value="/usr/bin/node"):
+    with patch("copex.js_repl.shutil.which", return_value="/usr/bin/node"):
         register_js_repl_tools()
     tools = build_domain_tools(["js_repl", "js_repl_reset"], working_dir=tmp_path)
     assert len(tools) == 2
@@ -354,11 +364,18 @@ def test_config_js_repl_enabled() -> None:
     assert config.js_repl is True
 
 
+def test_config_js_repl_node_path_normalizes_blank() -> None:
+    from copex.config import CopexConfig
+
+    config = CopexConfig(js_repl_node_path="   ")
+    assert config.js_repl_node_path is None
+
+
 def test_config_to_session_options_includes_tools_when_enabled() -> None:
     from copex.config import CopexConfig
 
     config = CopexConfig(js_repl=True)
-    with patch("copex.sdk_tools.shutil.which", return_value="/usr/bin/node"):
+    with patch("copex.js_repl.shutil.which", return_value="/usr/bin/node"):
         opts = config.to_session_options()
     assert "tools" in opts
     tool_names = [t.name for t in opts["tools"]]
@@ -378,9 +395,34 @@ def test_config_to_session_options_no_tools_when_no_node() -> None:
     from copex.config import CopexConfig
 
     config = CopexConfig(js_repl=True)
-    with patch("copex.sdk_tools.shutil.which", return_value=None):
+    with patch("copex.js_repl.shutil.which", return_value=None):
         opts = config.to_session_options()
     assert "tools" not in opts
+
+
+def test_config_to_session_options_uses_custom_node_path() -> None:
+    from copex.config import CopexConfig
+
+    config = CopexConfig(js_repl=True, js_repl_node_path="/custom/node")
+    fake_tool = MagicMock(name="js_repl_tool")
+    with (
+        patch("copex.sdk_tools.register_js_repl_tools", return_value=True) as mock_register,
+        patch("copex.sdk_tools.build_domain_tools", return_value=[fake_tool]) as mock_build,
+    ):
+        opts = config.to_session_options()
+
+    mock_register.assert_called_once_with("/custom/node")
+    mock_build.assert_called_once()
+    assert opts["tools"] == [fake_tool]
+
+
+def test_config_to_session_options_rejects_missing_custom_node_path() -> None:
+    from copex.config import CopexConfig
+
+    config = CopexConfig(js_repl=True, js_repl_node_path="/missing/node")
+    with patch("copex.sdk_tools.register_js_repl_tools", return_value=False):
+        with pytest.raises(ValueError, match="js_repl_node_path"):
+            config.to_session_options()
 
 
 # --------------------------------------------------------------------------
@@ -486,6 +528,18 @@ async def test_manager_reset_timeout() -> None:
         await mgr.stop()
 
 
+@pytest.mark.asyncio
+async def test_manager_start_surfaces_stderr_when_kernel_exits_immediately() -> None:
+    proc = FakeProcess(stderr_output=b"SyntaxError: bad import\n")
+    proc.returncode = 1
+    mgr = JSReplManager(node_path="/usr/bin/node")
+
+    with patch("copex.js_repl.asyncio.create_subprocess_exec", new_callable=AsyncMock) as mock_exec:
+        mock_exec.return_value = proc
+        with pytest.raises(JSReplError, match="SyntaxError: bad import"):
+            await mgr.start()
+
+
 # --------------------------------------------------------------------------
 # JSReplManager - stop with stubborn process (kill path)
 # --------------------------------------------------------------------------
@@ -498,8 +552,6 @@ async def test_manager_stop_kills_on_timeout() -> None:
     mgr = JSReplManager(node_path="/usr/bin/node")
 
     # Make wait() hang so it times out
-    original_wait = proc.wait
-
     async def _slow_wait() -> int:
         await asyncio.sleep(60)
         return 0
@@ -580,6 +632,8 @@ class NonJsonFakeProcess(FakeProcess):
 
         async def _readline() -> bytes:
             nonlocal idx
+            while self._write_count == 0:
+                await asyncio.sleep(0)
             if idx < len(lines):
                 data = lines[idx]
                 idx += 1
@@ -641,7 +695,6 @@ async def test_reader_loop_handles_eof_and_fails_pending() -> None:
         # Reader loop already exited — stop will clean up pending
         await mgr.stop()
 
-
 # --------------------------------------------------------------------------
 # Tool handler edge cases
 # --------------------------------------------------------------------------
@@ -676,6 +729,19 @@ def test_js_repl_tool_handler_console_and_result(tmp_path: Path) -> None:
     assert result["resultType"] == "success"
     assert "log line" in result["textResultForLlm"]
     assert "3" in result["textResultForLlm"]
+
+
+def test_js_repl_tool_handler_uses_custom_node_path(tmp_path: Path) -> None:
+    mock_manager = MagicMock()
+    mock_manager.execute = AsyncMock(
+        return_value={"result": "42", "error": None, "console": []}
+    )
+
+    with patch("copex.sdk_tools._get_js_repl_manager", return_value=mock_manager) as mock_get:
+        tool = _build_js_repl_tool(tmp_path, node_path="/custom/node")
+        run(tool.handler(_invocation({"code": "21 * 2"})))
+
+    mock_get.assert_called_once_with("/custom/node")
 
 
 def test_js_repl_tool_handler_error_with_console(tmp_path: Path) -> None:
