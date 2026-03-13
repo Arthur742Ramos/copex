@@ -20,8 +20,6 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 
-logger = logging.getLogger(__name__)
-
 from prompt_toolkit import PromptSession
 from prompt_toolkit.completion import Completer, Completion
 from prompt_toolkit.formatted_text import FormattedText
@@ -34,6 +32,8 @@ from rich.markdown import Markdown
 from rich.text import Text
 
 from copex.ui import print_approval_diff, print_approval_summary
+
+logger = logging.getLogger(__name__)
 
 if TYPE_CHECKING:
     from prompt_toolkit.completion import CompleteEvent

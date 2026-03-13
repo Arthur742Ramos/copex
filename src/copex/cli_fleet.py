@@ -1165,7 +1165,7 @@ async def _run_fleet(
         _progress_thread = threading.Thread(target=_progress_worker, daemon=True)
         _progress_thread.start()
 
-    worktree_managers: dict[str, "WorktreeManager"] = {}
+    worktree_managers: dict[str, WorktreeManager] = {}
     results: list[Any] = []
     try:
         # ── Worktree isolation setup ───────────────────────────────────
